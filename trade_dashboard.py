@@ -1338,6 +1338,12 @@ _DEFAULT_SETTINGS = {
     "disbalance_alert_telegram": True,
     "disbalance_alert_email": True,
     "disbalance_alert_period_sec": 30,
+    # Trading Parameters (execution timeout / retry)
+    "exec_timeout_sec": 60,
+    "exec_alert_on_timeout": False,
+    "exec_halt_on_timeout": False,
+    "exec_retry_close": False,
+    "exec_retry_max": 5,
 }
 
 # ─── PnL Request State ──────────────────────────────────────────────────────
@@ -7576,6 +7582,33 @@ def api_update_settings():
             dashboard_settings["prompt_on_rollbacks"] = bool(data["prompt_on_rollbacks"])
         if "ea_poll_enabled" in data:
             dashboard_settings["ea_poll_enabled"] = bool(data["ea_poll_enabled"])
+        if "disbalance_alert_enabled" in data:
+            dashboard_settings["disbalance_alert_enabled"] = bool(data["disbalance_alert_enabled"])
+        if "disbalance_alert_email" in data:
+            dashboard_settings["disbalance_alert_email"] = bool(data["disbalance_alert_email"])
+        if "disbalance_alert_telegram" in data:
+            dashboard_settings["disbalance_alert_telegram"] = bool(data["disbalance_alert_telegram"])
+        if "disbalance_alert_period_sec" in data:
+            try:
+                dashboard_settings["disbalance_alert_period_sec"] = max(5, int(data["disbalance_alert_period_sec"]))
+            except (ValueError, TypeError):
+                pass
+        if "exec_timeout_sec" in data:
+            try:
+                dashboard_settings["exec_timeout_sec"] = max(5, float(data["exec_timeout_sec"]))
+            except (ValueError, TypeError):
+                pass
+        if "exec_alert_on_timeout" in data:
+            dashboard_settings["exec_alert_on_timeout"] = bool(data["exec_alert_on_timeout"])
+        if "exec_halt_on_timeout" in data:
+            dashboard_settings["exec_halt_on_timeout"] = bool(data["exec_halt_on_timeout"])
+        if "exec_retry_close" in data:
+            dashboard_settings["exec_retry_close"] = bool(data["exec_retry_close"])
+        if "exec_retry_max" in data:
+            try:
+                dashboard_settings["exec_retry_max"] = max(1, int(data["exec_retry_max"]))
+            except (ValueError, TypeError):
+                pass
         _save_settings()
         return jsonify({"ok": True})
     except Exception as e:

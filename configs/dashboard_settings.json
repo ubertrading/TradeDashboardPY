@@ -1,4 +1,8 @@
 {
+  "disbalance_alert_email": true,
+  "disbalance_alert_enabled": false,
+  "disbalance_alert_period_sec": 30,
+  "disbalance_alert_telegram": true,
   "ea_poll_enabled": false,
   "email": {
     "enabled": false,
