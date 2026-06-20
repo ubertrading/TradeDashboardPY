@@ -1,0 +1,63 @@
+{
+  "DEMO-MT5-52769010": {
+    "login": "52769010",
+    "password": "g!W39@d$2aNoXs",
+    "server": "207.246.127.101",
+    "port": 443,
+    "auto_connect_start": true,
+    "lot_multiplier": 100000,
+    "slippage": 3,
+    "magic_number": 777888,
+    "label": "DEMO-MT5-52769010",
+    "cycle_reminder_enabled": false,
+    "cycle_reminder_days": 1,
+    "cycle_max_days": 2,
+    "auto_cycle_enabled": false,
+    "type": "mt5",
+    "alert_telegram": "DEMO2uotdK"
+  },
+  "73201770": {
+    "label": "73201770",
+    "auto_connect_start": false,
+    "port": 443,
+    "server": "185.96.245.205",
+    "password": "Pass1234!",
+    "type": "mt4",
+    "slippage": 3,
+    "magic_number": 777888,
+    "login": "73201770",
+    "alert_email": null,
+    "alert_telegram": null,
+    "lot_multiplier": 100000
+  },
+  "DEMO-MT4-1218954455": {
+    "login": "1218954455",
+    "password": "np4usgg",
+    "server": "176.56.182.232",
+    "port": 443,
+    "auto_connect_start": true,
+    "lot_multiplier": 100000,
+    "slippage": 3,
+    "magic_number": 777888,
+    "label": "DEMO-MT4-1218954455",
+    "cycle_reminder_enabled": false,
+    "cycle_reminder_days": 4,
+    "cycle_max_days": 5,
+    "auto_cycle_enabled": false,
+    "type": "mt4"
+  },
+  "2110248": {
+    "label": "2110248",
+    "auto_connect_start": false,
+    "port": 443,
+    "server": "79.127.198.116",
+    "password": "Pass1234!",
+    "type": "mt4",
+    "slippage": 3,
+    "magic_number": 777888,
+    "login": "2110248",
+    "alert_email": null,
+    "alert_telegram": null,
+    "lot_multiplier": 100000
+  }
+}

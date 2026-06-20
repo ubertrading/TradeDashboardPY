@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>MtBridgeService</AssemblyName>
+    <RootNamespace>MtBridgeService</RootNamespace>
+  </PropertyGroup>
+
+  <!-- MT4/MT5 .NET API DLLs from shared MT-DLLS folder -->
+  <ItemGroup>
+    <Reference Include="MT4ServerAPI">
+      <HintPath>..\MT-DLLS\MT4ServerAPI.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="mt5api">
+      <HintPath>..\MT-DLLS\mt5api.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

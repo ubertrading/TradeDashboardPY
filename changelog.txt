@@ -1,0 +1,70 @@
+260620
+I want to add an alert for disbalance in hedge detected.
+
+It should check first the global NET lots (at bottom of Accounts tab).
+It should make sure that this confirms over course of say 20-30 seconds (or in case of refresh period being 2s would be 10-15 refresh cycles). Make this period user defineable.
+
+If after the confirmation period is passed and it is still disbalanced and global net lots not 0 then it should next check the sub groups (the groupings based on first portion of the account IDs delimited by a "-" -  eg HUGO-01-B-ICM235235 that would be "HUGO") and find which one has the disbalance. 
+It should then look at subgroupings and attempt to find which subgroup is disbalanced. The subgroup ID includes the second portion that is "-" delimited. In the example above it would be "HUGO-01". This is usually 2 accounts but may be more than 2. 
+It should then check if all associated accounts are connected.
+
+Collect the account names associated.
+If some are not connected then send a telegram alert that "Possible Disbalance Detected: Hedge group XXX and associated accounts YYY,ZZZ etc possibly disbalanced by NN lots. "
+Include total lots and symbol breakdown for each account in the alert report. But also add "Accounts <list accounts> are not connected. please connect to verify hedge"
+
+If all are not connected then send a telegram alert that "Disbalance Detected: Hedge group XXX and associated accounts YYY,ZZZ etc are disbalanced by NN lots. "
+Include total lots and symbol breakdown for each account in the alert report.
+
+Add this to the Settings tab in separate section.
+Add option checkboxes for telegram, email alerts
+---------------------
+Hedge Disbalance Detection Alert Implementation
+The Hedge Disbalance Detection feature has been fully implemented into the Trading Dashboard, providing automated monitoring of hedge integrity across all connected accounts.
+
+Changes Made
+1. Configuration Settings
+Added new configurable settings to the dashboard's persistent state:
+
+disbalance_alert_enabled: Toggles the feature on/off.
+disbalance_alert_period_sec: The confirmation period in seconds (default 30s) before an alert is triggered.
+disbalance_alert_email: Toggles email delivery.
+disbalance_alert_telegram: Toggles Telegram delivery.
+2. Disbalance Detection Loop (_disbalance_alert_loop)
+Introduced a dedicated background thread that runs every 2 seconds to perform the disbalance checks:
+
+Global Net Lots Check: Sums the buy and sell volumes across all instruments and all connected accounts in ea_account_info. If the absolute net volume exceeds 0.001, a timer starts.
+Confirmation Period: If the global disbalance persists for longer than the configured period, it triggers the subgroup analysis.
+Subgroup Analysis:
+Groups accounts by their hedge group identifier (e.g., HUGO-01).
+Calculates the net lots specifically for each subgroup.
+Determines the connection status of all expected accounts in the subgroup (checking EA heartbeats, FIX manager, and MT Direct connection status).
+Alert Generation: Constructs an alert payload highlighting the subgroup, the calculated net lots, and a per-account breakdown of positions.
+If any account in the subgroup is disconnected, the alert is prefixed with "Possible Disbalance Detected" and includes a warning message listing the disconnected accounts.
+If all accounts are connected, it sends a standard "Disbalance Detected" alert.
+Cooldown: Added a 5-minute cooldown per subgroup to prevent alert spam.
+3. Frontend Dashboard Updates
+Updated the Settings tab in the UI:
+
+Added a new section: 🚨 Hedge Disbalance Alert.
+Inserted toggles for Enable/Disable, Email, and Telegram.
+Inserted a number input for adjusting the Confirmation Period (seconds).
+Implemented the necessary JavaScript functions (toggleDisbalanceSuboptions, saveDisbalanceAlert, saveDisbalanceSuboption) to persist these settings via the /api/settings endpoint.
+Validation Results
+The syntax checker (python -m py_compile) confirms that the Python logic is syntactically correct.
+The new settings integrate natively into the existing dashboard settings serialization and deserialization flow, ensuring backward compatibility with existing configurations.
+Implementing Hedge Disbalance Alerts
+I have completed the execution of the implementation plan and successfully integrated the Hedge Disbalance Detection feature into your dashboard.
+
+Summary of Changes:
+Background Loop (_disbalance_alert_loop): I've added a dedicated thread that runs silently in the background. It continuously monitors the global NET lots sum across all connected accounts.
+Confirmation Period & Thresholds: If the global net lots diverge from zero (> 0.001 tolerance to ignore floating-point dust) for the user-defined duration (e.g., 30 seconds), it automatically runs a subgroup analysis.
+Subgroup Splitting: The algorithm intelligently maps configured accounts into their subgroup roots (e.g., grouping HUGO-01-B-ICM235235 and HUGO-01-A-ICM235235 into the HUGO-01 subgroup). It checks connection heartbeats to determine if any of the associated accounts are disconnected.
+Alert Dispatching: It formats the alert correctly, indicating either "Disbalance Detected" or "Possible Disbalance Detected" depending on whether some expected subgroup accounts are disconnected. Account breakdowns and pair-level lot discrepancies are included in the Telegram/Email messages.
+UI Settings: The "Settings" tab in your frontend now houses the new Hedge Disbalance Alert section right below the Position Change Alert section. You can toggle the feature, select Email/Telegram delivery modes, and tune the Confirmation Period directly from the UI.
+I've documented the changes completely in the newly generated walkthrough.md artifact. Please let me know if you would like to test this feature out or if you need any adjustments to the default alert formatting!
+
+Implementation Plan
+Task
+Walkthrough
+trade_dashboard.py
+9:51 AM

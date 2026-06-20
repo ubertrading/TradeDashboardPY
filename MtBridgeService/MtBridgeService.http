@@ -1,0 +1,6 @@
+@MtBridgeService_HostAddress = http://localhost:5161
+
+GET {{MtBridgeService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

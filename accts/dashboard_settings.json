@@ -1,0 +1,41 @@
+{
+  "ea_poll_enabled": true,
+  "email": {
+    "enabled": false,
+    "from_addr": "newstrade.alerts2@gmail.com",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_pass": "jranstszvkvvqiet",
+    "smtp_port": 465,
+    "smtp_user": "newstrade.alerts2@gmail.com",
+    "to_addr": "ubertrading@gmail.com"
+  },
+  "fee_keywords_per_name": {},
+  "fee_thresholds": {
+    "1218954455": 0.0,
+    "52769010": 0.0,
+    "MT4-DIRECT-1218954455": 0.0,
+    "MT5-DIRECT-52769010": 0.0
+  },
+  "margin_alert_threshold": 85,
+  "margin_alert_thresholds": {
+    "DEMO-CT-OPENAPI-9040256": 80.0
+  },
+  "position_change_alert": true,
+  "position_change_closed": true,
+  "position_change_opened": false,
+  "prompt_on_rollbacks": false,
+  "rebalance_close_delay": 1.0,
+  "stats_log_accounts": [
+    "52769010"
+  ],
+  "swap_alert_enabled": true,
+  "swap_alert_instruments": "AUDCHF,AUDJPY,GBPJPY,USDJPY,USDCHF,GBPCHF,USDCHF.b,GBPCHF.b",
+  "swap_alert_interval_min": 60,
+  "swap_alert_pct": 2.0,
+  "telegram": {
+    "bot_token": "8774851852:AAErEzzinXp9GJ4H12ICnOltp0LNys5jeeA",
+    "chat_id": "6838817529",
+    "enabled": true
+  },
+  "theme_colors": {}
+}
