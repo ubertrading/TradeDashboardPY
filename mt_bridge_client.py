@@ -775,7 +775,7 @@ class MtBridgeManager:
 
                     # Ensure symbol is subscribed
                     side_info = sides[account_id]
-                    pair = (side_info.get("pair") or session.get("pair", "")).upper()
+                    pair = (side_info.get("pair") or session.get("pair", "")).strip()
                     if pair:
                         direct_acct.subscribe_symbol(pair)
 
@@ -826,7 +826,7 @@ class MtBridgeManager:
                                        session.get("cycle_progress", {}).get("phase") == "open")
                     if result != "rollback" and result != "cycle_close" and not is_cycle_reopen:
                         current_spread = None
-                        session_pair = pair.upper() if pair else ""
+                        session_pair = pair
                         acct_obj = self.accounts.get(account_id)
 
                         # Query real-time quote via bridge quote cache

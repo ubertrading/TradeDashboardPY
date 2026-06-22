@@ -4043,10 +4043,14 @@ def update_session(session_id):
             # Apply per-side pair, lot_size, and max_spread from edit modal
             # Map side1/side2 to accounts using side_number (not dict key order!)
             side_to_acc = {}
+            fallback_idx = 1
             for acc, info in s["sides"].items():
                 sn = info.get("side_number")
-                if sn is not None:
-                    side_to_acc[sn] = acc
+                if sn is None:
+                    sn = fallback_idx
+                    info["side_number"] = sn  # Backfill missing side_number
+                side_to_acc[sn] = acc
+                fallback_idx += 1
             for side_num in (1, 2):
                 acc = side_to_acc.get(side_num)
                 if not acc:
@@ -4056,8 +4060,11 @@ def update_session(session_id):
                 sl = data.get(f"{side_key}_lot_size")
                 sms = data.get(f"{side_key}_max_spread")
                 sc = data.get(f"{side_key}_comment")
+                sa = data.get(f"{side_key}_action")
                 if sp is not None:
                     s["sides"][acc]["pair"] = sp.strip() if sp else s["pair"]
+                if sa is not None:
+                    s["sides"][acc]["action"] = sa
                 if sl is not None:
                     s["sides"][acc]["lot_size"] = float(sl) if sl != "" else s["lot_size"]
                 if sms is not None:
@@ -8670,6 +8677,13 @@ body {
       <div class="side-box" id="editSide1Box" style="display:none;">
         <h3 id="editSide1Title">Side 1</h3>
         <div class="form-group">
+          <label>Action</label>
+          <select id="eSide1Action">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label>Symbol</label>
           <input type="text" id="eSide1Pair" placeholder="same as global">
         </div>
@@ -8688,6 +8702,13 @@ body {
       </div>
       <div class="side-box" id="editSide2Box" style="display:none;">
         <h3 id="editSide2Title">Side 2</h3>
+        <div class="form-group">
+          <label>Action</label>
+          <select id="eSide2Action">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
         <div class="form-group">
           <label>Symbol</label>
           <input type="text" id="eSide2Pair" placeholder="same as global">
@@ -11204,19 +11225,22 @@ function editSession(id) {
 
   // Populate per-side pair/lots in edit modal
   const sides = s.sides || {};
-  let sideIdx = 0;
+  let fallbackIdx = 0;
   for (const [acc, info] of Object.entries(sides)) {
-    sideIdx++;
-    if (sideIdx === 1) {
+    fallbackIdx++;
+    const sideNum = info.side_number || fallbackIdx;
+    if (sideNum === 1) {
       document.getElementById('editSide1Box').style.display = '';
       document.getElementById('editSide1Title').textContent = 'Side 1 — ' + acc;
+      document.getElementById('eSide1Action').value = info.action || 'buy';
       document.getElementById('eSide1Pair').value = (info.pair && info.pair !== s.pair) ? info.pair : '';
       document.getElementById('eSide1Lots').value = (info.lot_size != null && info.lot_size !== s.lot_size) ? info.lot_size : '';
       document.getElementById('eSide1MaxSpread').value = (info.max_spread != null && info.max_spread !== s.max_spread_points) ? info.max_spread : '';
       document.getElementById('eSide1Comment').value = info.comment || '';
-    } else if (sideIdx === 2) {
+    } else if (sideNum === 2) {
       document.getElementById('editSide2Box').style.display = '';
       document.getElementById('editSide2Title').textContent = 'Side 2 — ' + acc;
+      document.getElementById('eSide2Action').value = info.action || 'sell';
       document.getElementById('eSide2Pair').value = (info.pair && info.pair !== s.pair) ? info.pair : '';
       document.getElementById('eSide2Lots').value = (info.lot_size != null && info.lot_size !== s.lot_size) ? info.lot_size : '';
       document.getElementById('eSide2MaxSpread').value = (info.max_spread != null && info.max_spread !== s.max_spread_points) ? info.max_spread : '';
@@ -11243,10 +11267,12 @@ async function saveEdit() {
 
     execution_order: document.getElementById('eExecOrder').value,
     comment: document.getElementById('eComment').value.trim(),
+    side1_action: document.getElementById('eSide1Action').value,
     side1_pair: document.getElementById('eSide1Pair').value.trim(),
     side1_lot_size: document.getElementById('eSide1Lots').value ? parseFloat(document.getElementById('eSide1Lots').value) : '',
     side1_max_spread: document.getElementById('eSide1MaxSpread').value ? parseInt(document.getElementById('eSide1MaxSpread').value) : '',
     side1_comment: document.getElementById('eSide1Comment').value.trim(),
+    side2_action: document.getElementById('eSide2Action').value,
     side2_pair: document.getElementById('eSide2Pair').value.trim(),
     side2_lot_size: document.getElementById('eSide2Lots').value ? parseFloat(document.getElementById('eSide2Lots').value) : '',
     side2_max_spread: document.getElementById('eSide2MaxSpread').value ? parseInt(document.getElementById('eSide2MaxSpread').value) : '',
