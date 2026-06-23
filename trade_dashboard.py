@@ -728,19 +728,29 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
             
         total_group_equity = total_equity_a + total_equity_b
         
-        # 3. Apply optimal fund allocation formula
-        # Ea / Eb = (lev_b * (1.0 - stop_out_b)) / (lev_a * (1.0 - stop_out_a))
-        denom = (lev_a * (1.0 - stop_out_a)) + (lev_b * (1.0 - stop_out_b))
-        if denom > 0:
-            alloc_pct_a = (lev_b * (1.0 - stop_out_b)) / denom
-        else:
-            if lev_a + lev_b > 0:
-                alloc_pct_a = lev_b / (lev_a + lev_b)
-            else:
-                alloc_pct_a = 0.5
-                
-        alloc_pct_b = 1.0 - alloc_pct_a
+        # 3. Apply optimal fund allocation formula based on Simulated Risk Buffer
+        # We calculate theoretical margin for 1 unit of volume
+        m_a = 1.0 / lev_a if lev_a > 0 else 0
+        m_b = 1.0 / lev_b if lev_b > 0 else 0
         
+        # Stop-out equity required for 1 unit
+        so_eq_a = m_a * stop_out_a
+        so_eq_b = m_b * stop_out_b
+        
+        # Apply a proportional risk buffer (0.35 yields roughly 3:1 for 100:1 @ 80% vs 1000:1 @ 50%)
+        buffer_factor = 0.35
+        risk_buffer = max(m_a, m_b) * buffer_factor
+        
+        target_eq_a = so_eq_a + risk_buffer
+        target_eq_b = so_eq_b + risk_buffer
+        
+        if (target_eq_a + target_eq_b) > 0:
+            alloc_pct_a = target_eq_a / (target_eq_a + target_eq_b)
+            alloc_pct_b = 1.0 - alloc_pct_a
+        else:
+            alloc_pct_a = 0.5
+            alloc_pct_b = 0.5
+            
         optimal_equity_a = total_group_equity * alloc_pct_a
         optimal_equity_b = total_group_equity * alloc_pct_b
         
