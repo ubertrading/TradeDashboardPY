@@ -846,21 +846,7 @@ public class MtAccount
                         _profit = _mt5.AccountProfit;
                         _leverage = (int)acct.Leverage;
 
-                        // Check if direct properties are stale (async update delay after connection)
-                        if (_profit == 0.0 && _equity == _balance && _positions.Count > 0)
-                        {
-                            double calcProfit = 0;
-                            foreach (var pos in _positions.Values)
-                            {
-                                calcProfit += pos.Profit + pos.Swap;
-                            }
-                            if (calcProfit != 0.0)
-                            {
-                                _profit = calcProfit;
-                                _equity = _balance + calcProfit;
-                                _freeMargin = _equity - _margin;
-                            }
-                        }
+                        // Note: Stale data handling is now done below for both MT4 and MT5
                     }
                 }
                 else if (_mt4 != null)
@@ -871,6 +857,31 @@ public class MtAccount
                     _freeMargin = _mt4.AccountFreeMargin;
                     _profit = _mt4.AccountProfit;
                     _leverage = _mt4.AccountLeverage;
+                }
+
+                // STALE DATA / GLITCH HANDLING (Applies to both MT4 and MT5)
+                // MT API occasionally returns stale values (e.g. equity=0, or profit=0 when there are positions).
+                // Or sometimes equity exactly equals balance despite having open positions.
+                if ((Math.Abs(_profit) < 0.001 || Math.Abs(_equity) < 0.001 || Math.Abs(_equity - _balance) < 0.001) && _positions.Count > 0)
+                {
+                    double manualProfit = 0;
+                    lock (_posLock)
+                    {
+                        foreach (var p in _positions.Values)
+                        {
+                            manualProfit += p.Profit + p.Swap;
+                        }
+                    }
+                    // Only override if manualProfit is non-zero to avoid zeroing out legit data, OR if equity is totally missing (0)
+                    if (Math.Abs(manualProfit) > 0.001 || Math.Abs(_equity) < 0.001)
+                    {
+                        _profit = manualProfit;
+                        if (_balance > 0.001) 
+                        {
+                            _equity = _balance + manualProfit;
+                            _freeMargin = _equity - _margin;
+                        }
+                    }
                 }
             }
             catch (Exception ex)

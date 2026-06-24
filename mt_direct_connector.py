@@ -921,7 +921,7 @@ class MT4DirectAccount:
             # the quote currency (e.g. CHF for USDCHF on a EUR account).
             bal = info.get("balance")
             eq  = info.get("equity")
-            if bal is not None and eq is not None:
+            if bal is not None and eq is not None and eq > 0 and bal > 0:
                 # equity - balance matches what the MT4 terminal displays as floating P&L
                 # (already includes swap). Do NOT subtract credit — the terminal does not.
                 info["total_pnl"] = round(eq - bal, 2)
@@ -2154,7 +2154,7 @@ class MT5DirectAccount:
                 else:
                     bal = info.get("balance")
                     eq  = info.get("equity")
-                    if bal is not None and eq is not None:
+                    if bal is not None and eq is not None and eq > 0 and bal > 0:
                         info["total_pnl"] = round(eq - bal, 2)
                     else:
                         info["total_pnl"] = round(sum(o.get('Profit', 0) for o in orders), 2)

@@ -1,0 +1,237 @@
+1453: # ─── PnL Request State ──────────────────────────────────────────────────────
+1454: pnl_requests = {}  # request_id -> {id, name, accounts, from_date, to_date, fee_keywords, status, results, created_ts}
+5040: # ── Inject pending PnL request for this account ──
+5041: for rid, preq in pnl_requests.items():
+5045: idle_resp["pnl_request"] = {
+7224: # ─── PnL Report API ─────────────────────────────────────────────────────────
+7226: @app.route('/api/pnl/request', methods=['POST'])
+7227: def pnl_request_create():
+7228: """Create a PnL request for all accounts under a name group."""
+7306: # Capture current balance & equity for open PnL calculation
+7333: open_pnl = float(eq) - float(bal)
+7337: "unrealized_pnl": open_pnl
+7342: app.logger.warning("[PnL] Failed to capture current account states for open PnL: %s", ex)
+7345: pnl_requests[rid] = {
+7360: app.logger.info("[PnL] Created request %s for name=%s accounts=%s range=%s->%s fee_kw=%s",
+7364: # Identify accounts that can report PnL directly via their connector:
+7386: app.logger.info("[PnL] %d accounts will be serviced server-side: %s",
+7394: app.logger.warning("[PnL] %s %s disconnected — marking offline", source, acc_id)
+7395: req = pnl_requests.get(request_id)
+7398: "pnl": 0, "swap": 0, "fees": 0, "net": 0,
+7407: exclude_balance=pnl_requests.get(request_id, {}).get("exclude_balance", True))
+7409: app.logger.warning("[PnL] %s %s returned None for history — storing zero result", source, acc_id)
+7410: req = pnl_requests.get(request_id)
+7413: "pnl": 0, "swap": 0, "fees": 0, "net": 0,
+7422: req = pnl_requests.get(request_id)
+7426: pnl_val = hist.get("pnl", 0.0)
+7431: "pnl": round(pnl_val, 2),
+7434: "net": round(pnl_val + swap_val + fees_val, 2),
+7439: app.logger.info("[PnL] %s result for req=%s acct=%s pnl=%.2f swap=%.2f fees=%.2f (deals=%d)",
+7440: source, request_id, acc_id, pnl_val, swap_val, fees_val, hist.get("deal_count", 0))
+7444: app.logger.info("[PnL] MT4 lots diag for %s: %s", acc_id, lot_diag)
+7446: app.logger.info("[PnL] No lot diag (MT5 or diag missing) for %s", acc_id)
+7450: app.logger.info("[PnL] by_symbol[%s][%s] keys=%s val=%s",
+7457: app.logger.info("[PnL] Request %s complete — all %d accounts reported",
+7461: app.logger.error("[PnL] %s %s history error: %s — storing zero result", source, acc_id, e)
+7462: req = pnl_requests.get(request_id)
+7465: "pnl": 0, "swap": 0, "fees": 0, "net": 0,
+7470: req = pnl_requests.get(request_id)
+7474: app.logger.warning("[PnL] %s %s had no result after loop — filling zero", source, acc_id)
+7476: "pnl": 0, "swap": 0, "fees": 0, "net": 0,
+7482: app.logger.info("[PnL] Request %s complete after final sweep", request_id)
+7488: daemon=True, name=f"PnL-ServerSide-{rid[:8]}")
+7496: if acc in pnl_requests[rid]["results"]:
+7515: pnl_requests[rid]["results"][acc] = {
+7516: "pnl": 0, "swap": 0, "fees": 0, "net": 0,
+7523: app.logger.warning("[PnL] Skipped %d offline account(s) for request %s: %s",
+7527: req = pnl_requests[rid]
+7531: app.logger.info("[PnL] Request %s complete — all %d accounts reported (some skipped offline)",
+7536: app.logger.exception("Error creating PnL request")
+7540: @app.route('/api/pnl/status/<request_id>', methods=['GET'])
+7541: def pnl_request_status(request_id):
+7542: """Check status of a PnL request. Returns results when all accounts have reported."""
+7543: req = pnl_requests.get(request_id)
+7558: totals = {"gross_pnl": 0, "swap": 0, "fees": 0, "net_pnl": 0}
+7563: totals["gross_pnl"] += r.get("pnl", 0)
+7568: # Bridge accounts set 'net_pnl' (already gross+swap+fees); use it directly.
+7569: # MT direct accounts have separate pnl/swap/fees fields — sum them here.
+7570: if "net_pnl" in sv:
+7571: sym_net = sv["net_pnl"]
+7573: sym_net = (sv.get("pnl", 0) or 0) + (sv.get("swap", 0) or 0) + (sv.get("fees", 0) or 0)
+7580: totals["net_pnl"] = totals["gross_pnl"] + totals["swap"] + totals["fees"]
+7590: "pnl":        net_val,
+7592: "pnl_per_lot": round(net_val / hedge_lots, 2) if hedge_lots > 0 else 0.0,
+7613: @app.route('/api/pnl/result', methods=['POST'])
+7614: def pnl_result_submit():
+7615: """EA submits PnL results for a request."""
+7620: pnl_val = float(data.get("pnl", 0.0))
+7628: req = pnl_requests.get(request_id)
+7637: "pnl": round(pnl_val, 2),
+7640: "net": round(pnl_val + swap_val + fees_val, 2),
+7644: app.logger.info("[PnL] Result for req=%s acct=%s pnl=%.2f swap=%.2f fees=%.2f",
+7645: request_id, account, pnl_val, swap_val, fees_val)
+7651: app.logger.info("[PnL] Request %s complete — all %d accounts reported", request_id, len(req["accounts"]))
+7655: app.logger.exception("Error processing PnL result")
+8176: /* PnL Modal Custom Styles */
+8177: #pnlModalDialog {
+8180: #pnlModalDialog.maximized {
+8385: <th data-acol="7">PnL</th>
+10035: {idx:'7', name:'PnL'}, {idx:'8', name:'Leverage'}, {idx:'9', name:'Positions'}, {idx:'10', name:'Lots'},
+10408: const buyPnL = (buyBid - buyFillPrice) * pipMult;
+10409: const sellPnL = (sellFillPrice - sellAsk) * pipMult;
+10410: profit = Math.round((buyPnL + sellPnL) * 10) / 10;
+10529: const buyPnL = (buyCloseP - buyOpenP) * pipMult;
+10530: const sellPnL = (sellOpenP - sellCloseP) * pipMult;
+10531: profit = Math.round((buyPnL + sellPnL) * 10) / 10;
+12058: '<td style="text-align:right;"><button class="btn btn-sm" style="padding:2px 10px;font-size:0.72rem;background:var(--accent);color:#fff;border:none;cursor:pointer;" onclick="event.stopPropagation();openPnlModal(\'' + name + '\')">📊 PnL</button></td>' +
+12850: const pnl1 = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
+12851: const pnl1Style = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+12870: <td style="${pnl1Style}">${pnl1}</td>
+12913: const pnlMt = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
+12914: const pnlMtStyle = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+12933: <td style="${pnlMtStyle}">${pnlMt}</td>
+13067: let totBal = 0, totEq = 0, totPnl = 0, totLots = 0, totSwap = 0;
+13070: let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false;
+13083: const rp = info.total_pnl != null ? parseFloat(info.total_pnl) : NaN;
+13084: if (!isNaN(rp)) { totPnl += rp; hasPnl = true; }
+13101: const fmtPnl = hasPnl ? totPnl.toFixed(2) : '-';
+13102: const pnlStyle = hasPnl ? (totPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+13127: <td style="${pnlStyle}">${fmtPnl}</td>
+13182: let gBal = 0, gEq = 0, gPnl = 0, gLots = 0, gSwap = 0, gPosLots = 0, gNegLots = 0;
+13183: let gHasBal = false, gHasEq = false, gHasPnl = false, gHasLots = false, gHasSwap = false;
+13193: let sumBal = 0, sumEq = 0, sumPnl = 0, sumLots = 0, sumSwap = 0;
+13195: let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false, hasPos = false;
+13229: // PnL
+13230: const rp = info.total_pnl != null ? parseFloat(info.total_pnl) : NaN;
+13231: if (!isNaN(rp)) { sumPnl += rp; hasPnl = true; }
+13271: if (hasPnl) { gPnl += sumPnl; gHasPnl = true; }
+13283: const fPnl = hasPnl ? sumPnl.toFixed(2) : '-';
+13284: const pnlColor = hasPnl ? (sumPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+13337: <td style="${pnlColor}">${fPnl}</td>
+13353: const fGPnl = gHasPnl ? gPnl.toFixed(2) : '-';
+13354: const gPnlStyle = gHasPnl ? (gPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+13377: <td style="${gPnlStyle}">${fGPnl}</td>
+14238: // and the interval firing mid-connect would read an intermediate PnL=0 state.
+14440: // ── PnL Report Functions ──
+14441: let _pnlCurrentName = '';
+14442: let _pnlRequestId = '';
+14443: let _pnlPollTimer = null;
+14444: let _pnlLastData = null;  // cached last completed PnL response for pair breakdown popup
+14446: function openPnlModal(name) {
+14447: _pnlCurrentName = name;
+14448: document.getElementById('pnlModalTitle').textContent = '📊 PnL Report — ' + name;
+14453: document.getElementById('pnlToDate').value = now.toISOString().split('T')[0];
+14454: document.getElementById('pnlFromDate').value = sunday.toISOString().split('T')[0];
+14455: const savedFeeKw = localStorage.getItem('tradeDash_pnlFeeKeywords');
+14456: document.getElementById('pnlFeeKeywords').value = savedFeeKw !== null ? savedFeeKw : 'fee,fees';
+14457: document.getElementById('pnlForm').style.display = '';
+14458: document.getElementById('pnlStatus').style.display = 'none';
+14459: document.getElementById('pnlResults').style.display = 'none';
+14460: document.getElementById('pnlModal').style.display = 'flex';
+14463: function closePnlModal() {
+14464: document.getElementById('pnlModal').style.display = 'none';
+14465: const dialog = document.getElementById('pnlModalDialog');
+14468: const btn = document.getElementById('pnlMaximizeBtn');
+14474: if (_pnlPollTimer) { clearInterval(_pnlPollTimer); _pnlPollTimer = null; }
+14477: function togglePnlMaximize() {
+14478: const dialog = document.getElementById('pnlModalDialog');
+14479: const btn = document.getElementById('pnlMaximizeBtn');
+14492: function exportPnlHtmlReport() {
+14493: const data = _pnlLastData;
+14518: const includeUnrealized = document.getElementById('pnlIncludeUnrealized').checked;
+14522: {key: 'pnl', label: 'Realized PnL'},
+14527: metrics.push({key: 'unrealized', label: 'Unrealized PnL'});
+14539: v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14551: const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
+14557: // Net PnL row
+14558: tableBody += '<tr style="border-top:2px solid #6c5ce7;font-weight:700;background:#1e212f;"><td>Net PnL</td>';
+14566: v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14572: let nt = totals.net_pnl || netTotal;
+14577: totUnrealized += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14590: <div class="section-title">📊 PnL Breakdown by Symbol</div>
+14595: <th class="text-right">Net PnL</th>
+14597: <th class="text-right">PnL / Lot</th>
+14602: let totPnl = 0, totLots = 0;
+14605: totPnl += s.pnl || 0;
+14610: <td class="text-right" style="${clrStyle(s.pnl)}">${fmt(s.pnl)}</td>
+14612: <td class="text-right" style="font-weight:600;${clrStyle(s.pnl_per_lot)}">${fmt(s.pnl_per_lot)}</td>
+14616: const totalPpl = totLots > 0 ? totPnl / totLots : 0;
+14620: <td class="text-right" style="${clrStyle(totPnl)}">${fmt(totPnl)}</td>
+14634: <title>PnL Report - ${name}</title>
+14728: <h1>📊 PnL Report — ${name}</h1>
+14752: Trade Execution Dashboard &bull; PnL Reporting Suite
+14762: link.setAttribute('download', `PnL_Report_${name}_${fromDate}_${toDate}.html`);
+14768: async function requestPnl() {
+14769: const fromDate = document.getElementById('pnlFromDate').value;
+14770: const toDate = document.getElementById('pnlToDate').value;
+14771: const feeKw = document.getElementById('pnlFeeKeywords').value.trim();
+14772: localStorage.setItem('tradeDash_pnlFeeKeywords', document.getElementById('pnlFeeKeywords').value);
+14774: document.getElementById('pnlSubmitBtn').disabled = true;
+14776: const body = { name: _pnlCurrentName, from_date: fromDate, to_date: toDate,
+14777: exclude_balance: document.getElementById('pnlExcludeBalance').checked };
+14779: const resp = await fetch('/api/pnl/request', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+14782: _pnlRequestId = data.request_id;
+14783: document.getElementById('pnlForm').style.display = 'none';
+14784: document.getElementById('pnlStatus').style.display = '';
+14785: document.getElementById('pnlResults').style.display = 'none';
+14786: document.getElementById('pnlSpinner').textContent = '⏳ Waiting for accounts to report...';
+14787: document.getElementById('pnlProgress').textContent = '0 / ' + data.accounts.length + ' accounts reported';
+14789: _pnlPollTimer = setInterval(() => pollPnlStatus(), 2000);
+14791: document.getElementById('pnlSubmitBtn').disabled = false;
+14795: async function pollPnlStatus() {
+14796: if (!_pnlRequestId) return;
+14798: const resp = await fetch('/api/pnl/status/' + _pnlRequestId);
+14809: document.getElementById('pnlProgress').textContent = progressText;
+14811: clearInterval(_pnlPollTimer); _pnlPollTimer = null;
+14812: document.getElementById('pnlSpinner').textContent = '✅ Report complete';
+14813: renderPnlResults(data);
+14815: } catch(e) { console.error('PnL poll error:', e); }
+14818: function renderPnlResults(data) {
+14819: _pnlLastData = data;  // cache for pair breakdown popup
+14839: document.getElementById('pnlResultsHeader').innerHTML = hdr;
+14840: const includeUnrealized = document.getElementById('pnlIncludeUnrealized').checked;
+14844: {key: 'pnl', label: 'Realized PnL'},
+14849: metrics.push({key: 'unrealized', label: 'Unrealized PnL'});
+14861: v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14873: const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
+14878: // Net PnL row — total cell always clickable to open pair breakdown popup
+14879: tbody += '<tr style="border-top:2px solid var(--accent);font-weight:700;"><td>Net PnL</td>';
+14887: v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14893: let nt = totals.net_pnl || netTotal;
+14898: totUnrealized += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+14904: + 'onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair">'
+14906: document.getElementById('pnlResultsBody').innerHTML = tbody;
+14907: document.getElementById('pnlResults').style.display = '';
+14910: // ─── PnL Pair Breakdown Popup ─────────────────────────────────────────────
+14912: const data = _pnlLastData;
+14920: '\uD83D\uDCC8 PnL by Pair \u2014 ' + (data.name || '') + (fromDate ? '  (' + fromDate + ' \u2192 ' + toDate + ')' : '');
+14939: let totPnl = 0, totLots = 0;
+14943: totPnl += s.pnl || 0;
+14947: + '<td style="color:' + clr(s.pnl) + ';text-align:right;padding:7px 10px;">' + fmt(s.pnl) + '</td>'
+14949: + '<td style="color:' + clr(s.pnl_per_lot) + ';text-align:right;font-weight:600;padding:7px 10px;">' + fmt(s.pnl_per_lot) + '</td>'
+14952: const totalPpl = totLots > 0 ? totPnl / totLots : 0;
+14955: + '<td style="color:' + clr(totPnl) + ';text-align:right;padding:8px 10px;">' + fmt(totPnl) + '</td>'
+15047: <!-- PnL Report Modal -->
+15048: <div id="pnlModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;justify-content:center;align-items:center;" onclick="if(event.target===this)closePnlModal()">
+15049: <div id="pnlModalDialog" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:75%;min-width:480px;max-width:960px;max-height:90vh;overflow:auto;box-shadow:0 20px 40px rgba(0,0,0,0.5);resize:both;position:relative;">
+15051: <h3 id="pnlModalTitle" style="margin:0;">📊 PnL Report</h3>
+15053: <button class="btn btn-sm" id="pnlMaximizeBtn" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:2px 8px;" onclick="togglePnlMaximize()" title="Maximize">🗖</button>
+15054: <button class="btn btn-sm" style="background:var(--red);color:#fff;border:none;" onclick="closePnlModal()">✕</button>
+15057: <div id="pnlForm">
+15059: <div style="flex:1"><label style="font-size:0.75rem;color:var(--text2);">FROM DATE</label><input type="date" id="pnlFromDate" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);"></div>
+15060: <div style="flex:1"><label style="font-size:0.75rem;color:var(--text2);">TO DATE</label><input type="date" id="pnlToDate" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);"></div>
+15064: <input type="text" id="pnlFeeKeywords" placeholder="Leave empty for defaults" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);">
+15068: <input type="checkbox" id="pnlExcludeBalance" checked style="width:16px;height:16px;cursor:pointer;">
+15072: <input type="checkbox" id="pnlIncludeUnrealized" checked style="width:16px;height:16px;cursor:pointer;">
+15073: Include Unrealized PNL
+15076: <button class="btn btn-primary" id="pnlSubmitBtn" onclick="requestPnl()" style="width:100%;">Generate Report</button>
+15078: <div id="pnlStatus" style="display:none;text-align:center;padding:20px;">
+15079: <div id="pnlSpinner" style="font-size:1.2rem;">⏳ Waiting for accounts to report...</div>
+15080: <div id="pnlProgress" style="color:var(--text2);margin-top:8px;"></div>
+15082: <div id="pnlResults" style="display:none;margin-top:16px;">
+15084: <button class="btn btn-sm btn-primary" onclick="exportPnlHtmlReport()" style="display:flex;align-items:center;gap:6px;">
+15089: <thead><tr id="pnlResultsHeader"></tr></thead>
+15090: <tbody id="pnlResultsBody"></tbody>
+15099: <h3 id="pairBreakdownTitle" style="margin:0;font-size:1rem;">📈 PnL by Pair</h3>
+15106: <th style="text-align:right;padding:8px 10px;border-bottom:1px solid var(--border);color:var(--text2);font-size:0.72rem;letter-spacing:.05em;">NET PNL</th>
+15108: <th style="text-align:right;padding:8px 10px;border-bottom:1px solid var(--border);color:var(--text2);font-size:0.72rem;letter-spacing:.05em;">PNL / LOT</th>

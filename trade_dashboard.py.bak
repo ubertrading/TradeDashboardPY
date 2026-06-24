@@ -830,98 +830,6 @@ def _swap_delta_loop():
 
 threading.Thread(target=_swap_delta_loop, daemon=True, name="SwapDelta").start()
 
-def _optimal_fund_email_loop():
-    """Background thread: send daily optimal fund distribution summary."""
-    while True:
-        try:
-            if not dashboard_settings.get("fund_email_enabled", True):
-                time.sleep(60)
-                continue
-
-            now = datetime.now(NY_TZ)
-            time_str = dashboard_settings.get("fund_email_time", "08:00")
-            try:
-                hour, minute = map(int, time_str.split(":"))
-            except ValueError:
-                hour, minute = 8, 0
-
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_secs = (target - now).total_seconds()
-            
-            logger.info("[FUND-EMAIL] Next daily summary email at %s (waiting %.0fs)",
-                        target.strftime("%Y-%m-%d %H:%M"), wait_secs)
-            
-            while wait_secs > 0:
-                time.sleep(min(wait_secs, 30))
-                if not dashboard_settings.get("fund_email_enabled", True):
-                    break
-                if dashboard_settings.get("fund_email_time", "08:00") != time_str:
-                    break
-                wait_secs = (target - datetime.now(NY_TZ)).total_seconds()
-            
-            if not dashboard_settings.get("fund_email_enabled", True):
-                continue
-            if dashboard_settings.get("fund_email_time", "08:00") != time_str:
-                continue
-            
-            all_info_for_dist = {}
-            for aid, ainfo in ea_account_info.items():
-                all_info_for_dist.setdefault(aid, {}).update(ainfo)
-            if 'fix_manager' in globals() and fix_manager:
-                for aid, info in fix_manager.get_status().items():
-                    all_info_for_dist.setdefault(aid, {}).update(info)
-            if 'mt_direct_manager' in globals() and mt_direct_manager:
-                for aid, info in mt_direct_manager.get_status().items():
-                    all_info_for_dist.setdefault(aid, {}).update(info)
-                    
-            distributions = _calculate_optimal_fund_distributions(all_info_for_dist)
-            
-            from collections import defaultdict
-            email_groups = defaultdict(list)
-            for aid, dist_info in distributions.items():
-                acct_cfg = _get_account_config(aid)
-                if acct_cfg and acct_cfg.get("alert_email"):
-                    emails = [e.strip() for e in acct_cfg["alert_email"].split(",") if e.strip()]
-                    for email in emails:
-                        email_groups[email].append((aid, dist_info))
-                        
-            for email, items in email_groups.items():
-                subject = f"Daily Optimal Fund Distribution Summary - {datetime.now(NY_TZ).strftime('%Y-%m-%d')}"
-                
-                body = "<html><head><style>"
-                body += "table { border-collapse: collapse; width: 100%; font-family: sans-serif; }"
-                body += "th, td { border: 1px solid #dddddd; text-align: left; padding: 8px; }"
-                body += "th { background-color: #f2f2f2; }"
-                body += "</style></head><body>"
-                body += "<h2>Daily Optimal Fund Distribution Summary</h2>"
-                body += "<table><tr><th>Account</th><th>Group</th><th>Side</th><th>Optimal Equity</th><th>Suggested Transfer</th><th>Allocation</th><th>Stop Out Level</th></tr>"
-                
-                items.sort(key=lambda x: x[1].get("group_id", ""))
-                
-                for aid, dist_info in items:
-                    body += "<tr>"
-                    body += f"<td>{aid}</td>"
-                    body += f"<td>{dist_info.get('group_id', 'N/A')}</td>"
-                    body += f"<td>{dist_info.get('side', 'N/A')}</td>"
-                    body += f"<td>{dist_info.get('optimal_equity', 0.0):.2f}</td>"
-                    body += f"<td>{dist_info.get('suggested_transfer', 0.0):.2f}</td>"
-                    body += f"<td>{dist_info.get('allocation_pct', 0.0)}%</td>"
-                    body += f"<td>{dist_info.get('stop_out_level', 0.0)}</td>"
-                    body += "</tr>"
-                
-                body += "</table></body></html>"
-                
-                _send_email_direct([email], subject, body, is_html=True)
-                logger.info(f"[FUND-EMAIL] Sent HTML summary to {email} ({len(items)} accounts)")
-                
-        except Exception as e:
-            logger.error("[FUND-EMAIL] Loop error: %s", e, exc_info=True)
-            time.sleep(60)
-
-threading.Thread(target=_optimal_fund_email_loop, daemon=True, name="OptimalFundEmail").start()
-
 # ─── Swap Rate Change Alert ──────────────────────────────────────────────────
 _swap_rate_baseline = {}  # {f"{account_id}:{symbol}": {swap_long, swap_short, account, symbol, ts}}
 SWAP_BASELINES_FILE = os.path.join(_CONFIGS_DIR, "swap_baselines.json")
@@ -1446,8 +1354,6 @@ _DEFAULT_SETTINGS = {
     "exec_halt_on_timeout": False,
     "exec_retry_close": False,
     "exec_retry_max": 5,
-    "fund_email_enabled": True,
-    "fund_email_time": "08:00",
 }
 
 # ─── PnL Request State ──────────────────────────────────────────────────────
@@ -1551,48 +1457,6 @@ def _send_email(subject, body, account_id=None):
         return True, None
     except Exception as e:
         app.logger.exception("Email send failed")
-        return False, str(e)
-
-def _send_email_direct(recipients, subject, body, is_html=False):
-    """Send email directly to a specific list of recipients, bypassing global 'to_addr'."""
-    cfg = dashboard_settings.get("email", {})
-    if not cfg.get("enabled"):
-        return False, "Email not enabled"
-    try:
-        import smtplib
-        msg_type = "html" if is_html else "plain"
-        msg = MIMEText(body, msg_type, "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = cfg.get("from_addr", cfg.get("smtp_user", ""))
-        
-        # Deduplicate while preserving order
-        seen = set()
-        clean_recipients = [r for r in recipients if not (r in seen or seen.add(r))]
-        
-        if not clean_recipients:
-            return False, "No recipient address provided"
-            
-        msg["To"] = ", ".join(clean_recipients)
-        
-        port = int(cfg.get("smtp_port", 587))
-        if port == 465:
-            # Port 465 requires SSL from the start (implicit TLS)
-            with smtplib.SMTP_SSL(cfg["smtp_host"], port, timeout=15) as srv:
-                if cfg.get("smtp_user"):
-                    srv.login(cfg["smtp_user"], cfg.get("smtp_pass", ""))
-                srv.sendmail(msg["From"], clean_recipients, msg.as_string())
-        else:
-            # Port 587 (or other) uses STARTTLS
-            with smtplib.SMTP(cfg["smtp_host"], port, timeout=15) as srv:
-                srv.ehlo()
-                srv.starttls()
-                srv.ehlo()
-                if cfg.get("smtp_user"):
-                    srv.login(cfg["smtp_user"], cfg.get("smtp_pass", ""))
-                srv.sendmail(msg["From"], clean_recipients, msg.as_string())
-        return True, None
-    except Exception as e:
-        app.logger.exception("Direct email send failed")
         return False, str(e)
 
 def _send_telegram(message, account_id=None):
@@ -7762,10 +7626,6 @@ def api_update_settings():
                 dashboard_settings["exec_retry_max"] = max(1, int(data["exec_retry_max"]))
             except (ValueError, TypeError):
                 pass
-        if "fund_email_enabled" in data:
-            dashboard_settings["fund_email_enabled"] = bool(data["fund_email_enabled"])
-        if "fund_email_time" in data:
-            dashboard_settings["fund_email_time"] = str(data["fund_email_time"]).strip()
         _save_settings()
         return jsonify({"ok": True})
     except Exception as e:
@@ -8564,15 +8424,6 @@ body {
       <label>To Address</label>
       <input type="text" id="setToAddr" placeholder="you@example.com">
     </div>
-    
-    <h4 style="margin-top:20px; border-top:1px solid var(--border); padding-top:15px; color:var(--text1);">Fund Distribution Report</h4>
-    <div class="settings-grid">
-      <label>Enabled</label>
-      <input type="checkbox" id="setFundEmailEnabled">
-      <label>Send Time (NY)</label>
-      <input type="time" id="setFundEmailTime" value="08:00">
-    </div>
-
     <div class="settings-actions">
       <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Email Settings</button>
       <button class="btn btn-sm" onclick="testEmail()" id="testEmailBtn">📨 Test Email</button>
@@ -12325,10 +12176,6 @@ async function loadSettings() {
     document.getElementById('setSmtpPass').value = (s.email && s.email.smtp_pass) || '';
     document.getElementById('setFromAddr').value = (s.email && s.email.from_addr) || '';
     document.getElementById('setToAddr').value = (s.email && s.email.to_addr) || '';
-    if (document.getElementById('setFundEmailEnabled')) {
-        document.getElementById('setFundEmailEnabled').checked = s.fund_email_enabled !== false;
-        document.getElementById('setFundEmailTime').value = s.fund_email_time || '08:00';
-    }
     document.getElementById('setTgEnabled').checked = s.telegram && s.telegram.enabled;
     document.getElementById('setTgBotToken').value = (s.telegram && s.telegram.bot_token) || '';
     document.getElementById('setTgChatId').value = (s.telegram && s.telegram.chat_id) || '';
@@ -12572,9 +12419,7 @@ async function saveSettings(silent) {
       enabled: document.getElementById('setTgEnabled').checked,
       bot_token: document.getElementById('setTgBotToken').value,
       chat_id: document.getElementById('setTgChatId').value,
-    },
-    fund_email_enabled: document.getElementById('setFundEmailEnabled') ? document.getElementById('setFundEmailEnabled').checked : true,
-    fund_email_time: document.getElementById('setFundEmailTime') ? document.getElementById('setFundEmailTime').value : "08:00"
+    }
   };
   try {
     const res = await fetch('/api/settings', {

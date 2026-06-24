@@ -366,7 +366,15 @@ class MtBridgeAccount:
         acct["margin"] = info.get("margin", 0)
         acct["free_margin"] = info.get("free_margin", 0)
         acct["profit"] = info.get("profit", 0)
-        acct["total_pnl"] = round(info.get("equity", 0) - info.get("balance", 0), 2)
+        
+        # Safely compute fallback PNL (avoid 0 - 112000 = -112000 glitches)
+        eq = info.get("equity", 0)
+        bal = info.get("balance", 0)
+        if eq > 0 and bal > 0:
+            acct["total_pnl"] = round(eq - bal, 2)
+        else:
+            acct["total_pnl"] = round(acct["profit"], 2)
+            
         acct["leverage"] = info.get("leverage", 0)
         acct["mt_direct"] = True
         acct["conn_type"] = self.conn_type
