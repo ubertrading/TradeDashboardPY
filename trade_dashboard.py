@@ -13255,9 +13255,18 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       if (sd != null) { sumSwapDelta += sd; hasSwapDelta = true; }
       // Age — from direct info or cycle_reminders
       let age = info.oldest_position_age;
-      if (age == null && cycleReminders[m.id]) age = cycleReminders[m.id].days_held;
-      if (age != null) {
-        if (maxAge === null || age > maxAge) maxAge = age;
+      let maxD = info.cycle_max_days;
+      let remD = info.cycle_remind_days;
+      if (age == null && cycleReminders[m.id]) {
+        age = cycleReminders[m.id].days_held;
+        maxD = cycleReminders[m.id].max_days;
+        remD = cycleReminders[m.id].remind_days;
+      }
+      if (age != null && !((remD == null || remD === 0 || remD === '') && (maxD == null || maxD === 0 || maxD === ''))) {
+        let numAge = Number(age);
+        if (!isNaN(numAge)) {
+          if (maxAge === null || numAge > maxAge) maxAge = numAge;
+        }
       }
       // Optimal Equity & Shift
       const dist = fundDists[m.id] || {};
