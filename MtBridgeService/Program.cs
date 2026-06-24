@@ -865,12 +865,9 @@ public class MtAccount
                 if ((Math.Abs(_profit) < 0.001 || Math.Abs(_equity) < 0.001 || Math.Abs(_equity - _balance) < 0.001) && _positions.Count > 0)
                 {
                     double manualProfit = 0;
-                    lock (_posLock)
+                    foreach (var p in _positions.Values)
                     {
-                        foreach (var p in _positions.Values)
-                        {
-                            manualProfit += p.Profit + p.Swap;
-                        }
+                        manualProfit += p.Profit + p.Swap;
                     }
                     // Only override if manualProfit is non-zero to avoid zeroing out legit data, OR if equity is totally missing (0)
                     if (Math.Abs(manualProfit) > 0.001 || Math.Abs(_equity) < 0.001)
