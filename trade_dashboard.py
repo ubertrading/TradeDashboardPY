@@ -13308,16 +13308,25 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let ageStyle = 'font-size:0.82rem;';
     if (maxAge !== null) {
       ageStr = String(maxAge);
-      // Check if any member is critical/warning
-      let worstMaxD = null, worstRemD = null;
+      // Check if any member is critical/warning based on their OWN thresholds
+      let isRed = false, isOrange = false;
       for (const m of members) {
-        const md = m.info.cycle_max_days || (cycleReminders[m.id] && cycleReminders[m.id].max_days);
-        const rd = m.info.cycle_remind_days || (cycleReminders[m.id] && cycleReminders[m.id].remind_days);
-        if (md != null) { if (worstMaxD === null || md < worstMaxD) worstMaxD = md; }
-        if (rd != null) { if (worstRemD === null || rd < worstRemD) worstRemD = rd; }
+        let d = m.info.oldest_position_age;
+        let md = m.info.cycle_max_days;
+        let rd = m.info.cycle_remind_days;
+        if (d == null && cycleReminders[m.id]) {
+          d = cycleReminders[m.id].days_held;
+          md = md != null ? md : cycleReminders[m.id].max_days;
+          rd = rd != null ? rd : cycleReminders[m.id].remind_days;
+        }
+        if (d != null) {
+          const numD = Number(d);
+          if (md != null && md > 0 && numD >= md) isRed = true;
+          else if (rd != null && rd > 0 && numD >= rd) isOrange = true;
+        }
       }
-      if (worstMaxD != null && maxAge >= worstMaxD) ageStyle += 'font-weight:600;color:var(--red);';
-      else if (worstRemD != null && maxAge >= worstRemD) ageStyle += 'font-weight:600;color:var(--orange);';
+      if (isRed) ageStyle += 'font-weight:600;color:var(--red);';
+      else if (isOrange) ageStyle += 'font-weight:600;color:var(--orange);';
     }
     const memberCount = members.length;
     const memberList = members.map(m => m.displayName).join('\\n');
