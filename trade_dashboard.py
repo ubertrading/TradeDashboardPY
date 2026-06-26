@@ -9610,13 +9610,13 @@ body {
                 <th>Price</th>
                 <th>Open Diff</th>
                 <th>Open ms</th>
-                <th>Open Slip</th>
+                <th>Slippage</th>
                 <th>Profit</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="openedDealsBody">
-              <tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px;">No open deals</td></tr>
+              <tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No open deals</td></tr>
             </tbody>
           </table>
         </div>
@@ -9638,11 +9638,12 @@ body {
                 <th>Open Price</th>
                 <th>Close Price</th>
                 <th>Close MS</th>
+                <th>Slippage</th>
                 <th>Profit</th>
               </tr>
             </thead>
             <tbody id="closedDealsBody">
-              <tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px;">No closed deals</td></tr>
+              <tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No closed deals</td></tr>
             </tbody>
           </table>
         </div>
@@ -10441,17 +10442,23 @@ function renderOpenedDeals() {
           openMs2 = '0ms';
         }
       }
-      // Calculate slippage: |fill_price - quote_price| in points
+      // Calculate slippage in points
       // Skip for imported fills — no meaningful quote_price data
       let slip1 = '-';
       if (f1 && !f1.imported && f1.price != null && f1.quote_price != null && f1.quote_price != 0) {
         const ptMult1 = Math.pow(10, pair1.toUpperCase().includes('JPY') ? 3 : 5);
-        slip1 = Math.round(Math.abs(f1.price - f1.quote_price) * ptMult1);
+        const s1act = (side1.action || 'sell').toLowerCase();
+        const diff1 = s1act === 'buy' ? (f1.price - f1.quote_price) : (f1.quote_price - f1.price);
+        slip1 = Math.round(diff1 * ptMult1);
+        if (slip1 > 0) slip1 = '+' + slip1;
       }
       let slip2 = '-';
       if (f2 && !f2.imported && f2.price != null && f2.quote_price != null && f2.quote_price != 0) {
         const ptMult2 = Math.pow(10, pair2.toUpperCase().includes('JPY') ? 3 : 5);
-        slip2 = Math.round(Math.abs(f2.price - f2.quote_price) * ptMult2);
+        const s2act = (side2.action || 'buy').toLowerCase();
+        const diff2 = s2act === 'buy' ? (f2.price - f2.quote_price) : (f2.quote_price - f2.price);
+        slip2 = Math.round(diff2 * ptMult2);
+        if (slip2 > 0) slip2 = '+' + slip2;
       }
       // Calculate ACTUAL unrealized P&L using live bid/ask
       // BUY P&L = (current_bid - fill_price) * pipMult  (can sell at bid to close)
@@ -10510,7 +10517,7 @@ function renderOpenedDeals() {
   });
 
   if (!dealPairs.length) {
-    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px;">No open deals</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No open deals</td></tr>';
     return;
   }
 
@@ -10599,6 +10606,30 @@ function renderClosedDeals() {
         const sellPnL = (sellOpenP - sellCloseP) * pipMult;
         profit = Math.round((buyPnL + sellPnL) * 10) / 10;
       }
+
+      // Calculate close slippage in points
+      let closeSlip1 = '-';
+      const pair1 = side1.pair || s.pair;
+      if (c1 && !c1.imported && c1.price != null && c1.quote_price != null && c1.quote_price != 0) {
+        const ptMult1 = Math.pow(10, pair1.toUpperCase().includes('JPY') ? 3 : 5);
+        const s1act = (side1.action || 'buy').toLowerCase(); // action was on open
+        // Closing a buy means we sell. Sell slippage: quote - price
+        // Closing a sell means we buy. Buy slippage: price - quote
+        const diff1 = s1act === 'buy' ? (c1.quote_price - c1.price) : (c1.price - c1.quote_price);
+        closeSlip1 = Math.round(diff1 * ptMult1);
+        if (closeSlip1 > 0) closeSlip1 = '+' + closeSlip1;
+      }
+
+      let closeSlip2 = '-';
+      const pair2 = side2.pair || s.pair;
+      if (c2 && !c2.imported && c2.price != null && c2.quote_price != null && c2.quote_price != 0) {
+        const ptMult2 = Math.pow(10, pair2.toUpperCase().includes('JPY') ? 3 : 5);
+        const s2act = (side2.action || 'sell').toLowerCase();
+        const diff2 = s2act === 'buy' ? (c2.quote_price - c2.price) : (c2.price - c2.quote_price);
+        closeSlip2 = Math.round(diff2 * ptMult2);
+        if (closeSlip2 > 0) closeSlip2 = '+' + closeSlip2;
+      }
+
       const statusLabel = s.status === 'completed' ? 'CLOSED' :
                           s.status === 'partial_close' ? '<span style="color:#ff4757;font-weight:700;">PARTIAL</span>' : 'CLOSED';
       dealRows.push({
@@ -10616,6 +10647,8 @@ function renderClosedDeals() {
         closePrice2: cp2 != null ? cp2.toFixed(5) : '-',
         closeMs1: (c1 && c1.cmd_ts != null && c1.ts_epoch != null) ? Math.round((c1.ts_epoch - c1.cmd_ts) * 1000) : '-',
         closeMs2: (c2 && c2.cmd_ts != null && c2.ts_epoch != null) ? Math.round((c2.ts_epoch - c2.cmd_ts) * 1000) : '-',
+        closeSlip1: closeSlip1,
+        closeSlip2: closeSlip2,
         profit: profit,
         statusLabel: statusLabel
       });
@@ -10623,7 +10656,7 @@ function renderClosedDeals() {
   });
 
   if (!dealRows.length) {
-    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px;">No closed deals</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No closed deals</td></tr>';
     return;
   }
 
@@ -10641,6 +10674,7 @@ function renderClosedDeals() {
       <td>${d.openPrice1}</td>
       <td>${d.closePrice1}</td>
       <td rowspan="2" style="vertical-align:middle;font-size:0.8rem;">${d.closeMs1 !== '-' ? d.closeMs1 + '<br>' + d.closeMs2 : '-'}</td>
+      <td>${d.closeSlip1}</td>
       <td rowspan="2" class="${profitClass}" style="vertical-align:middle;">${profitVal}</td>
     </tr>
     <tr class="deal-row-bottom">
@@ -10652,6 +10686,7 @@ function renderClosedDeals() {
       <td>${d.ticket2}</td>
       <td>${d.openPrice2}</td>
       <td>${d.closePrice2}</td>
+      <td>${d.closeSlip2}</td>
     </tr>`;
   }).join('');
 }
