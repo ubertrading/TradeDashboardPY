@@ -6970,7 +6970,7 @@ def _process_position_import(req):
         agg_lots = round(agg.get("lots", 0), 4)
         # Determine increment size: use lot_size_ref, fall back to agg_lots / other_count
         inc = round(lot_size_ref, 4) if lot_size_ref > 0 else round(agg_lots / max(other_count, 1), 4)
-        if inc <= 0 or other_count <= 1:
+        if inc <= 0:
             return positions  # Can't split
         n = round(agg_lots / inc)
         if n <= 1:

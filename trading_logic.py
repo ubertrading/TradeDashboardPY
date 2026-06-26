@@ -781,7 +781,21 @@ def _run_hedge_monitor_all():
                 expected_open = set(acct_fill_tickets) - acct_close_tickets
 
                 if not expected_open:
-                    continue  # No fills tracked, can't compare
+                    # If we have no expected open tickets, we might still have a permanent shortfall
+                    # We'll check that below, so we don't immediately continue yet.
+                    pass
+
+                missing_tickets = set()
+                
+                # Check for permanent import imbalances (e.g. imported 0 vs N)
+                if sess_action != "open" and session.get("imported"):
+                    total_pos = session.get("total_positions", 0)
+                    if len(acct_fill_tickets) < total_pos:
+                        shortfall = total_pos - len(acct_fill_tickets)
+                        for i in range(shortfall):
+                            fake_t = f"MISSING_IMPORT_{account}_{i}"
+                            if fake_t not in acct_close_tickets:
+                                missing_tickets.add(fake_t)
 
                 # ── NETTING MODE BYPASS ──────────────────────────────────────
                 # Brokers like Dukascopy use netting mode: all fills for one
@@ -793,30 +807,32 @@ def _run_hedge_monitor_all():
                 if info.get("netting_mode"):
                     broker_positions = info.get("positions", 0)
                     mismatch_key = f"hedge_mismatch_{sid}_{account}"
-                    if broker_positions > 0:
-                        # Still open — reset counter and move on
+                    if broker_positions > 0 and not missing_tickets:
+                        # Still open and no permanent shortfall — reset counter and move on
                         session.pop(mismatch_key, None)
                         continue
-                    else:
+                    elif broker_positions == 0:
                         # All gone on the broker — treat every expected ticket as missing
-                        missing_tickets = expected_open
-                        print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
-                              f"netting_mode — broker has 0 positions, "
-                              f"treating {len(missing_tickets)} ticket(s) as externally closed")
+                        missing_tickets.update(expected_open)
+                        if expected_open:
+                            print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
+                                  f"netting_mode — broker has 0 positions, "
+                                  f"treating {len(expected_open)} ticket(s) as externally closed")
                 else:
                     # Step 2: Detect — compare expected vs actual (per-ticket path)
-                    missing_tickets = expected_open - ea_open_tickets
-                    if not missing_tickets:
-                        # Reset mismatch counter — everything matches
-                        mismatch_key = f"hedge_mismatch_{sid}_{account}"
-                        session.pop(mismatch_key, None)
-                        continue
-
-                    # Log every detection
-                    print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
-                          f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
-                          f"missing={len(missing_tickets)}")
+                    missing_tickets.update(expected_open - ea_open_tickets)
+                    
+                if not missing_tickets:
+                    # Reset mismatch counter — everything matches
                     mismatch_key = f"hedge_mismatch_{sid}_{account}"
+                    session.pop(mismatch_key, None)
+                    continue
+
+                # Log every detection
+                print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
+                      f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
+                      f"missing={len(missing_tickets)}")
+                mismatch_key = f"hedge_mismatch_{sid}_{account}"
                 prev_count = session.get(mismatch_key, 0)
                 if prev_count < 2:
                     session[mismatch_key] = prev_count + 1
