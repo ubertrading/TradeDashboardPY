@@ -207,6 +207,8 @@ ea_heartbeats = {}      # account -> last_poll_ts (track EA connectivity)
 ea_account_info = {}    # account -> {balance, equity, bid, ask, spread, symbol, last_update}
 _last_known_balances = {}   # account -> float
 _last_known_positions = {}  # account -> int
+_last_pos_change_ts = {}    # account -> float
+_pending_fee_alerts = {}    # account -> {ts, prev_bal, new_bal}
 _direct_quote_cache = {}  # (account, pair) -> {bid, ask} — last good get_symbol_info result
 manual_accounts = {}    # name -> {conn_type, balance, equity}
 strategies = {}         # strategy_id -> {id, name, account1, account2, created_at}
@@ -2479,6 +2481,35 @@ def _get_pos_count(pos_val):
         return int(pos_val)
     return 0
 
+def _has_position_changed(prev_pos, new_pos):
+    if prev_pos is None or new_pos is None:
+        return False
+    if _get_pos_count(prev_pos) != _get_pos_count(new_pos):
+        return True
+    if isinstance(prev_pos, dict) and isinstance(new_pos, dict):
+        if set(prev_pos.keys()) != set(new_pos.keys()):
+            return True
+        # Check for MT5 partial closes where ticket remains the same but lots decrease
+        for k in prev_pos:
+            if isinstance(prev_pos[k], dict) and isinstance(new_pos[k], dict):
+                if prev_pos[k].get("lots") != new_pos[k].get("lots"):
+                    return True
+        return False
+    if isinstance(prev_pos, list) and isinstance(new_pos, list):
+        try:
+            def _extract(lst):
+                res = []
+                for x in lst:
+                    if isinstance(x, dict) and "ticket" in x:
+                        res.append(str(x["ticket"]))
+                    else:
+                        res.append(str(x))
+                return set(res)
+            return _extract(prev_pos) != _extract(new_pos)
+        except Exception:
+            pass
+    return False
+
 def _check_fee_alerts():
     """Universal fee detector: monitors all accounts in ea_account_info for balance drops."""
     try:
@@ -2488,19 +2519,28 @@ def _check_fee_alerts():
             if new_bal is None:
                 continue
             
+            # ── 1. Always track position changes independently of balance drops ──
+            prev_pos = _last_known_positions.get(account)
+            new_pos = info.get("positions")
+            if _has_position_changed(prev_pos, new_pos):
+                _last_pos_change_ts[account] = now_ts
+                # We do NOT update _last_known_positions here yet, we wait until the end of the loop
+                # so the rest of the logic can still compare prev_pos and new_pos if needed.
+
             prev_bal = _last_known_balances.get(account)
             if prev_bal is not None:
                 delta = new_bal - prev_bal
                 if delta < -0.001:  # balance decreased
-                    # Check if position count decreased (indicates a trade closed at a loss, not a fee)
-                    prev_pos = _last_known_positions.get(account)
-                    new_pos = info.get("positions")
-                    prev_count = _get_pos_count(prev_pos)
-                    new_count = _get_pos_count(new_pos)
-                    if prev_pos is not None and new_pos is not None and new_count < prev_count:
-                        # Position count decreased — skip fee detection for this drop
+                    
+                    # ── 2. Check if a position changed recently (within 60s) ──
+                    # This handles cases where the position changed BEFORE the balance dropped
+                    # (broker latency) or AT THE SAME TIME.
+                    last_change = _last_pos_change_ts.get(account, 0)
+                    if (now_ts - last_change) < 60:
                         _last_known_balances[account] = new_bal
-                        _last_known_positions[account] = new_pos
+                        if new_pos is not None:
+                            _last_known_positions[account] = new_pos
+                        _pending_fee_alerts.pop(account, None)
                         continue
 
                     # For raw FIX accounts (e.g. Dukascopy) that have no OpenAPI companion,
@@ -2509,18 +2549,40 @@ def _check_fee_alerts():
                     if (info.get("fix_account") and not info.get("openapi_connected")
                             and (info.get("positions") or 0) > 0):
                         _last_known_balances[account] = new_bal
-                        if info.get("positions") is not None:
-                            _last_known_positions[account] = info.get("positions")
+                        if new_pos is not None:
+                            _last_known_positions[account] = new_pos
+                        _pending_fee_alerts.pop(account, None)
                         continue
+
+                    # ── 3. WAIT FOR CONFIRMATION ──
+                    # Prevent race condition where MT4 updates balance BEFORE positions
+                    pending = _pending_fee_alerts.get(account)
+                    if not pending:
+                        _pending_fee_alerts[account] = {
+                            "ts": now_ts,
+                            "prev_bal": prev_bal,
+                            "new_bal": new_bal
+                        }
+                        # Do NOT update _last_known_balances yet, wait for positions to catch up
+                        continue
+                    elif (now_ts - pending["ts"]) < 15:
+                        # Still in the 15-second waiting window
+                        continue
+                    else:
+                        # 15 seconds passed, no position change arrived. It's a genuine fee.
+                        _pending_fee_alerts.pop(account)
+                        prev_bal = pending["prev_bal"]
+                        delta = new_bal - prev_bal
                     
-                    # Cooldown check: only record if no close was just processed in sessions (cooldown 5s from last trade)
+                    
+                    # Cooldown check: only record if no close was just processed in sessions (cooldown 60s from last trade)
                     last_trade = 0
                     for _sid, _sess in list(sessions.items()):
                         if account in _sess.get("sides", {}):
                             lt = _sess.get("last_trade_ts", {}).get(account, 0)
                             if lt > last_trade:
                                 last_trade = lt
-                    if (now_ts - last_trade) > 5:  # no recent trade — likely a fee
+                    if (now_ts - last_trade) > 60:  # no recent trade — likely a fee
                         fee_entry = {
                             "id": str(uuid.uuid4())[:8],
                             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2542,6 +2604,13 @@ def _check_fee_alerts():
                                 _log_event(_sid, account, "fee_detected",
                                            f"Fee {delta:.2f} on {account} ({prev_bal:.2f} -> {new_bal:.2f})")
                                 break
+                else:
+                    # Balance did not decrease, or went up
+                    _last_known_balances[account] = new_bal
+                    if info.get("positions") is not None:
+                        _last_known_positions[account] = info.get("positions")
+                    _pending_fee_alerts.pop(account, None)
+                    
             _last_known_balances[account] = new_bal
             if info.get("positions") is not None:
                 _last_known_positions[account] = info.get("positions")
