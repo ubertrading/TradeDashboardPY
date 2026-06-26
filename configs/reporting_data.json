@@ -20332,6 +20332,50 @@
       "hedge_group_totals": {},
       "name_totals": {},
       "ts": 1781960891.1127021
+    },
+    {
+      "accounts": {
+        "DEMO-CT-FIX-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-FIX-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT4-1218954455": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT5-52769010": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DUKA-DEMO-DEMO2uotdK": {
+          "balance": 258198.35,
+          "equity": 258198.35,
+          "group_label": ""
+        }
+      },
+      "date": "2026-06-26",
+      "group_totals": {},
+      "hedge_group_totals": {},
+      "name_totals": {},
+      "ts": 1782499731.7193933
     }
   ]
 }

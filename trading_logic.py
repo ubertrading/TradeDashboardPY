@@ -898,7 +898,7 @@ def _run_hedge_monitor_all():
                                        if f.get("account") == other_acc
                                        and _normalize_ticket(f["ticket"]) not in all_close_tickets
                                        and _normalize_ticket(f["ticket"]) not in already_queued]
-                        other_fills.sort(key=lambda x: x.get("ts_epoch", 0))
+                        other_fills.sort(key=lambda x: (x.get("ts_epoch") or 0))
                         for f in other_fills[:shortfall]:
                             tickets_to_close.append((other_acc, _normalize_ticket(f["ticket"])))
                             print(f"[HEDGE-REBAL] Fallback: will close oldest ticket {f['ticket']} on {other_acc}")

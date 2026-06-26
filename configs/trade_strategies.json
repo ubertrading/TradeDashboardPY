@@ -54,8 +54,8 @@
       "name": "DUKA",
       "running": true,
       "trade_alerts": false,
-      "trade_start_time": "18:00",
-      "trade_stop_time": "16:30"
+      "trade_start_time": "00:01",
+      "trade_stop_time": "00:00"
     },
     "558dadc8-2b67-4beb-b0e1-4e8ad9b28eaf": {
       "account1": "DEMO-MT4-1218954455",

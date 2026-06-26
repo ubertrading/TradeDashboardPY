@@ -2686,7 +2686,7 @@ def _run_hedge_monitor_all():
             # Only run after ALL sides have reached fill targets
             if sess_action == "open":
                 all_sides_filled = all(
-                    (session["filled"].get(acc, 0) - session["closed"].get(acc, 0)) >= session["total_positions"]
+                    _get_net_open(session, acc) >= session["total_positions"]
                     for acc in sides
                 )
                 if not all_sides_filled:
@@ -2819,17 +2819,6 @@ def _run_hedge_monitor_all():
                 # Get open tickets from ea_account_info (populated by EA poll, MT Direct, FIX)
                 info = ea_account_info.get(account, {})
 
-                # NETTING-MODE SKIP: Dukascopy and similar netting brokers collapse all
-                # fills for a symbol into a single aggregate position. Their open_tickets
-                # list contains one synthetic entry per symbol regardless of how many
-                # incremental fills were placed, so per-ticket comparison is meaningless
-                # and will always produce false "missing" detections. Skip entirely —
-                # the position is monitored at the lot/session level instead.
-                if info.get("netting_mode", False):
-                    mismatch_key = f"hedge_mismatch_{sid}_{account}"
-                    session.pop(mismatch_key, None)  # clear any stale counter
-                    continue
-
                 ea_open_tickets_list = info.get("open_tickets")
 
                 # If no data available for this account, skip
@@ -2860,11 +2849,46 @@ def _run_hedge_monitor_all():
                 )
                 expected_open = set(acct_fill_tickets) - acct_close_tickets - pending_rb_tickets
 
-                if not expected_open:
+                missing_tickets = set()
+
+                # Check for permanent import imbalances (e.g. imported 0 vs N)
+                if sess_action != "open" and session.get("imported"):
+                    total_pos = session.get("total_positions", 0)
+                    if len(acct_fill_tickets) < total_pos:
+                        shortfall = total_pos - len(acct_fill_tickets)
+                        for i in range(shortfall):
+                            fake_t = f"MISSING_IMPORT_{account}_{i}"
+                            if fake_t not in acct_close_tickets and fake_t not in pending_rb_tickets:
+                                missing_tickets.add(fake_t)
+
+                # ── NETTING MODE BYPASS ──────────────────────────────────────
+                # Brokers like Dukascopy use netting mode: all fills for one
+                # symbol collapse into a single broker-side position. Per-ticket
+                # comparison will always show "N missing, ea_has=1". Instead we
+                # check presence/absence of ANY broker position:
+                #   positions > 0  → everything is still open, nothing missing
+                #   positions == 0 → all closed externally
+                if info.get("netting_mode", False):
+                    broker_positions = info.get("positions", 0)
+                    mismatch_key = f"hedge_mismatch_{sid}_{account}"
+                    if broker_positions > 0 and not missing_tickets:
+                        # Still open and no permanent shortfall — reset counter and move on
+                        session.pop(mismatch_key, None)
+                        continue
+                    elif broker_positions == 0:
+                        # All gone on the broker — treat every expected ticket as missing
+                        missing_tickets.update(expected_open)
+                        if expected_open:
+                            print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
+                                  f"netting_mode — broker has 0 positions, "
+                                  f"treating {len(expected_open)} ticket(s) as externally closed")
+                else:
+                    # Step 2: Detect — compare expected vs actual (per-ticket path)
+                    missing_tickets.update(expected_open - ea_open_tickets)
+
+                if not missing_tickets and not expected_open:
                     continue  # No fills tracked, can't compare
 
-                # Step 2: Detect — compare expected vs actual
-                missing_tickets = expected_open - ea_open_tickets
                 if not missing_tickets:
                     # Reset mismatch counter — everything matches
                     mismatch_key = f"hedge_mismatch_{sid}_{account}"
@@ -2896,7 +2920,8 @@ def _run_hedge_monitor_all():
                 # ea_has < expected (positions actually disappeared from the broker).
                 # Seen in incident 2026-05-28: ALEX-ICM-7415899 ea_has=200, expected=100,
                 # missing=100 → caused false cascade of 100 ALEX-YCM closes.
-                if len(missing_tickets) == len(expected_open) and len(ea_open_tickets) >= len(expected_open):
+                missing_real = missing_tickets.intersection(expected_open)
+                if expected_open and len(missing_real) == len(expected_open) and len(ea_open_tickets) >= len(expected_open):
                     app.logger.warning(
                         "[HEDGE-MON] CASCADE BLOCKED for %s sid=%s: ALL %d tickets missing "
                         "but broker has %d positions (>= expected=%d). "
@@ -2942,86 +2967,41 @@ def _run_hedge_monitor_all():
                 # Rebuild close tickets set now that we've added the external closes
                 all_close_tickets = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []))
 
-                # Step 3: Pair each missing ticket to a close target on the other side.
-                # Non-netting accounts: match by pair_index (or positional fallback when
-                #   pair_index is None — .get("pair_index", idx) doesn't work because the
-                #   key exists with value None; use explicit coercion instead).
-                # Netting-mode accounts (e.g. Dukascopy): skip per-ticket pairing entirely.
-                #   Volume matching is used instead — the fallback below closes the oldest
-                #   fill on the netting side for every missing ticket on the non-netting side.
-                #   This correctly reduces the aggregate netting position by the right lot size.
-                other_pair_maps = {}
-                for other_acc in other_accounts:
-                    if ea_account_info.get(other_acc, {}).get("netting_mode", False):
-                        continue  # netting accounts handled by fallback below
-                    other_acct_fills = [f for f in session.get("fills", [])
-                                        if f.get("account") == other_acc]
-                    other_pair_maps[other_acc] = {
-                        (f.get("pair_index") if f.get("pair_index") is not None else i): f
-                        for i, f in enumerate(other_acct_fills)
-                    }
-
+                # Build per-account fill lists (chronological order)
                 acct_fills_ordered = [f for f in session.get("fills", [])
                                       if f.get("account") == account]
-                unpaired_excess = 0  # fills with no counterpart on ANY other side
                 for missing_t in missing_tickets:
-                    pi_found = None
+                    missing_idx = None
                     for idx, f in enumerate(acct_fills_ordered):
                         if _normalize_ticket(f.get("ticket")) == missing_t:
-                            pi = f.get("pair_index")
-                            pi_found = pi if pi is not None else idx
+                            missing_idx = idx
                             break
 
-                    if pi_found is None:
-                        # Fill not found in session — treat as unmatched
-                        unpaired_excess += 1
-                        print(f"[HEDGE-REBAL] Closed ticket {missing_t} on {account}: "
-                              f"not found in session fills — skipping (untracked)")
-                        continue
+                    if missing_idx is not None:
+                        for other_acc in other_accounts:
+                            other_fills_ordered = [f for f in session.get("fills", [])
+                                                   if f.get("account") == other_acc]
+                            if missing_idx < len(other_fills_ordered):
+                                paired_fill = other_fills_ordered[missing_idx]
+                                already_queued = set(t for _, t in tickets_to_close)
+                                if (_normalize_ticket(paired_fill["ticket"]) not in all_close_tickets
+                                        and _normalize_ticket(paired_fill["ticket"]) not in already_queued):
+                                    tickets_to_close.append((other_acc, _normalize_ticket(paired_fill["ticket"])))
+                                    print(f"[HEDGE-REBAL] Paired: closed ticket {missing_t} on {account} "
+                                          f"(fill #{missing_idx + 1}) "
+                                          f"→ will close ticket {paired_fill['ticket']} on {other_acc} "
+                                          f"(fill #{missing_idx + 1})")
 
-                    # Check non-netting accounts via pair_index/positional lookup
-                    non_netting_accs = [a for a in other_accounts
-                                        if not ea_account_info.get(a, {}).get("netting_mode", False)]
-                    netting_accs = [a for a in other_accounts
-                                    if ea_account_info.get(a, {}).get("netting_mode", False)]
-
-                    found_pair = False
-                    for other_acc in non_netting_accs:
-                        paired_fill = other_pair_maps.get(other_acc, {}).get(pi_found)
-                        if paired_fill is None:
-                            unpaired_excess += 1
-                            print(f"[HEDGE-REBAL] Closed ticket {missing_t} on {account} "
-                                  f"(idx={pi_found}) has NO counterpart "
-                                  f"on {other_acc} — skipping (unpaired excess)")
-                        else:
-                            already_queued = set(t for _, t in tickets_to_close)
-                            if (_normalize_ticket(paired_fill["ticket"]) not in all_close_tickets
-                                    and _normalize_ticket(paired_fill["ticket"]) not in already_queued):
-                                tickets_to_close.append((other_acc, _normalize_ticket(paired_fill["ticket"])))
-                                found_pair = True
-                                print(f"[HEDGE-REBAL] Paired: closed {missing_t} on {account} "
-                                      f"→ will close {paired_fill['ticket']} on {other_acc} (idx={pi_found})")
-
-                    # Netting accounts: volume fallback will close oldest increment.
-                    # Log intent but let Step 4 below handle the actual queuing.
-                    for other_acc in netting_accs:
-                        print(f"[HEDGE-REBAL] Netting close needed: {missing_t} on {account} "
-                              f"→ will close 1 lot increment on {other_acc} (volume-match via fallback)")
-
-                # Step 4: Fallback — for any paired missing ticket where direct lookup
-                # didn't produce a close target (netting accounts, or non-netting with
-                # no matching pair_index), close the oldest open fill on the other side.
-                # Unpaired excess fills (no counterpart exists at all) are excluded.
-                paired_missing = len(missing_tickets) - unpaired_excess
-                if len(tickets_to_close) < paired_missing:
-                    shortfall = paired_missing - len(tickets_to_close)
+                # Step 4: Fallback — close oldest on other side if pairing didn't find all
+                if len(tickets_to_close) < len(missing_tickets):
+                    shortfall = len(missing_tickets) - len(tickets_to_close)
                     already_queued = set(t for _, t in tickets_to_close)
                     for other_acc in other_accounts:
                         other_fills = [f for f in session.get("fills", [])
                                        if f.get("account") == other_acc
                                        and _normalize_ticket(f["ticket"]) not in all_close_tickets
                                        and _normalize_ticket(f["ticket"]) not in already_queued]
-                        other_fills.sort(key=lambda x: x.get("ts_epoch", 0))
+                        other_fills.sort(key=lambda x: (x.get("ts_epoch") or 0))
                         for f in other_fills[:shortfall]:
                             tickets_to_close.append((other_acc, _normalize_ticket(f["ticket"])))
                             print(f"[HEDGE-REBAL] Fallback: will close oldest ticket {f['ticket']} on {other_acc}")
@@ -3077,6 +3057,26 @@ def _is_within_time_window(session):
             return now >= start or now <= stop
     except Exception:
         return True  # If time parsing fails, allow
+
+def _get_net_open(session, account):
+    """
+    Returns the effective net open position count for an account.
+    For ticket mode: filled - closed
+    For lot mode: round((filled_lots - closed_lots) / lot_size)
+    """
+    if session.get("match_mode") == "lots":
+        fl = session.get("filled_lots", {}).get(account, 0.0)
+        cl = session.get("closed_lots", {}).get(account, 0.0)
+        net_lots = max(0.0, fl - cl)
+        ls = session.get("sides", {}).get(account, {}).get("lot_size")
+        if not ls or ls <= 0:
+            ls = session.get("lot_size", 0.01)
+        if ls <= 0:
+            ls = 0.01
+        return int(round(net_lots / ls))
+    else:
+        return session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0)
+
 
 def _should_issue_command(session, account):
     """
@@ -3333,7 +3333,7 @@ def _should_issue_command(session, account):
         target = session["total_positions"]
         # Use NET open count (filled - closed) so re-opening after a full close works.
         # Raw 'filled' includes historical fills that were subsequently closed.
-        current = session["filled"].get(account, 0) - session["closed"].get(account, 0)
+        current = _get_net_open(session, account)
         if current >= target:
             return False
 
@@ -3342,7 +3342,7 @@ def _should_issue_command(session, account):
         # racing ahead while the other is still executing.
         for other_acc in sides:
             if other_acc != account:
-                other_filled = session["filled"].get(other_acc, 0) - session["closed"].get(other_acc, 0)
+                other_filled = _get_net_open(session, other_acc)
                 if current > other_filled:
                     return False
 
@@ -3352,14 +3352,14 @@ def _should_issue_command(session, account):
         # Each account is independently capped so one fast side can't block the other.
         max_deals = session.get("max_accum_deals", 0)
         if max_deals > 0:
-            acct_net_open = session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0)
+            acct_net_open = _get_net_open(session, account)
             if acct_net_open >= max_deals:
                 return False
 
         # Check max_accum_lots (per-account net open lots limit)
         max_accum = session.get("max_accum_lots", 0.0)
         if max_accum > 0:
-            acct_net = max(0, session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0))
+            acct_net = _get_net_open(session, account)
             acct_lot = sides[account].get("lot_size", session.get("lot_size", 0.01))
             acct_lots = acct_net * acct_lot
             if acct_lots + acct_lot > max_accum + 1e-9:
@@ -4051,7 +4051,7 @@ def _check_session_completion(session):
     for account in session.get("sides", {}):
         if action == "open":
             # Use NET open count (filled - closed) so re-opening after a full close works
-            net_open = session["filled"].get(account, 0) - session["closed"].get(account, 0)
+            net_open = _get_net_open(session, account)
             if net_open < session["total_positions"]:
                 all_done = False
                 break
@@ -15352,18 +15352,30 @@ if __name__ == '__main__':
                         session.setdefault("last_trade_ts", {})[account] = time.time()
                         fill_price = data.get("fill_price")
                         quote_price = data.get("quote_price")
+                        
+                        side_info = session.get("sides", {}).get(account, {})
+                        fill_lot_size = float(data.get("lots", 0) or 0)
+                        if fill_lot_size <= 0:
+                            fill_lot_size = side_info.get("lot_size") or session.get("lot_size", 0)
+                            
                         session.setdefault("fills", []).append({
                             "account": account,
                             "ticket": ticket,
                             "price": float(fill_price) if fill_price else None,
                             "quote_price": float(quote_price) if quote_price else None,
                             "spread": int(spread) if spread else None,
+                            "lots": fill_lot_size,
                             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "ts_epoch": time.time(),
                             "cmd_ts": cmd_sent_ts,
                         })
+                        
+                        if session.get("match_mode") == "lots":
+                            fl = session.setdefault("filled_lots", {})
+                            fl[account] = round(fl.get(account, 0.0) + fill_lot_size, 4)
+                            
                         _log_event(session_id, account, "trade_filled",
-                                   f"[MT-DIRECT] ticket={ticket} price={fill_price} "
+                                   f"[MT-DIRECT] ticket={ticket} price={fill_price} lots={fill_lot_size} "
                                    f"filled={session['filled'][account]}/{session['total_positions']}")
                     _check_session_completion(session)
 
@@ -15387,16 +15399,31 @@ if __name__ == '__main__':
                         session["closed"][account] = session["closed"].get(account, 0) + 1
                         session.setdefault("last_trade_ts", {})[account] = time.time()
                         close_price = data.get("fill_price")
+                        
+                        closed_lot_size = float(data.get("lots", 0) or 0)
+                        if closed_lot_size <= 0:
+                            for f in session.get("fills", []):
+                                if f.get("account") == account and str(f.get("ticket")) == str(ticket):
+                                    closed_lot_size = f.get("lots", 0)
+                                    break
+                        if closed_lot_size <= 0:
+                            side_info = session.get("sides", {}).get(account, {})
+                            closed_lot_size = side_info.get("lot_size") or session.get("lot_size", 0)
+                            
                         session.setdefault("close_fills", []).append({
                             "account": account,
                             "ticket": ticket,
                             "price": float(close_price) if close_price else None,
+                            "lots": closed_lot_size,
                             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "ts_epoch": time.time(),
                             "cmd_ts": cmd_sent_ts,
                         })
+                        
+                        _update_closed_lots(session, account, closed_lot_size)
+                        
                         _log_event(session_id, account, "position_closed",
-                                   f"[MT-DIRECT] ticket={ticket} price={close_price}")
+                                   f"[MT-DIRECT] ticket={ticket} price={close_price} lots={closed_lot_size}")
                     _check_session_completion(session)
 
                 elif status == "error":

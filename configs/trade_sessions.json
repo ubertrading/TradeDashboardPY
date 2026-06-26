@@ -1,458 +1,4 @@
 {
-  "2a0707e2-92ad-48ea-9730-d45bf8eb82e1": {
-    "action": "monitor",
-    "avoid_news": false,
-    "close_count": null,
-    "close_deal_ts": 1781823600.2118347,
-    "close_fills": [
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823582.5594306,
-        "open_price": 1.14627,
-        "open_ts": "2026-06-18 18:59:05",
-        "open_ts_epoch": 1781823545.5872934,
-        "price": 1.14632,
-        "ticket": 1142828418,
-        "ts": "2026-06-18 18:59:42",
-        "ts_epoch": 1781823582.7683885
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823582.8177285,
-        "price": 1.14624,
-        "ticket": 247905998,
-        "ts": "2026-06-18 18:59:42",
-        "ts_epoch": 1781823582.965196
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823600.2752237,
-        "open_price": 1.14627,
-        "open_ts": "2026-06-18 18:59:05",
-        "open_ts_epoch": 1781823545.8378465,
-        "price": 1.14636,
-        "ticket": 1142828420,
-        "ts": "2026-06-18 19:00:00",
-        "ts_epoch": 1781823600.4833906
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823600.9877534,
-        "price": 1.14625,
-        "ticket": 247905988,
-        "ts": "2026-06-18 19:00:01",
-        "ts_epoch": 1781823601.154735
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837037.6722496,
-        "price": 1.14572,
-        "ticket": 1142828422,
-        "ts": "2026-06-18 22:43:57",
-        "ts_epoch": 1781837037.8584726
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837038.1182137,
-        "price": 1.14566,
-        "ticket": 247905989,
-        "ts": "2026-06-18 22:43:58",
-        "ts_epoch": 1781837038.2549522
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837038.4323847,
-        "price": 1.14572,
-        "ticket": 1142828424,
-        "ts": "2026-06-18 22:43:58",
-        "ts_epoch": 1781837038.671198
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837039.3126762,
-        "price": 1.14566,
-        "ticket": 247905990,
-        "ts": "2026-06-18 22:43:59",
-        "ts_epoch": 1781837039.4710853
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837039.6944804,
-        "price": 1.14572,
-        "ticket": 1142828426,
-        "ts": "2026-06-18 22:43:59",
-        "ts_epoch": 1781837039.896718
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837040.5460463,
-        "price": 1.14566,
-        "ticket": 247905991,
-        "ts": "2026-06-18 22:44:00",
-        "ts_epoch": 1781837040.6900616
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837040.727927,
-        "price": 1.14572,
-        "ticket": 1142828428,
-        "ts": "2026-06-18 22:44:00",
-        "ts_epoch": 1781837040.9251347
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837041.7361338,
-        "price": 1.14566,
-        "ticket": 247905992,
-        "ts": "2026-06-18 22:44:01",
-        "ts_epoch": 1781837041.866053
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837042.072112,
-        "price": 1.14572,
-        "ticket": 1142828431,
-        "ts": "2026-06-18 22:44:02",
-        "ts_epoch": 1781837042.2743998
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837042.9077034,
-        "price": 1.14566,
-        "ticket": 247905993,
-        "ts": "2026-06-18 22:44:03",
-        "ts_epoch": 1781837043.0406575
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837043.1026363,
-        "price": 1.14572,
-        "ticket": 1142828433,
-        "ts": "2026-06-18 22:44:03",
-        "ts_epoch": 1781837043.3200107
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837044.1031728,
-        "price": 1.14566,
-        "ticket": 247905995,
-        "ts": "2026-06-18 22:44:04",
-        "ts_epoch": 1781837044.235318
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837044.3622606,
-        "price": 1.14572,
-        "ticket": 1142828435,
-        "ts": "2026-06-18 22:44:04",
-        "ts_epoch": 1781837044.55628
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837044.83257,
-        "price": 1.14566,
-        "ticket": 247905996,
-        "ts": "2026-06-18 22:44:04",
-        "ts_epoch": 1781837044.9976523
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781837045.014626,
-        "price": 1.14566,
-        "ticket": 247905997,
-        "ts": "2026-06-18 22:44:05",
-        "ts_epoch": 1781837045.1877525
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781837045.1197352,
-        "price": 1.14572,
-        "ticket": 1142828437,
-        "ts": "2026-06-18 22:44:05",
-        "ts_epoch": 1781837045.3126037
-      }
-    ],
-    "closed": {
-      "DEMO-MT4-1218954455": 10,
-      "DUKA-DEMO-DEMO2uotdK": 10
-    },
-    "comment": "1218954455-DUKA-DEMO-DEMO2uotdK / 1218954455-DUKA-DEMO-DEMO2uotdK",
-    "created_at": "2026-06-18 18:58:59",
-    "diff_to_close": -99,
-    "diff_to_open": -99,
-    "errors": {
-      "DEMO-MT4-1218954455": [],
-      "DUKA-DEMO-DEMO2uotdK": []
-    },
-    "execution_order": "simultaneous",
-    "filled": {
-      "DEMO-MT4-1218954455": 10,
-      "DUKA-DEMO-DEMO2uotdK": 10
-    },
-    "fills": [
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823543.9039,
-        "price": 1.14635,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905988,
-        "ts": "2026-06-18 18:59:04",
-        "ts_epoch": 1781823544.0485902
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823545.4007335,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828418,
-        "ts": "2026-06-18 18:59:05",
-        "ts_epoch": 1781823545.5872934
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823545.6376526,
-        "price": 1.14635,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905989,
-        "ts": "2026-06-18 18:59:05",
-        "ts_epoch": 1781823545.7811003
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823545.653778,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828420,
-        "ts": "2026-06-18 18:59:05",
-        "ts_epoch": 1781823545.8378465
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823545.9264088,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828422,
-        "ts": "2026-06-18 18:59:06",
-        "ts_epoch": 1781823546.1581368
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823546.8254473,
-        "price": 1.14635,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905990,
-        "ts": "2026-06-18 18:59:06",
-        "ts_epoch": 1781823546.974126
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823547.2013156,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828424,
-        "ts": "2026-06-18 18:59:07",
-        "ts_epoch": 1781823547.383658
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823548.0004883,
-        "price": 1.14635,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905991,
-        "ts": "2026-06-18 18:59:08",
-        "ts_epoch": 1781823548.2180533
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823548.2454405,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828426,
-        "ts": "2026-06-18 18:59:08",
-        "ts_epoch": 1781823548.441399
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823549.2685144,
-        "price": 1.14635,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905992,
-        "ts": "2026-06-18 18:59:09",
-        "ts_epoch": 1781823549.403901
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823549.522334,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828428,
-        "ts": "2026-06-18 18:59:09",
-        "ts_epoch": 1781823549.7115798
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823550.4824622,
-        "price": 1.14631,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905993,
-        "ts": "2026-06-18 18:59:10",
-        "ts_epoch": 1781823550.6723795
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823550.7951176,
-        "lots": 0.01,
-        "price": 1.14624,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828431,
-        "ts": "2026-06-18 18:59:10",
-        "ts_epoch": 1781823550.9802163
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823551.7026105,
-        "price": 1.14631,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905995,
-        "ts": "2026-06-18 18:59:11",
-        "ts_epoch": 1781823551.8458629
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823552.071312,
-        "lots": 0.01,
-        "price": 1.14627,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828433,
-        "ts": "2026-06-18 18:59:12",
-        "ts_epoch": 1781823552.259669
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823552.8965147,
-        "price": 1.14633,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905996,
-        "ts": "2026-06-18 18:59:13",
-        "ts_epoch": 1781823553.029805
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823553.150187,
-        "lots": 0.01,
-        "price": 1.14626,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828435,
-        "ts": "2026-06-18 18:59:13",
-        "ts_epoch": 1781823553.3426166
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823554.0862942,
-        "price": 1.14633,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905997,
-        "ts": "2026-06-18 18:59:14",
-        "ts_epoch": 1781823554.2174964
-      },
-      {
-        "account": "DUKA-DEMO-DEMO2uotdK",
-        "cmd_ts": 1781823554.4352784,
-        "lots": 0.01,
-        "price": 1.14626,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 1142828437,
-        "ts": "2026-06-18 18:59:14",
-        "ts_epoch": 1781823554.6370955
-      },
-      {
-        "account": "DEMO-MT4-1218954455",
-        "cmd_ts": 1781823555.240268,
-        "price": 1.14633,
-        "quote_price": null,
-        "spread": null,
-        "ticket": 247905998,
-        "ts": "2026-06-18 18:59:15",
-        "ts_epoch": 1781823555.380161
-      }
-    ],
-    "hedge_monitor_start_ts": 1781823539.7228432,
-    "id": "2a0707e2-92ad-48ea-9730-d45bf8eb82e1",
-    "last_trade_ts": {
-      "DEMO-MT4-1218954455": 1781837045.1877525,
-      "DUKA-DEMO-DEMO2uotdK": 1781837045.3126037
-    },
-    "lot_size": 0.01,
-    "max_accum_deals": 0,
-    "max_accum_lots": 0.0,
-    "max_errors": 1,
-    "max_price_jump": 0.0,
-    "max_spread_points": 0,
-    "max_ticks_per_5s": 0,
-    "pair": "EURUSD",
-    "require_diff_skew_close": "",
-    "require_diff_skew_open": "",
-    "rollback_needed": {
-      "DEMO-MT4-1218954455": 0,
-      "DUKA-DEMO-DEMO2uotdK": 0
-    },
-    "rollback_start_ts": {},
-    "rollback_tickets": {},
-    "side1_max_spread": 99,
-    "side2_max_spread": 99,
-    "sides": {
-      "DEMO-MT4-1218954455": {
-        "action": "buy",
-        "comment": "1218954455-DUKA-DEMO-DEMO2uotdK",
-        "lot_size": 0.01,
-        "max_spread": 99,
-        "pair": "EURUSD",
-        "side_number": 1
-      },
-      "DUKA-DEMO-DEMO2uotdK": {
-        "action": "sell",
-        "comment": "1218954455-DUKA-DEMO-DEMO2uotdK",
-        "lot_size": 0.01,
-        "max_spread": 99,
-        "pair": "EURUSD",
-        "side_number": 2
-      }
-    },
-    "spread_rejects": {
-      "DEMO-MT4-1218954455": 0,
-      "DUKA-DEMO-DEMO2uotdK": 6
-    },
-    "status": "paused",
-    "strategy_id": "3e569fe6-607a-4b79-9f17-6d7dc1c72e80",
-    "total_positions": 10,
-    "trade_pause": 0.0,
-    "updated_at": "2026-06-18 22:44:05"
-  },
   "3361bdec-fbdd-4bd5-a5c4-920c67b1ddb5": {
     "action": "open",
     "avoid_news": false,
@@ -515,6 +61,894 @@
     "total_positions": 1,
     "trade_pause": 0.0,
     "updated_at": "2026-03-24 17:10:49"
+  },
+  "907e9db9-7b3f-4743-921c-1c95b653eefc": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507142.379202,
+        "price": 1.13858,
+        "ticket": 1143873045,
+        "ts": "2026-06-26 16:52:22",
+        "ts_epoch": 1782507142.5877445
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507142.5877445,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323779,
+        "ts": "2026-06-26 16:52:22",
+        "ts_epoch": 1782507142.7280884
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507142.897323,
+        "price": 1.13858,
+        "ticket": 1143873055,
+        "ts": "2026-06-26 16:52:23",
+        "ts_epoch": 1782507143.079205
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507143.770061,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323780,
+        "ts": "2026-06-26 16:52:23",
+        "ts_epoch": 1782507143.9169145
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507144.2036693,
+        "price": 1.13858,
+        "ticket": 1143873057,
+        "ts": "2026-06-26 16:52:24",
+        "ts_epoch": 1782507144.4007456
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507144.9637294,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323781,
+        "ts": "2026-06-26 16:52:25",
+        "ts_epoch": 1782507145.091056
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507145.2281642,
+        "price": 1.13858,
+        "ticket": 1143873059,
+        "ts": "2026-06-26 16:52:25",
+        "ts_epoch": 1782507145.4746387
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507146.1548312,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323782,
+        "ts": "2026-06-26 16:52:26",
+        "ts_epoch": 1782507146.3392606
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507146.4903321,
+        "price": 1.13858,
+        "ticket": 1143873061,
+        "ts": "2026-06-26 16:52:26",
+        "ts_epoch": 1782507146.6898618
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507147.3807678,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323783,
+        "ts": "2026-06-26 16:52:27",
+        "ts_epoch": 1782507147.5205834
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507147.7490163,
+        "price": 1.13858,
+        "ticket": 1143873063,
+        "ts": "2026-06-26 16:52:27",
+        "ts_epoch": 1782507147.9394703
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507148.5797222,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323784,
+        "ts": "2026-06-26 16:52:28",
+        "ts_epoch": 1782507148.7227826
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507148.778883,
+        "price": 1.13858,
+        "ticket": 1143873065,
+        "ts": "2026-06-26 16:52:29",
+        "ts_epoch": 1782507149.0083237
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507149.7853298,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323785,
+        "ts": "2026-06-26 16:52:29",
+        "ts_epoch": 1782507149.9413016
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507150.07045,
+        "price": 1.13858,
+        "ticket": 1143873067,
+        "ts": "2026-06-26 16:52:30",
+        "ts_epoch": 1782507150.2648172
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507150.974234,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323786,
+        "ts": "2026-06-26 16:52:31",
+        "ts_epoch": 1782507151.10983
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507151.4311192,
+        "price": 1.13858,
+        "ticket": 1143873070,
+        "ts": "2026-06-26 16:52:31",
+        "ts_epoch": 1782507151.6411648
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507152.2290995,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323787,
+        "ts": "2026-06-26 16:52:32",
+        "ts_epoch": 1782507152.3688133
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507152.4849126,
+        "price": 1.13858,
+        "ticket": 1143873073,
+        "ts": "2026-06-26 16:52:32",
+        "ts_epoch": 1782507152.6738575
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507153.4310522,
+        "lots": 0.01,
+        "price": 1.13848,
+        "ticket": 248323788,
+        "ts": "2026-06-26 16:52:33",
+        "ts_epoch": 1782507153.5635583
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323792,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323793,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323794,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323795,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323796,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323790,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "external": true,
+        "price": null,
+        "ticket": 248323791,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.6853383
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507183.7752566,
+        "open_price": 1.13842,
+        "open_ts": "2026-06-26 16:52:41",
+        "open_ts_epoch": 1782507161.2276614,
+        "price": 1.13846,
+        "ticket": 1143873108,
+        "ts": "2026-06-26 16:53:03",
+        "ts_epoch": 1782507183.968661
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507184.0274525,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:42",
+        "open_ts_epoch": 1782507162.2275574,
+        "price": 1.13846,
+        "ticket": 1143873111,
+        "ts": "2026-06-26 16:53:04",
+        "ts_epoch": 1782507184.2198343
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507184.5303495,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:43",
+        "open_ts_epoch": 1782507163.4973066,
+        "price": 1.13846,
+        "ticket": 1143873113,
+        "ts": "2026-06-26 16:53:04",
+        "ts_epoch": 1782507184.5646143
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": null,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:43",
+        "open_ts_epoch": 1782507163.4973066,
+        "price": 1.13846,
+        "ticket": 1143873113,
+        "ts": "2026-06-26 16:53:04",
+        "ts_epoch": 1782507184.7299907
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507184.815215,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:44",
+        "open_ts_epoch": 1782507164.7397194,
+        "price": 1.13846,
+        "ticket": 1143873115,
+        "ts": "2026-06-26 16:53:05",
+        "ts_epoch": 1782507185.0421002
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507185.0671585,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:45",
+        "open_ts_epoch": 1782507165.9943583,
+        "price": 1.13846,
+        "ticket": 1143873117,
+        "ts": "2026-06-26 16:53:05",
+        "ts_epoch": 1782507185.268407
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507185.4011345,
+        "open_price": 1.13844,
+        "open_ts": "2026-06-26 16:52:47",
+        "open_ts_epoch": 1782507167.0537055,
+        "price": 1.13846,
+        "ticket": 1143873119,
+        "ts": "2026-06-26 16:53:05",
+        "ts_epoch": 1782507185.5868201
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "external": true,
+        "price": null,
+        "ticket": 1143873128,
+        "ts": "2026-06-26 16:53:27",
+        "ts_epoch": 1782507207.7344756
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "external": true,
+        "price": null,
+        "ticket": 1143873121,
+        "ts": "2026-06-26 16:53:27",
+        "ts_epoch": 1782507207.7344756
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "external": true,
+        "price": null,
+        "ticket": 1143873123,
+        "ts": "2026-06-26 16:53:27",
+        "ts_epoch": 1782507207.7344756
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "external": true,
+        "price": null,
+        "ticket": 1143873134,
+        "ts": "2026-06-26 16:53:27",
+        "ts_epoch": 1782507207.7344756
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507208.7489662,
+        "lots": 0.01,
+        "price": 1.13827,
+        "ticket": 248323798,
+        "ts": "2026-06-26 16:53:28",
+        "ts_epoch": 1782507208.8823702
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507209.9036245,
+        "lots": 0.01,
+        "price": 1.13827,
+        "ticket": 248323797,
+        "ts": "2026-06-26 16:53:30",
+        "ts_epoch": 1782507210.0553384
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507211.1072779,
+        "lots": 0.01,
+        "price": 1.13827,
+        "ticket": 248323799,
+        "ts": "2026-06-26 16:53:31",
+        "ts_epoch": 1782507211.246048
+      }
+    ],
+    "closed": {
+      "DEMO-MT4-1218954455": 20,
+      "DUKA-DEMO-DEMO2uotdK": 21
+    },
+    "closed_lots": {
+      "DEMO-MT4-1218954455": 0.2,
+      "DUKA-DEMO-DEMO2uotdK": 0.21
+    },
+    "comment": "1218954455-DUKA-DEMO-DEMO2uotdK / 1218954455-DUKA-DEMO-DEMO2uotdK",
+    "created_at": "2026-06-26 16:31:10",
+    "diff_to_close": -99,
+    "diff_to_open": -99,
+    "errors": {
+      "DEMO-MT4-1218954455": [],
+      "DUKA-DEMO-DEMO2uotdK": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "DEMO-MT4-1218954455": 20,
+      "DUKA-DEMO-DEMO2uotdK": 20
+    },
+    "filled_lots": {
+      "DEMO-MT4-1218954455": 0.2,
+      "DUKA-DEMO-DEMO2uotdK": 0.2
+    },
+    "fills": [
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507125.9488544,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873045,
+        "ts": "2026-06-26 16:52:06",
+        "ts_epoch": 1782507126.145465
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507126.7232249,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323779,
+        "ts": "2026-06-26 16:52:06",
+        "ts_epoch": 1782507126.8731308
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507126.9868476,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873055,
+        "ts": "2026-06-26 16:52:07",
+        "ts_epoch": 1782507127.1913633
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507127.899048,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323780,
+        "ts": "2026-06-26 16:52:08",
+        "ts_epoch": 1782507128.031962
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507128.2454147,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873057,
+        "ts": "2026-06-26 16:52:08",
+        "ts_epoch": 1782507128.445325
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507129.0514235,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323781,
+        "ts": "2026-06-26 16:52:09",
+        "ts_epoch": 1782507129.1969652
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507129.2491374,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873059,
+        "ts": "2026-06-26 16:52:09",
+        "ts_epoch": 1782507129.4639533
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507130.2353628,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323782,
+        "ts": "2026-06-26 16:52:10",
+        "ts_epoch": 1782507130.3816233
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507130.5037851,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873061,
+        "ts": "2026-06-26 16:52:10",
+        "ts_epoch": 1782507130.6883028
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507131.4275706,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323783,
+        "ts": "2026-06-26 16:52:11",
+        "ts_epoch": 1782507131.563498
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507131.7740004,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873063,
+        "ts": "2026-06-26 16:52:11",
+        "ts_epoch": 1782507131.9780307
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507132.619407,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323784,
+        "ts": "2026-06-26 16:52:12",
+        "ts_epoch": 1782507132.7528331
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507132.777557,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873065,
+        "ts": "2026-06-26 16:52:12",
+        "ts_epoch": 1782507132.9656734
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507133.7752545,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323785,
+        "ts": "2026-06-26 16:52:13",
+        "ts_epoch": 1782507133.9213877
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507134.0515099,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873067,
+        "ts": "2026-06-26 16:52:14",
+        "ts_epoch": 1782507134.2488546
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507134.97951,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323786,
+        "ts": "2026-06-26 16:52:15",
+        "ts_epoch": 1782507135.1136482
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507135.1200967,
+        "lots": 0.01,
+        "price": 1.13852,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873070,
+        "ts": "2026-06-26 16:52:15",
+        "ts_epoch": 1782507135.3836782
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507136.1762352,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323787,
+        "ts": "2026-06-26 16:52:16",
+        "ts_epoch": 1782507136.3773289
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507136.4292428,
+        "lots": 0.01,
+        "price": 1.13852,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873073,
+        "ts": "2026-06-26 16:52:16",
+        "ts_epoch": 1782507136.6285348
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507137.4412498,
+        "lots": 0.01,
+        "price": 1.13861,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323788,
+        "ts": "2026-06-26 16:52:17",
+        "ts_epoch": 1782507137.5804706
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507161.0215716,
+        "lots": 0.01,
+        "price": 1.13842,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873108,
+        "ts": "2026-06-26 16:52:41",
+        "ts_epoch": 1782507161.2276614
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507161.7711387,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323790,
+        "ts": "2026-06-26 16:52:41",
+        "ts_epoch": 1782507161.9071834
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507162.0279176,
+        "lots": 0.01,
+        "price": 1.13844,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873111,
+        "ts": "2026-06-26 16:52:42",
+        "ts_epoch": 1782507162.2275574
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507162.983201,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323791,
+        "ts": "2026-06-26 16:52:43",
+        "ts_epoch": 1782507163.1316755
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507163.283059,
+        "lots": 0.01,
+        "price": 1.13844,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873113,
+        "ts": "2026-06-26 16:52:43",
+        "ts_epoch": 1782507163.4973066
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507164.1693747,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323792,
+        "ts": "2026-06-26 16:52:44",
+        "ts_epoch": 1782507164.3097193
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507164.5494802,
+        "lots": 0.01,
+        "price": 1.13844,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873115,
+        "ts": "2026-06-26 16:52:44",
+        "ts_epoch": 1782507164.7397194
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507165.4433064,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323793,
+        "ts": "2026-06-26 16:52:45",
+        "ts_epoch": 1782507165.5867517
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507165.805529,
+        "lots": 0.01,
+        "price": 1.13844,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873117,
+        "ts": "2026-06-26 16:52:45",
+        "ts_epoch": 1782507165.9943583
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507166.608213,
+        "lots": 0.01,
+        "price": 1.13853,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323794,
+        "ts": "2026-06-26 16:52:46",
+        "ts_epoch": 1782507166.7475798
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507166.832295,
+        "lots": 0.01,
+        "price": 1.13844,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873119,
+        "ts": "2026-06-26 16:52:47",
+        "ts_epoch": 1782507167.0537055
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507167.7897682,
+        "lots": 0.01,
+        "price": 1.13852,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323795,
+        "ts": "2026-06-26 16:52:47",
+        "ts_epoch": 1782507167.9232352
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507168.1693332,
+        "lots": 0.01,
+        "price": 1.13843,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873121,
+        "ts": "2026-06-26 16:52:48",
+        "ts_epoch": 1782507168.3716426
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507168.4006171,
+        "lots": 0.01,
+        "price": 1.13849,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323796,
+        "ts": "2026-06-26 16:52:48",
+        "ts_epoch": 1782507168.5330677
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507168.556985,
+        "lots": 0.01,
+        "price": 1.13847,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323797,
+        "ts": "2026-06-26 16:52:48",
+        "ts_epoch": 1782507168.6992395
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507168.6736877,
+        "lots": 0.01,
+        "price": 1.13837,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873123,
+        "ts": "2026-06-26 16:52:48",
+        "ts_epoch": 1782507168.8730693
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507168.9272075,
+        "lots": 0.01,
+        "price": 1.13837,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873128,
+        "ts": "2026-06-26 16:52:49",
+        "ts_epoch": 1782507169.139982
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507169.735432,
+        "lots": 0.01,
+        "price": 1.13848,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323798,
+        "ts": "2026-06-26 16:52:49",
+        "ts_epoch": 1782507169.8751674
+      },
+      {
+        "account": "DUKA-DEMO-DEMO2uotdK",
+        "cmd_ts": 1782507170.0288305,
+        "lots": 0.01,
+        "price": 1.13837,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 1143873134,
+        "ts": "2026-06-26 16:52:50",
+        "ts_epoch": 1782507170.2328222
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1782507170.9131877,
+        "lots": 0.01,
+        "price": 1.13848,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 248323799,
+        "ts": "2026-06-26 16:52:51",
+        "ts_epoch": 1782507171.0469568
+      }
+    ],
+    "hedge_monitor_start_ts": 1782507040.9260933,
+    "id": "907e9db9-7b3f-4743-921c-1c95b653eefc",
+    "last_trade_ts": {
+      "DEMO-MT4-1218954455": 1782507211.246048,
+      "DUKA-DEMO-DEMO2uotdK": 1782507185.5868201
+    },
+    "lot_size": 0.01,
+    "match_mode": "lots",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "EURUSD",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {
+      "DEMO-MT4-1218954455": 0,
+      "DUKA-DEMO-DEMO2uotdK": 0
+    },
+    "rollback_start_ts": {},
+    "rollback_tickets": {},
+    "side1_max_spread": 99,
+    "side2_max_spread": 99,
+    "sides": {
+      "DEMO-MT4-1218954455": {
+        "action": "buy",
+        "comment": "1218954455-DUKA-DEMO-DEMO2uotdK",
+        "lot_size": 0.01,
+        "max_spread": 99,
+        "pair": "EURUSD",
+        "side_number": 1
+      },
+      "DUKA-DEMO-DEMO2uotdK": {
+        "action": "sell",
+        "comment": "1218954455-DUKA-DEMO-DEMO2uotdK",
+        "lot_size": 0.01,
+        "max_spread": 99,
+        "pair": "EURUSD",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "DEMO-MT4-1218954455": 0,
+      "DUKA-DEMO-DEMO2uotdK": 0
+    },
+    "status": "active",
+    "strategy_id": "3e569fe6-607a-4b79-9f17-6d7dc1c72e80",
+    "total_positions": 10,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-26 16:53:31"
   },
   "a3a3df48-5e82-492e-98af-f81350994c8f": {
     "action": "monitor",
