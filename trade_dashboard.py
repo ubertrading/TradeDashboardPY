@@ -10568,24 +10568,49 @@ function renderClosedDeals() {
     const side1 = s.sides[accs[0]];
     const side2 = s.sides[accs[1]];
     const pipMult = s.pair.toUpperCase().includes('JPY') ? 1000 : 100000;
-    // Group close fills by account
-    const cf1 = closeFills.filter(f => f.account === accs[0]);
-    const cf2 = closeFills.filter(f => f.account === accs[1]);
+    // Group close fills by account, sort by time to align cycle closes properly
+    const cf1 = closeFills.filter(f => f.account === accs[0]).sort((a, b) => (a.ts_epoch || 0) - (b.ts_epoch || 0));
+    const cf2 = closeFills.filter(f => f.account === accs[1]).sort((a, b) => (a.ts_epoch || 0) - (b.ts_epoch || 0));
     // Also get open fills to pair for P&L calculation
     const openFills = s.fills || [];
     const of1 = openFills.filter(f => f.account === accs[0]);
     const of2 = openFills.filter(f => f.account === accs[1]);
-    const totalPairs = Math.min(cf1.length, cf2.length);
-    if (totalPairs === 0) return;
-    for (let i = 0; i < totalPairs; i++) {
-      const c1 = cf1[i];
-      const c2 = cf2[i];
+    
+    // Time-based pairing for closes (fixes misalignment when one side has cycle closes)
+    const pairedCloses = [];
+    let idx1 = 0, idx2 = 0;
+    while (idx1 < cf1.length || idx2 < cf2.length) {
+      if (idx1 < cf1.length && idx2 < cf2.length) {
+        const t1 = cf1[idx1].ts_epoch || 0;
+        const t2 = cf2[idx2].ts_epoch || 0;
+        if (Math.abs(t1 - t2) < 60) {
+          pairedCloses.push({c1: cf1[idx1], c2: cf2[idx2]});
+          idx1++; idx2++;
+        } else if (t1 < t2) {
+          pairedCloses.push({c1: cf1[idx1], c2: null});
+          idx1++;
+        } else {
+          pairedCloses.push({c1: null, c2: cf2[idx2]});
+          idx2++;
+        }
+      } else if (idx1 < cf1.length) {
+        pairedCloses.push({c1: cf1[idx1], c2: null});
+        idx1++;
+      } else {
+        pairedCloses.push({c1: null, c2: cf2[idx2]});
+        idx2++;
+      }
+    }
+
+    if (pairedCloses.length === 0) return;
+    for (let pIdx = 0; pIdx < pairedCloses.length; pIdx++) {
+      const c1 = pairedCloses[pIdx].c1;
+      const c2 = pairedCloses[pIdx].c2;
       const cp1 = c1 && c1.price != null ? c1.price : null;
       const cp2 = c2 && c2.price != null ? c2.price : null;
-      // Find the matching open fill: first check embedded data in close_fill,
-      // then try finding by ticket in fills list, then fallback to index
-      const o1 = c1.open_price != null ? c1 : (of1.find(f => f.ticket == c1.ticket) || of1[i]);
-      const o2 = c2.open_price != null ? c2 : (of2.find(f => f.ticket == c2.ticket) || of2[i]);
+      // Find the matching open fill strictly by ticket (do not fallback to index which grabs wrong cycle ticket)
+      const o1 = c1 ? (c1.open_price != null ? c1 : of1.find(f => f.ticket == c1.ticket)) : null;
+      const o2 = c2 ? (c2.open_price != null ? c2 : of2.find(f => f.ticket == c2.ticket)) : null;
       const op1 = o1 && o1.open_price != null ? o1.open_price : (o1 && o1.price != null ? o1.price : null);
       const op2 = o2 && o2.open_price != null ? o2.open_price : (o2 && o2.price != null ? o2.price : null);
       const openTime1 = c1.open_ts || (o1 && o1 !== c1 ? o1.ts : null);
@@ -10630,8 +10655,11 @@ function renderClosedDeals() {
         if (closeSlip2 > 0) closeSlip2 = '+' + closeSlip2;
       }
 
-      const statusLabel = s.status === 'completed' ? 'CLOSED' :
+      let statusLabel = s.status === 'completed' ? 'CLOSED' :
                           s.status === 'partial_close' ? '<span style="color:#ff4757;font-weight:700;">PARTIAL</span>' : 'CLOSED';
+      if (c1 == null || c2 == null) {
+        statusLabel = '<span style="color:#f39c12;font-weight:700;">CYCLE</span>';
+      }
       dealRows.push({
         pairLabel: s.pair,
         session1: accs[0], session2: accs[1],
