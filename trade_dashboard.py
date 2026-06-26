@@ -7001,10 +7001,9 @@ def _process_position_import(req):
         lot_size = pos1[0].get("lots", 0.01)
     elif pos2 and not _acct2_netting:
         lot_size = pos2[0].get("lots", 0.01)
-    elif pos1:
-        lot_size = pos1[0].get("lots", 0.01)
-    elif pos2:
-        lot_size = pos2[0].get("lots", 0.01)
+    # Do not fallback to pos1/pos2 if they are netting, as they represent aggregate
+    # positions. We keep the default lot_size (0.01) so the aggregate is split into
+    # the smallest safe increments.
 
     # Split netting aggregate positions into virtual fills
     if _acct1_netting:
