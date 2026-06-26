@@ -42,10 +42,13 @@ def _normalize_ticket(t):
     MQL4 OrderTicket() returns signed 32-bit int. Brokers assigning tickets > 2^31
     cause overflow to negative in MQL4, but may appear positive in URL params.
     e.g. 4046502528 (unsigned) == -248464768 (signed 32-bit)"""
-    t = int(t)
-    if t < 0:
-        t += (1 << 32)  # Convert negative 32-bit overflow to unsigned
-    return t
+    try:
+        v = int(t)
+        if v < 0:
+            v += (1 << 32)  # Convert negative 32-bit overflow to unsigned
+        return v
+    except (ValueError, TypeError):
+        return t
 
 
 # ─── Time Window ────────────────────────────────────────────────────────────
@@ -339,41 +342,48 @@ def _should_issue_command(session, account):
         if current >= effective_target:
             return False
 
+        # Check if we are in the middle of an incomplete batch close.
+        # This prevents the system from getting stuck with an unbalanced hedge
+        # if the price ticks away while closing multiple positions (e.g. virtual fills).
+        mid_close = sum(session.get("closed", {}).values()) > 0
+
         # Diff-to-close gating: only close when DIFF2 >= threshold.
         # Blank/None = don't close (mirrors diff_to_open: None = don't open).
         diff_to_close = session.get("diff_to_close")
         if diff_to_close is None or diff_to_close == "":
             return False  # Blank = don't close
-        diff_to_close = int(diff_to_close)
-        curr_diff_val, _ = _calc_curr_diff(session, "close")
-        if curr_diff_val is None or curr_diff_val < diff_to_close:
-            return False
+        
+        if not mid_close:
+            diff_to_close = int(diff_to_close)
+            curr_diff_val, _ = _calc_curr_diff(session, "close")
+            if curr_diff_val is None or curr_diff_val < diff_to_close:
+                return False
 
-        # ── Execution Filters (close) ──
-        max_ticks = session.get("max_ticks_per_5s", 0)
-        if max_ticks > 0:
-            for acc in sides:
-                ei = ea_account_info.get(acc, {})
-                if ei.get("ticks_per_5s", 0) > max_ticks:
-                    return False
+            # ── Execution Filters (close) ──
+            max_ticks = session.get("max_ticks_per_5s", 0)
+            if max_ticks > 0:
+                for acc in sides:
+                    ei = ea_account_info.get(acc, {})
+                    if ei.get("ticks_per_5s", 0) > max_ticks:
+                        return False
 
-        max_jump = session.get("max_price_jump", 0)
-        if max_jump > 0:
-            for acc in sides:
-                ei = ea_account_info.get(acc, {})
-                if ei.get("last_bid_delta", 0) > max_jump:
-                    return False
+            max_jump = session.get("max_price_jump", 0)
+            if max_jump > 0:
+                for acc in sides:
+                    ei = ea_account_info.get(acc, {})
+                    if ei.get("last_bid_delta", 0) > max_jump:
+                        return False
 
-        # DIFF skew filter
-        skew_close = session.get("require_diff_skew_close", "")
-        if skew_close:
-            diff1, _ = _calc_curr_diff(session, "open")
-            diff2, _ = _calc_curr_diff(session, "close")
-            if diff1 is not None and diff2 is not None:
-                if skew_close == "d1>d2" and diff1 <= diff2:
-                    return False
-                if skew_close == "d2>d1" and diff2 <= diff1:
-                    return False
+            # DIFF skew filter
+            skew_close = session.get("require_diff_skew_close", "")
+            if skew_close:
+                diff1, _ = _calc_curr_diff(session, "open")
+                diff2, _ = _calc_curr_diff(session, "close")
+                if diff1 is not None and diff2 is not None:
+                    if skew_close == "d1>d2" and diff1 <= diff2:
+                        return False
+                    if skew_close == "d2>d1" and diff2 <= diff1:
+                        return False
     elif action.startswith("cycle_"):
         # CYCLE mode: close and reopen positions on ONE side, one at a time.
         target_side_num = 1 if action == "cycle_acc1" else 2

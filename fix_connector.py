@@ -2700,26 +2700,9 @@ class DukascopyFixAccount:
                             self.account_id, order_info.get("side", "?").upper(),
                             sym_name, fill_price, fill_qty, is_close, clordid_str)
 
-                # Track new position from order_id
-                if order_id_str and not is_close:
-                    self._positions[order_id_str] = {
-                        "symbol": sym_name,
-                        "side": order_info.get("side"),
-                        "qty": fill_qty,
-                        "price": fill_price,
-                    }
-                elif is_close and order_info.get("position_id"):
-                    # Remove closed position
-                    pos_key = str(order_info["position_id"])
-                    if pos_key not in self._positions:
-                        import hashlib
-                        for pid, p in list(self._positions.items()):
-                            sym = p["symbol"].upper()
-                            ticket_int = int(hashlib.md5(sym.encode()).hexdigest()[:8], 16)
-                            if pos_key == str(ticket_int):
-                                pos_key = pid
-                                break
-                    self._positions.pop(pos_key, None)
+                # Netting mode: do not track individual fill tickets as positions.
+                # Position tracking is handled via U3 InstrumentPositionInfo messages.
+                pass
 
                 # Feed into dashboard
                 session_id = order_info.get("session_id")
@@ -3019,27 +3002,9 @@ class DukascopyFixAccount:
                         self.account_id, order_info.get("side", "?").upper(),
                         sym_name, fill_price, fill_qty, is_close)
 
-            # Track new position from order_id
-            if order_id_str and not is_close:
-                side = "buy" if side_raw == SIDE_BUY else "sell"
-                self._positions[order_id_str] = {
-                    "symbol": sym_name,
-                    "side": side,
-                    "qty": fill_qty,
-                    "price": fill_price,
-                }
-            elif is_close and order_info.get("position_id"):
-                # Remove closed position
-                pos_key = str(order_info["position_id"])
-                if pos_key not in self._positions:
-                    import hashlib
-                    for pid, p in list(self._positions.items()):
-                        sym = p["symbol"].upper()
-                        ticket_int = int(hashlib.md5(sym.encode()).hexdigest()[:8], 16)
-                        if pos_key == str(ticket_int):
-                            pos_key = pid
-                            break
-                self._positions.pop(pos_key, None)
+            # Netting mode: do not track individual fill tickets as positions.
+            # Position tracking is handled via U3 InstrumentPositionInfo messages.
+            pass
 
             # Feed into dashboard
             session_id = order_info.get("session_id")

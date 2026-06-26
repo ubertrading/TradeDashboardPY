@@ -1198,10 +1198,13 @@ def _normalize_ticket(t):
     MQL4 OrderTicket() returns signed 32-bit int. Brokers assigning tickets > 2^31
     cause overflow to negative in MQL4, but may appear positive in URL params.
     e.g. 4046502528 (unsigned) == -248464768 (signed 32-bit)"""
-    t = int(t)
-    if t < 0:
-        t += (1 << 32)  # Convert negative 32-bit overflow to unsigned
-    return t
+    try:
+        v = int(t)
+        if v < 0:
+            v += (1 << 32)  # Convert negative 32-bit overflow to unsigned
+        return v
+    except (ValueError, TypeError):
+        return t
 
 # ─── Persistence ────────────────────────────────────────────────────────────
 def _save_sessions():
