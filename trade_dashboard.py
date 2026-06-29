@@ -2317,7 +2317,16 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
             counts = {}
             for a in acct_list:
                 ea_info = ea_account_info.get(a, {})
-                counts[a] = ea_info.get("positions", -1)
+                pos_val = ea_info.get("positions", -1)
+                if isinstance(pos_val, dict):
+                    counts[a] = int(sum(pos_val.values())) if all(isinstance(v, (int, float)) for v in pos_val.values()) else len(pos_val)
+                elif isinstance(pos_val, list):
+                    counts[a] = len(pos_val)
+                else:
+                    try:
+                        counts[a] = int(pos_val)
+                    except (ValueError, TypeError):
+                        counts[a] = -1
             # Verify the cycled account matches expected
             actual = counts.get(account, -1)
             if actual >= 0 and actual != expected_count:
@@ -10637,8 +10646,8 @@ function renderClosedDeals() {
       const o2 = c2 ? (c2.open_price != null ? c2 : of2.find(f => f.ticket == c2.ticket)) : null;
       const op1 = o1 && o1.open_price != null ? o1.open_price : (o1 && o1.price != null ? o1.price : null);
       const op2 = o2 && o2.open_price != null ? o2.open_price : (o2 && o2.price != null ? o2.price : null);
-      const openTime1 = c1.open_ts || (o1 && o1 !== c1 ? o1.ts : null);
-      const openTime2 = c2.open_ts || (o2 && o2 !== c2 ? o2.ts : null);
+      const openTime1 = (c1 && c1.open_ts) ? c1.open_ts : (o1 && o1 !== c1 ? o1.ts : null);
+      const openTime2 = (c2 && c2.open_ts) ? c2.open_ts : (o2 && o2 !== c2 ? o2.ts : null);
       // Calculate realized P&L: for each side, (close - open) for buy, (open - close) for sell
       let profit = '-';
       const s1act = (side1.action || 'sell').toLowerCase();
