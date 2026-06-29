@@ -1037,11 +1037,13 @@ def _swap_alert_loop():
                     if old_val == 0 and new_val == 0:
                         continue
                     if old_val == 0:
-                        pct_change = 100.0  # From zero to something
+                        pct_change = 100.0 if new_val > 0 else -100.0
+                        abs_pct_change = 100.0
                     else:
-                        pct_change = abs((new_val - old_val) / old_val) * 100
+                        pct_change = ((new_val - old_val) / old_val) * 100
+                        abs_pct_change = abs(pct_change)
 
-                    if pct_change >= pct_threshold:
+                    if abs_pct_change >= pct_threshold:
                         triggered = True
                         label = "Long" if direction == "swap_long" else "Short"
                         alerts.append({
@@ -1052,7 +1054,7 @@ def _swap_alert_loop():
                             "pct": pct_change,
                             "account": curr["account"],
                         })
-                    elif pct_change > 0:
+                    elif abs_pct_change > 0:
                         label = "Long" if direction == "swap_long" else "Short"
                         logger.debug("[SWAP-ALERT] %s (%s) %s changed %.2f%% (below %.1f%% threshold): %.5f → %.5f",
                                      curr["symbol"], curr["account"], label, pct_change, pct_threshold, old_val, new_val)
