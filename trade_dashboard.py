@@ -185,8 +185,13 @@ root_logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Suppress werkzeug's per-request HTTP log lines (very verbose with open_tickets params)
+# Suppress werkzeug's per-request HTTP log lines (very verbose with open_tickets)
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+lock = threading.RLock()  # RLock: reentrant — _send_trade_alert re-acquires inside _log_event
+dashboard_settings = {}
+_dashboard_start_time = time.time()
+sessions = {}           # session_id -> session dict
 
 # Redirect print() to logger so HEDGE-MON, HEDGE-TRACE etc. are captured in the log file
 class _PrintLogger:
@@ -200,8 +205,6 @@ class _PrintLogger:
 sys.stdout = _PrintLogger()
 
 # ─── In-memory state ────────────────────────────────────────────────────────
-lock = threading.RLock()  # RLock: reentrant — _send_trade_alert re-acquires inside _log_event
-sessions = {}           # session_id -> session dict
 event_log = []          # list of {ts, session_id, account, event, detail}
 ea_heartbeats = {}      # account -> last_poll_ts (track EA connectivity)
 ea_account_info = {}    # account -> {balance, equity, bid, ask, spread, symbol, last_update}
@@ -1642,6 +1645,13 @@ def _send_telegram(message, account_id=None):
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 resp.read()
             success = True
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode('utf-8')
+            except Exception:
+                err_body = str(e)
+            app.logger.error(f"Telegram send failed for chat_id {cid}: HTTP {e.code} - {err_body}")
+            errors.append(f"{cid}: HTTP {e.code} - {err_body}")
         except Exception as e:
             app.logger.exception(f"Telegram send failed for chat_id {cid}")
             errors.append(f"{cid}: {str(e)}")
@@ -1865,6 +1875,11 @@ def _check_position_changes(all_accounts_info):
     """Detect position count changes and send alerts."""
     if not dashboard_settings.get("position_change_alert", False):
         return
+        
+    # Do not alert during the first 60 seconds of dashboard uptime 
+    # to avoid spam as accounts connect and load their initial state
+    is_startup = (time.time() - globals().get('_dashboard_start_time', 0)) < 60
+    
     for acct_id, info in all_accounts_info.items():
         try:
             pos = info.get("positions")
@@ -1872,6 +1887,11 @@ def _check_position_changes(all_accounts_info):
                 continue
             pos = int(pos)
             prev = _last_position_counts.get(acct_id)
+            
+            if is_startup:
+                _last_position_counts[acct_id] = pos
+                continue
+                
             if prev is not None and pos != prev:
                 is_open = pos > prev
                 is_close = pos < prev
