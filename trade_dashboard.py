@@ -2174,6 +2174,7 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
         close_price_val = data.get("close_price")
     if close_price_val is None or close_price_val == 0:
         close_price_val = data.get("price")
+    quote_price_val = data.get("quote_price")
     if close_price_val is not None and float(close_price_val) > 0:
         progress["last_close_price"] = float(close_price_val)
     # Store the closed ticket so _cycle_handle_fill can replace the correct fill
@@ -2184,6 +2185,7 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
         "account": account,
         "ticket": ticket,
         "price": float(close_price_val) if close_price_val is not None else None,
+        "quote_price": float(quote_price_val) if quote_price_val is not None else None,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ts_epoch": time.time(),
         "cmd_ts": cmd_sent_ts,
@@ -5263,6 +5265,7 @@ def trade_result():
                     session.setdefault("last_trade_ts", {})[account] = time.time()
 
                     close_price = data.get("fill_price") or data.get("close_price") or data.get("price")
+                    quote_price = data.get("quote_price")
                     # Look up the matching open fill to preserve its open price/time
                     # (the fill may be replaced later by cycling, losing this data)
                     orig_fill = next(
@@ -5274,6 +5277,7 @@ def trade_result():
                         "account": account,
                         "ticket": ticket,
                         "price": float(close_price) if close_price else None,
+                        "quote_price": float(quote_price) if quote_price else None,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "ts_epoch": time.time(),
                         "cmd_ts": cmd_sent_ts,
@@ -5310,10 +5314,12 @@ def trade_result():
                     _update_closed_lots(session, account, _cl_lot)
                     session.setdefault("last_trade_ts", {})[account] = time.time()
                     close_price = data.get("fill_price") or data.get("close_price") or data.get("price")
+                    quote_price = data.get("quote_price")
                     session.setdefault("close_fills", []).append({
                         "account": account,
                         "ticket": ticket,
                         "price": float(close_price) if close_price else None,
+                        "quote_price": float(quote_price) if quote_price else None,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "ts_epoch": time.time(),
                         "cmd_ts": cmd_sent_ts,
@@ -15430,6 +15436,7 @@ if __name__ == '__main__':
                         session["closed"][account] = session["closed"].get(account, 0) + 1
                         session.setdefault("last_trade_ts", {})[account] = time.time()
                         close_price = data.get("fill_price")
+                        quote_price = data.get("quote_price")
                         
                         closed_lot_size = float(data.get("lots", 0) or 0)
                         if closed_lot_size <= 0:
@@ -15445,6 +15452,7 @@ if __name__ == '__main__':
                             "account": account,
                             "ticket": ticket,
                             "price": float(close_price) if close_price else None,
+                            "quote_price": float(quote_price) if quote_price else None,
                             "lots": closed_lot_size,
                             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "ts_epoch": time.time(),
