@@ -583,6 +583,9 @@ public class MtAccount
         try { _mt5.ExecutionTimeout = 120000; }
         catch (Exception ex) { _logger.LogWarning("[{Id}] Could not set ExecutionTimeout: {Err}", Config.Id, ex.Message); }
 
+        try { _mt5.DisconnectOnSymbolUpdate = true; }
+        catch (Exception ex) { _logger.LogWarning("[{Id}] Could not set DisconnectOnSymbolUpdate: {Err}", Config.Id, ex.Message); }
+
         // Connect with timeout
         Exception? connectErr = null;
         var connectThread = new Thread(() =>
@@ -665,6 +668,10 @@ public class MtAccount
         }
 
         _mt4 = new TradingAPI.MT4Server.QuoteClient((int)Config.Login, Config.Password, Config.Server, Config.Port);
+        
+        try { _mt4.DisconnectOnSymbolUpdate = true; }
+        catch (Exception ex) { _logger.LogWarning("[{Id}] Could not set DisconnectOnSymbolUpdate: {Err}", Config.Id, ex.Message); }
+
         _mt4.Connect();
 
         if (!_mt4.Connected)
