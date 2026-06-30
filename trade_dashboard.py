@@ -6007,6 +6007,8 @@ def update_account(account_name):
                 acct["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
             if "alert_telegram" in data:
                 acct["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
+            if "notes" in data:
+                acct["notes"] = str(data["notes"])
             if "fee_threshold" in data:
                 try:
                     acct["fee_threshold"] = float(data["fee_threshold"])
@@ -6328,7 +6330,7 @@ def update_fix_account(account_id):
                      'openapi_account_id', 'openapi_environment',
                      'auto_connect_start', 'cycle_reminder_enabled',
                      'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
-                     'group_label', 'margin_alert_threshold', 'alert_email', 'alert_telegram']:
+                     'group_label', 'margin_alert_threshold', 'alert_email', 'alert_telegram', 'notes']:
             if key in data:
                 acct.config[key] = data[key]
         if "label" in data:
@@ -6456,7 +6458,7 @@ def update_mt_direct_account(account_id):
 
         for key in ['login', 'server', 'port', 'label', 'slippage', 'magic_number', 'type', 'stop_out_level',
                      'auto_connect_start', 'cycle_reminder_enabled', 'cycle_reminder_days',
-                     'cycle_max_days', 'auto_cycle_enabled', 'alert_email', 'alert_telegram']:
+                     'cycle_max_days', 'auto_cycle_enabled', 'alert_email', 'alert_telegram', 'notes']:
             if key in data:
                 acct.config[key] = data[key]
         if "label" in data:
@@ -9242,8 +9244,15 @@ body {
 
 <!-- Edit EA/Manual Account Modal -->
 <div class="modal-overlay" id="editEAAccountModal">
-  <div class="modal" style="max-width:480px;">
-    <h2>Edit Account</h2>
+  <div class="modal" style="max-width:480px; position:relative;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2>Edit Account</h2>
+      <button type="button" title="Account Notes" onclick="toggleNotes('eea')" style="background:none;border:none;cursor:pointer;font-size:1.2rem;">📝</button>
+    </div>
+    <div id="eeaNotesContainer" style="display:none;position:absolute;top:50px;right:20px;background:var(--surface);padding:12px;border:1px solid var(--border);border-radius:8px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.5);">
+      <label style="display:block;margin-bottom:4px;font-size:0.85rem;color:var(--text2);">Notes</label>
+      <textarea id="eeaNotes" style="width:250px;height:120px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;" placeholder="Add notes here..."></textarea>
+    </div>
     <input type="hidden" id="eeaAcctName">
     <div class="form-grid" style="grid-template-columns:1fr 1fr;">
       <div class="form-group">
@@ -9315,8 +9324,15 @@ body {
 
 <!-- Edit MT Direct Account Modal -->
 <div class="modal-overlay" id="editMTDirectModal">
-  <div class="modal" style="max-width:500px;">
-    <h2>Edit MT Direct Account</h2>
+  <div class="modal" style="max-width:500px; position:relative;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2>Edit MT Direct Account</h2>
+      <button type="button" title="Account Notes" onclick="toggleNotes('emtd')" style="background:none;border:none;cursor:pointer;font-size:1.2rem;">📝</button>
+    </div>
+    <div id="emtdNotesContainer" style="display:none;position:absolute;top:50px;right:20px;background:var(--surface);padding:12px;border:1px solid var(--border);border-radius:8px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.5);">
+      <label style="display:block;margin-bottom:4px;font-size:0.85rem;color:var(--text2);">Notes</label>
+      <textarea id="emtdNotes" style="width:250px;height:120px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;" placeholder="Add notes here..."></textarea>
+    </div>
     <input type="hidden" id="emtdAcctId">
     <div class="form-grid" style="grid-template-columns:1fr 1fr;">
       <div class="form-group">
@@ -9387,8 +9403,15 @@ body {
 
 <!-- Edit FIX Account Modal -->
 <div class="modal-overlay" id="editFixAccountModal">
-  <div class="modal" style="max-width:600px;">
-    <h2>Edit API Account</h2>
+  <div class="modal" style="max-width:600px; position:relative;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2>Edit API Account</h2>
+      <button type="button" title="Account Notes" onclick="toggleNotes('efx')" style="background:none;border:none;cursor:pointer;font-size:1.2rem;">📝</button>
+    </div>
+    <div id="efxNotesContainer" style="display:none;position:absolute;top:50px;right:20px;background:var(--surface);padding:12px;border:1px solid var(--border);border-radius:8px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.5);">
+      <label style="display:block;margin-bottom:4px;font-size:0.85rem;color:var(--text2);">Notes</label>
+      <textarea id="efxNotes" style="width:250px;height:120px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;" placeholder="Add notes here..."></textarea>
+    </div>
     <input type="hidden" id="efxAcctId">
     <div class="form-grid" style="grid-template-columns:1fr 1fr;">
       <div class="form-group">
@@ -14009,6 +14032,11 @@ async function deleteFixAccount(id) {
 }
 
 // -- Toggle FIX vs Open API fields in modals --------------------------------
+function toggleNotes(prefix) {
+  const el = document.getElementById(prefix + 'NotesContainer');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
 function toggleFixFields(prefix) {
   // prefix is 'fx' (add modal) or 'efx' (edit modal)
   const impl = document.getElementById(prefix + 'Impl').value;
@@ -14087,6 +14115,8 @@ async function editFixAccount(id) {
     document.getElementById('efxAcctIdDisplay').value = id;
     document.getElementById('efxImpl').value = cfg.implementation || 'ctrader';
     document.getElementById('efxLabel').value = cfg.label || '';
+    document.getElementById('efxNotes').value = cfg.notes || '';
+    document.getElementById('efxNotesContainer').style.display = 'none';
     document.getElementById('efxGroupLabel').value = cfg.group_label || '';
     document.getElementById('efxHost').value = cfg.host || '';
     document.getElementById('efxTradePort').value = cfg.trade_port || 5202;
@@ -14156,7 +14186,8 @@ async function saveFixAccountEdit() {
     auto_cycle_enabled: document.getElementById('efxAutoCycle').checked,
     alert_email: document.getElementById('efxAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('efxAlertTelegramIds').value.trim() || null,
-    stop_out_level: document.getElementById('efxStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('efxStopOutLevel').value) : null
+    stop_out_level: document.getElementById('efxStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('efxStopOutLevel').value) : null,
+    notes: document.getElementById('efxNotes').value
   };
   try {
     const res = await fetch('/api/fix_accounts/' + encodeURIComponent(id), {
@@ -14268,6 +14299,8 @@ function editEAAccount(name) {
     connType = mtInfo.type === 'mt5_direct' ? 'mt5_direct' : 'mt4_direct';
   }
   document.getElementById('eeaConnType').value = connType;
+  document.getElementById('eeaNotes').value = info.notes || eaInfo.notes || mtInfo?.notes || '';
+  document.getElementById('eeaNotesContainer').style.display = 'none';
   document.getElementById('eeaGroupLabel').value = info.group_label || eaInfo.group_label || '';
   document.getElementById('eeaFeeThreshold').value = info.fee_threshold || '';
   document.getElementById('eeaStopOutLevel').value = info.stop_out_level != null ? info.stop_out_level : '';
@@ -14315,7 +14348,8 @@ async function saveEAAccountEdit() {
     group_label: document.getElementById('eeaGroupLabel').value.trim(),
     alert_email: document.getElementById('eeaAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('eeaAlertTelegramIds').value.trim() || null,
-    stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null
+    stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
+    notes: document.getElementById('eeaNotes').value
   };
   const fee = document.getElementById('eeaFeeThreshold').value.trim();
   if (fee) payload.fee_threshold = parseFloat(fee);
@@ -14456,6 +14490,8 @@ async function editMTDirect(id) {
     document.getElementById('emtdPassword').value = cfg.password || '';
     document.getElementById('emtdServer').value = cfg.server || '';
     document.getElementById('emtdPort').value = cfg.port || 443;
+    document.getElementById('emtdNotes').value = cfg.notes || '';
+    document.getElementById('emtdNotesContainer').style.display = 'none';
     document.getElementById('emtdLabel').value = cfg.label || '';
     document.getElementById('emtdSlippage').value = cfg.slippage || 3;
     document.getElementById('emtdMagic').value = cfg.magic_number || 777888;
@@ -14491,7 +14527,8 @@ async function saveMTDirectEdit() {
     auto_cycle_enabled: document.getElementById('emtdAutoCycle').checked,
     alert_email: document.getElementById('emtdAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('emtdAlertTelegramIds').value.trim() || null,
-    stop_out_level: document.getElementById('emtdStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('emtdStopOutLevel').value) : null
+    stop_out_level: document.getElementById('emtdStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('emtdStopOutLevel').value) : null,
+    notes: document.getElementById('emtdNotes').value
   };
   try {
     const res = await fetch('/api/mt_direct_accounts/' + encodeURIComponent(id), {
