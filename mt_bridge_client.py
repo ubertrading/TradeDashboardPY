@@ -345,7 +345,12 @@ class MtBridgeAccount:
                 logger.error("[%s] Bridge heartbeat error: %s", self.account_id, e)
                 self._connected = False
 
-            time.sleep(15)  # 15s sync interval
+            # Poll more frequently (0.5s) to quickly detect externally closed positions
+            # for hedge rebalancing. Sleep in short increments to allow quick exit.
+            for _ in range(2):
+                if not self._running:
+                    break
+                time.sleep(0.25)
 
     def _push_account_info(self, info=None):
         """Push account data into ea_account_info."""

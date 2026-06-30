@@ -684,8 +684,8 @@ def _run_hedge_monitor_all():
     _log_event = _ctx["log_event"]
 
     now_ts = time.time()
-    # Throttle: only check every 3 seconds
-    if (now_ts - _hedge_monitor_last_run[0]) < 3:
+    # Throttle: only check every 0.5 seconds
+    if (now_ts - _hedge_monitor_last_run[0]) < 0.5:
         return
     _hedge_monitor_last_run[0] = now_ts
 
@@ -871,11 +871,16 @@ def _run_hedge_monitor_all():
                       f"missing={len(missing_tickets)}")
                 mismatch_key = f"hedge_mismatch_{sid}_{account}"
                 prev_count = session.get(mismatch_key, 0)
-                if prev_count < 2:
+                
+                # Direct connections (FIX, MT4/MT5 Direct) are reliable and don't need 
+                # the 3-tick debounce that EA HTTP polling requires for stability.
+                threshold = 0 if info.get("direct_mode") else 2
+                
+                if prev_count < threshold:
                     session[mismatch_key] = prev_count + 1
                     print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
                           f"detected {len(missing_tickets)} missing ticket(s) "
-                          f"({prev_count + 1}/3 consecutive), waiting...")
+                          f"({prev_count + 1}/{threshold + 1} consecutive), waiting...")
                     continue
                 # Clear counter — taking action
                 session.pop(mismatch_key, None)
@@ -965,7 +970,7 @@ def _start_hedge_monitor_thread():
                 _run_hedge_monitor_all()
             except Exception as e:
                 logger.error("Hedge monitor error: %s", e, exc_info=True)
-            time.sleep(1)  # Check every second (function self-throttles to 3s)
+            time.sleep(0.5)  # Check every 0.5s
     t = threading.Thread(target=_loop, daemon=True, name="HedgeMonitor")
     t.start()
     logger.info("Universal hedge monitor thread started")

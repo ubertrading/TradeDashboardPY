@@ -612,8 +612,8 @@ class MT4DirectAccount:
                     if not self._check_connection():
                         continue  # will enter reconnect on next iteration
                     # Sleep in short increments — compensates for disabled
-                    # .NET events by polling every ~5s instead of 30s
-                    for _ in range(15):
+                    # .NET events by polling every ~3s instead of 30s
+                    for _ in range(2):
                         if self._order_update_pending.is_set() or not self._running:
                             break
                         # Check C# QuoteBuffer for order updates + disconnects
@@ -1839,7 +1839,7 @@ class MT5DirectAccount:
                     if not self._check_connection():
                         continue
                     # Sleep in short increments — check buffer for events
-                    for _ in range(15):
+                    for _ in range(2):
                         if self._order_update_pending.is_set() or not self._running:
                             break
                         # Check C# QuoteBuffer for order updates

@@ -785,7 +785,7 @@ public class MtAccount
             {
                 _logger.LogError("[{Id}] Heartbeat error: {Error}", Config.Id, ex.Message);
             }
-            Thread.Sleep(30_000); // 30s heartbeat interval
+            Thread.Sleep(500); // 0.5s heartbeat interval (accelerated for hedge monitor)
         }
     }
 
