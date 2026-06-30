@@ -117,6 +117,18 @@ def _ensure_imports():
             return external_d
         Client.send = thread_safe_send
 
+        # BUG FIX: ctrader_open_api's TcpProtocol uses CLASS variables for queue/task!
+        # This causes traffic to mix across accounts. We patch __init__ to use instance vars.
+        original_protocol_init = getattr(TcpProtocol, '__init__', object.__init__)
+        def _tcp_protocol_init(self, *args, **kwargs):
+            from collections import deque
+            self._send_queue = deque([])
+            self._send_task = None
+            self._lastSendMessageTime = None
+            if original_protocol_init is not object.__init__:
+                original_protocol_init(self, *args, **kwargs)
+        TcpProtocol.__init__ = _tcp_protocol_init
+
         _twisted_imported = True
         print("[OPENAPI] All imports successful")
         return True
