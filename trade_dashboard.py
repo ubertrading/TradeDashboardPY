@@ -2736,116 +2736,86 @@ def _run_hedge_monitor_all():
             if any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides):
                 continue
 
+            # DATA FRESHNESS CHECK: Skip if any account lacks fresh broker data
+            # This prevents executing on startup when ea_account_info is empty
+            _all_fresh = True
+            for a in sides:
+                info = ea_account_info.get(a, {})
+                last_upd = info.get("last_update", 0)
+                if last_upd == 0 or (now_ts - last_upd) > 30:
+                    _all_fresh = False
+                    break
+            if not _all_fresh:
+                continue
+
             # ── IMBALANCE REBALANCE: close excess positions on the higher side ──
-            # ONLY for structural imbalance (e.g., unbalanced import 22/43 where
-            # fill counts differ). Transient imbalance from manual closes is handled
-            # by the hedge monitor's ticket-level detection below — don't double-close.
-            # SKIP for sessions that include a netting-mode account (e.g. Dukascopy):
-            # netting brokers collapse all increments into one position so per-fill
-            # counts cannot be compared to broker position counts.
-            _any_netting = any(
-                ea_account_info.get(a, {}).get("netting_mode", False)
-                for a in sides
-            )
-            if sess_action == "monitor" and not _any_netting:
+            if sess_action == "monitor":
                 accs = list(sides.keys())
                 if len(accs) >= 2:
-                    # Only run if fill counts differ (structural imbalance)
-                    fill_count_1 = session.get("filled", {}).get(accs[0], 0) - session.get("closed", {}).get(accs[0], 0)
-                    fill_count_2 = session.get("filled", {}).get(accs[1], 0) - session.get("closed", {}).get(accs[1], 0)
                     # Skip imbalance check if a close_deal is still in-flight
-                    # (one side may close before the other, creating a transient imbalance)
                     close_deal_ts = session.get("close_deal_ts", 0)
                     if close_deal_ts and (now_ts - close_deal_ts) < 10:
                         pass  # Suppress — close_deal pair still settling
-                    elif fill_count_1 != fill_count_2:
-                        # Determine which side has excess from SESSION fill counts
-                        # (not broker-level totals which include other symbols/sessions)
-                        if fill_count_1 > fill_count_2:
-                            max_acc, min_acc = accs[0], accs[1]
-                            excess = fill_count_1 - fill_count_2
-                        else:
-                            max_acc, min_acc = accs[1], accs[0]
-                            excess = fill_count_2 - fill_count_1
-
-                        # Verify broker data is fresh for the excess side
-                        max_info = ea_account_info.get(max_acc, {})
-                        last_upd = max_info.get("last_update", 0)
-                        if last_upd > 0 and (now_ts - last_upd) > 30:
-                            pass  # Data too stale — skip rebalance this cycle
-                        else:
-                            # Get broker open tickets for verification
-                            ea_open_tickets = set(
-                                _normalize_ticket(t) for t in max_info.get("open_tickets", [])
-                            )
-                            # Find session fills on the excess side that are still open
-                            close_tickets_set = set(
-                                _normalize_ticket(f["ticket"])
-                                for f in session.get("close_fills", [])
-                                if f.get("account") == max_acc
-                            )
-                            open_session_fills = [
-                                f for f in session.get("fills", [])
-                                if f.get("account") == max_acc
-                                and _normalize_ticket(f["ticket"]) not in close_tickets_set
-                                and (not ea_open_tickets  # if no ticket data, trust session
-                                     or _normalize_ticket(f["ticket"]) in ea_open_tickets)
-                            ]
-                            # Determine WHICH tickets to close based on match_mode
-                            match_mode = session.get("match_mode", "ticket")
-                            if match_mode == "ticket":
-                                # Ticket-by-ticket matching: fills are paired by index
-                                # Orphaned fills are those with no counterpart on the other side
-                                min_close_set = set(
-                                    _normalize_ticket(f["ticket"])
-                                    for f in session.get("close_fills", [])
-                                    if f.get("account") == min_acc
-                                )
-                                min_open_fills = [
-                                    f for f in session.get("fills", [])
-                                    if f.get("account") == min_acc
-                                    and _normalize_ticket(f["ticket"]) not in min_close_set
-                                ]
-                                paired_count = len(min_open_fills)
-                                # Fills at indices >= paired_count are orphaned (no pair on the other side)
-                                orphaned = open_session_fills[paired_count:]
-                                tickets_to_close = [
-                                    _normalize_ticket(f["ticket"])
-                                    for f in orphaned[:excess]
-                                ]
-                                print(f"[HEDGE-REBAL] ticket-match: paired={paired_count} orphaned={len(orphaned)} "
-                                      f"closing={[f.get('ticket') for f in orphaned[:excess]]}")
-                            else:
-                                # Gross/lots matching: close the oldest fills (from the start)
-                                tickets_to_close = [
-                                    _normalize_ticket(f["ticket"])
-                                    for f in open_session_fills[:excess]
-                                ]
-                                print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills")
-                            if tickets_to_close:
-                                rb = session.setdefault("rollback_needed", {})
-                                rb[max_acc] = rb.get(max_acc, 0) + len(tickets_to_close)
-                                rb_tickets = session.setdefault("rollback_tickets", {})
-                                rb_tickets.setdefault(max_acc, []).extend(tickets_to_close)
-                                rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
-                                # Set cooldown to block ticket-level detection from
-                                # misinterpreting this intentional close as "external"
-                                session["imbalance_rebal_ts"] = now_ts
-                                print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess "
-                                      f"(session fills {fill_count_1 if max_acc == accs[0] else fill_count_2} "
-                                      f"vs {fill_count_2 if max_acc == accs[0] else fill_count_1}) — "
-                                      f"queuing {len(tickets_to_close)} close(s) on {max_acc} "
-                                      f"(delay={rebal_delay}s)")
-                                _log_event(sid, max_acc, "hedge_rebalance",
-                                           f"Structural imbalance: {fill_count_1} vs {fill_count_2} fills. "
-                                           f"Queuing {len(tickets_to_close)} close(s) to rebalance "
-                                           f"(excess={excess}, delay={rebal_delay}s)")
-                                _save_sessions()
-                                continue  # Skip normal hedge monitor for this iteration
                     else:
-                        # Fills balanced — clear imbalance cooldown so ticket
-                        # detection resumes for genuine external closes
-                        session.pop("imbalance_rebal_ts", None)
+                        net_1 = _get_net_open(session, accs[0], ea_account_info)
+                        net_2 = _get_net_open(session, accs[1], ea_account_info)
+                        
+                        if net_1 != net_2:
+                            if net_1 > net_2:
+                                max_acc, min_acc = accs[0], accs[1]
+                                excess = net_1 - net_2
+                            else:
+                                max_acc, min_acc = accs[1], accs[0]
+                                excess = net_2 - net_1
+                                
+                            max_info = ea_account_info.get(max_acc, {})
+                            last_upd = max_info.get("last_update", 0)
+                            if last_upd == 0 or (now_ts - last_upd) > 30:
+                                pass  # Data too stale
+                            else:
+                                max_netting = max_info.get("netting_mode", False)
+                                tickets_to_close = []
+                                # Queue oldest open tickets for BOTH ticket-based and netting-mode accounts
+                                # This ensures the dashboard UI can properly pair close_fills with original fills.
+                                ea_open_tickets = set(_normalize_ticket(t) for t in max_info.get("open_tickets", []))
+                                close_tickets_set = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []) if f.get("account") == max_acc)
+                                open_session_fills = [
+                                    f for f in session.get("fills", [])
+                                    if f.get("account") == max_acc
+                                    and _normalize_ticket(f["ticket"]) not in close_tickets_set
+                                    and (max_netting or not ea_open_tickets or _normalize_ticket(f["ticket"]) in ea_open_tickets)
+                                ]
+                                
+                                match_mode = session.get("match_mode", "ticket")
+                                if match_mode == "ticket":
+                                    min_close_set = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []) if f.get("account") == min_acc)
+                                    min_open_fills = [f for f in session.get("fills", []) if f.get("account") == min_acc and _normalize_ticket(f["ticket"]) not in min_close_set]
+                                    paired_count = len(min_open_fills)
+                                    orphaned = open_session_fills[paired_count:]
+                                    tickets_to_close = [_normalize_ticket(f["ticket"]) for f in orphaned[:excess]]
+                                    print(f"[HEDGE-REBAL] ticket-match: paired={paired_count} orphaned={len(orphaned)} closing={tickets_to_close}")
+                                else:
+                                    tickets_to_close = [_normalize_ticket(f["ticket"]) for f in open_session_fills[:excess]]
+                                    print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
+                                    
+                                if tickets_to_close:
+                                    rb = session.setdefault("rollback_needed", {})
+                                    rb[max_acc] = rb.get(max_acc, 0) + len(tickets_to_close)
+                                    rb_tickets = session.setdefault("rollback_tickets", {})
+                                    rb_tickets.setdefault(max_acc, []).extend(tickets_to_close)
+                                    rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
+                                    session["imbalance_rebal_ts"] = now_ts
+                                    
+                                    net_1_display = net_1 if max_acc == accs[0] else net_2
+                                    net_2_display = net_2 if max_acc == accs[0] else net_1
+                                    print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess (net open {net_1_display} vs {net_2_display}) — queuing {len(tickets_to_close)} close(s) on {max_acc} (delay={rebal_delay}s)")
+                                    _log_event(sid, max_acc, "hedge_rebalance", f"Structural imbalance: net {net_1_display} vs {net_2_display}. Queuing {len(tickets_to_close)} close(s) to rebalance (excess={excess})")
+                                    _save_sessions()
+                                    continue
+                        else:
+                            # Fills balanced — clear imbalance cooldown so ticket
+                            # detection resumes for genuine external closes
+                            session.pop("imbalance_rebal_ts", None)
 
             # ── Check each account using ea_account_info ──
             for account in sides:
@@ -2866,7 +2836,7 @@ def _run_hedge_monitor_all():
 
                 # Check staleness: only use data updated within last 30s
                 last_update = info.get("last_update", 0)
-                if last_update > 0 and (now_ts - last_update) > 30:
+                if last_update == 0 or (now_ts - last_update) > 30:
                     continue  # Data too stale
 
                 # Step 1: Count — get tickets this account should have open
@@ -2898,14 +2868,29 @@ def _run_hedge_monitor_all():
                 # Brokers like Dukascopy use netting mode: all fills for one
                 # symbol collapse into a single broker-side position. Per-ticket
                 # comparison will always show "N missing, ea_has=1". Instead we
-                # check presence/absence of ANY broker position:
-                #   positions > 0  → everything is still open, nothing missing
-                #   positions == 0 → all closed externally
+                # compare the expected total lot volume against the broker's net lots.
                 if info.get("netting_mode", False):
                     broker_positions = info.get("positions", 0)
                     mismatch_key = f"hedge_mismatch_{sid}_{account}"
-                    if broker_positions > 0 and not missing_tickets:
-                        # Still open and no permanent shortfall — reset counter and move on
+                    
+                    pair = (sides[account].get("pair") or session.get("pair", "")).upper()
+                    sess_action_side = sides[account].get("action")
+                    if not sess_action_side:
+                        side_num = sides[account].get("side_number", 1)
+                        sess_action_side = "buy" if side_num == 1 else "sell"
+                    sess_action_side = sess_action_side.lower()
+
+                    actual_lots = 0.0
+                    if broker_positions > 0:
+                        lots_info = info.get("lots_by_instrument", {}).get(pair, {})
+                        actual_lots = lots_info.get(sess_action_side, 0.0)
+
+                    total_filled = sum(float(f.get("lots") or f.get("lot_size") or session.get("lot_size", 0.01))
+                                       for f in session.get("fills", []) if f.get("account") == account)
+                    closed_lots_val = session.get("closed_lots", {}).get(account, 0.0)
+                    expected_lots = round(total_filled - closed_lots_val, 4)
+
+                    if actual_lots >= expected_lots and not missing_tickets:
                         session.pop(mismatch_key, None)
                         continue
                     elif broker_positions == 0:
@@ -2915,6 +2900,56 @@ def _run_hedge_monitor_all():
                             print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
                                   f"netting_mode — broker has 0 positions, "
                                   f"treating {len(expected_open)} ticket(s) as externally closed")
+                    else:
+                        missing_lots = round(expected_lots - actual_lots, 4)
+                        if missing_lots > 0:
+                            # Log every detection
+                            print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
+                                  f"netting_mode — expected_lots={expected_lots} actual_lots={actual_lots} "
+                                  f"missing_lots={missing_lots}")
+
+                            # Require 3 consecutive detections
+                            prev_count = session.get(mismatch_key, 0)
+                            if prev_count < 2:
+                                session[mismatch_key] = prev_count + 1
+                                print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
+                                      f"detected {missing_lots} missing lots "
+                                      f"({prev_count + 1}/3 consecutive), waiting...")
+                                continue
+                            
+                            session.pop(mismatch_key, None)
+                            
+                            print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
+                                  f"CONFIRMED {missing_lots} externally closed lots")
+
+                            # Update UI: extract the oldest open tickets to match the closed volume
+                            account_ls = sides[account].get("lot_size") or session.get("lot_size", 0.01)
+                            if account_ls <= 0: account_ls = 0.01
+                            num_tickets = int(round(missing_lots / account_ls))
+                            
+                            all_close_tickets = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []))
+                            open_fills = [f for f in session.get("fills", []) if f.get("account") == account and _normalize_ticket(f["ticket"]) not in all_close_tickets]
+                            
+                            for f in open_fills[:num_tickets]:
+                                session.setdefault("close_fills", []).append({
+                                    "account": account,
+                                    "ticket": f["ticket"],
+                                    "price": None,
+                                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "ts_epoch": now_ts,
+                                    "external": True,
+                                })
+                                
+                            # Update closed_lots directly so expected_open isn't reduced, but get_net_open is
+                            _update_closed_lots(session, account, missing_lots)
+
+                            _log_event(sid, account, "hedge_rebalance",
+                                       f"Detected {missing_lots} externally closed lots. "
+                                       f"Updated UI. Rollback on counter-party will be handled by structural imbalance loop.")
+                            _save_sessions()
+                            _check_session_completion(session)
+                            continue  # We handled the local UI update here, skip ticket matching
+
                 else:
                     # Step 2: Detect — compare expected vs actual (per-ticket path)
                     missing_tickets.update(expected_open - ea_open_tickets)
@@ -3091,14 +3126,46 @@ def _is_within_time_window(session):
     except Exception:
         return True  # If time parsing fails, allow
 
-def _get_net_open(session, account):
+def _get_net_open(session, account, ea_info=None):
     """
     Returns the effective net open position count for an account.
+    For netting mode: directly uses the broker's actual open lots.
     For ticket mode: filled - closed
-    For lot mode: round((filled_lots - closed_lots) / lot_size)
+    For lot mode: round((total_lots_filled - closed_lots) / lot_size)
     """
+    if ea_info:
+        info = ea_info.get(account, {})
+        if info.get("netting_mode", False):
+            # For netting mode, trust the broker's absolute lot size
+            side_info = session.get("sides", {}).get(account, {})
+            pair = side_info.get("pair") or session.get("pair", "")
+            sess_action_side = session.get("action", "buy")
+            
+            # Determine if this account is the counter-party
+            accs = list(session.get("sides", {}).keys())
+            if len(accs) > 1 and account == accs[1]:
+                sess_action_side = "sell" if sess_action_side == "buy" else "buy"
+                
+            actual_lots = 0.0
+            if info.get("positions", 0) > 0:
+                lots_info = info.get("lots_by_instrument", {}).get(pair, {})
+                buy_lots = lots_info.get("buy", 0.0)
+                sell_lots = lots_info.get("sell", 0.0)
+                actual_lots = max(buy_lots, sell_lots)
+                
+            ls = side_info.get("lot_size") or session.get("lot_size", 0.01)
+            if ls <= 0: ls = 0.01
+            
+            # Auto-repair the corrupted session closed_lots value
+            fl = sum(float(f.get("lots") or f.get("lot_size") or session.get("lot_size", 0.01)) for f in session.get("fills", []) if f.get("account") == account)
+            true_closed = round(max(0.0, fl - actual_lots), 4)
+            if "closed_lots" in session and account in session["closed_lots"]:
+                session["closed_lots"][account] = true_closed
+                
+            return int(round(actual_lots / ls))
+
     if session.get("match_mode") == "lots":
-        fl = session.get("filled_lots", {}).get(account, 0.0)
+        fl = sum(float(f.get("lots") or f.get("lot_size") or session.get("lot_size", 0.01)) for f in session.get("fills", []) if f.get("account") == account)
         cl = session.get("closed_lots", {}).get(account, 0.0)
         net_lots = max(0.0, fl - cl)
         ls = session.get("sides", {}).get(account, {}).get("lot_size")
@@ -4827,7 +4894,12 @@ def poll_command():
                 # Include specific ticket to close if set by hedge rebalance
                 rb_tickets = session.get("rollback_tickets", {}).get(account, [])
                 if rb_tickets:
-                    cmd["close_ticket"] = rb_tickets[0]  # First ticket in queue
+                    first_ticket = rb_tickets[0]
+                    if isinstance(first_ticket, dict):
+                        cmd["close_ticket"] = first_ticket["ticket"]
+                        cmd["lots"] = first_ticket.get("lots", side_lots)
+                    else:
+                        cmd["close_ticket"] = first_ticket
                 print(f"[CMD-TRACE] ROLLBACK to acct={account}: {cmd}")
                 return jsonify(cmd)
 

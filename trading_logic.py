@@ -800,24 +800,61 @@ def _run_hedge_monitor_all():
                 # ── NETTING MODE BYPASS ──────────────────────────────────────
                 # Brokers like Dukascopy use netting mode: all fills for one
                 # symbol collapse into a single broker-side position. Per-ticket
-                # comparison will always show "N missing, ea_has=1". Instead we
-                # check presence/absence of ANY broker position:
-                #   positions > 0  → everything is still open, nothing missing
-                #   positions == 0 → all closed externally
+                # comparison will always show "N missing, ea_has=1". We instead
+                # compare the expected total lot volume against the broker's net lots.
                 if info.get("netting_mode"):
-                    broker_positions = info.get("positions", 0)
                     mismatch_key = f"hedge_mismatch_{sid}_{account}"
-                    if broker_positions > 0 and not missing_tickets:
+                    
+                    pair = (sides[account].get("pair") or session.get("pair", "")).upper()
+                    sess_action = sides[account].get("action")
+                    if not sess_action:
+                        side_num = sides[account].get("side_number", 1)
+                        sess_action = "buy" if side_num == 1 else "sell"
+                    sess_action = sess_action.lower()
+
+                    actual_lots = 0.0
+                    broker_positions = info.get("positions", 0)
+                    if broker_positions > 0:
+                        lots_info = info.get("lots_by_instrument", {}).get(pair, {})
+                        actual_lots = lots_info.get(sess_action, 0.0)
+
+                    # Calculate expected lots for this session
+                    expected_lots = 0.0
+                    expected_open_sorted = []
+                    acct_fills_dict = {str(f["ticket"]): f for f in session.get("fills", []) if f.get("account") == account}
+                    
+                    for t in expected_open:
+                        fill = acct_fills_dict.get(str(t), {})
+                        ts = fill.get("ts_epoch", 0)
+                        lot_val = float(fill.get("lots") or fill.get("lot_size") or session.get("lot_size", 0.01))
+                        expected_open_sorted.append((t, lot_val, ts))
+                        expected_lots += lot_val
+                        
+                    expected_lots = round(expected_lots, 4)
+                    
+                    if actual_lots >= expected_lots and not missing_tickets:
                         # Still open and no permanent shortfall — reset counter and move on
                         session.pop(mismatch_key, None)
                         continue
-                    elif broker_positions == 0:
-                        # All gone on the broker — treat every expected ticket as missing
-                        missing_tickets.update(expected_open)
-                        if expected_open:
-                            print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
-                                  f"netting_mode — broker has 0 positions, "
-                                  f"treating {len(expected_open)} ticket(s) as externally closed")
+                    else:
+                        missing_lots = round(expected_lots - actual_lots, 4)
+                        if missing_lots > 0:
+                            # Treat some tickets as missing to balance the lots.
+                            expected_open_sorted.sort(key=lambda x: x[2]) # oldest first
+                            lots_to_remove = missing_lots
+                            for t, lot_val, _ in expected_open_sorted:
+                                if t in missing_tickets:
+                                    continue # skip if already missing
+                                if lots_to_remove > 1e-5:
+                                    missing_tickets.add(t)
+                                    lots_to_remove -= lot_val
+                                if lots_to_remove <= 1e-5:
+                                    break
+                            
+                            if missing_tickets:
+                                print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
+                                      f"netting_mode — expected {expected_lots} lots, broker has {actual_lots} lots. "
+                                      f"Treating {len(missing_tickets)} ticket(s) as externally closed.")
                 else:
                     # Step 2: Detect — compare expected vs actual (per-ticket path)
                     missing_tickets.update(expected_open - ea_open_tickets)

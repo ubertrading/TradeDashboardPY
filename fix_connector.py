@@ -3533,23 +3533,78 @@ class FixAccountManager:
         close_fills = session.get("close_fills", [])
         closed_tickets = {f["ticket"] for f in close_fills if f.get("account") == account_id}
 
+        rb_tickets = session.get("rollback_tickets", {}).get(account_id, [])
+        custom_lot_size = None
+        target_ticket = None
+
+        if is_rollback and rb_tickets:
+            first_ticket = rb_tickets[0]
+            if isinstance(first_ticket, dict):
+                target_ticket = first_ticket.get("ticket")
+                custom_lot_size = first_ticket.get("lots")
+            else:
+                target_ticket = first_ticket
+
+            # Immediately execute close for synthetic tickets without matching against fills
+            if target_ticket and (str(target_ticket).startswith("rebal_") or str(target_ticket).startswith("partial_close_")):
+                fill_lot_size = custom_lot_size or lot_size
+                side_info = session.get("sides", {}).get(account_id, {})
+                original_side = side_info.get("action", "buy")
+                
+                # For netting mode, dynamically override original_side based on actual broker exposure
+                ea_info = self.dd["ea_account_info"].get(account_id, {})
+                if ea_info.get("netting_mode", False):
+                    lots_info = ea_info.get("lots_by_instrument", {}).get(pair, {})
+                    buy_lots = lots_info.get("buy", 0.0)
+                    sell_lots = lots_info.get("sell", 0.0)
+                    if buy_lots > sell_lots:
+                        original_side = "buy"  # forces close_position to send a SELL
+                    elif sell_lots > buy_lots:
+                        original_side = "sell" # forces close_position to send a BUY
+
+                logger.info("[%s] Closing synthetic ticket=%s lot_size=%.4f (directed_close_from_side=%s)",
+                            account_id, target_ticket, fill_lot_size, original_side)
+                self.accounts[account_id].close_position(
+                    target_ticket, pair, original_side, fill_lot_size,
+                    session_id=session.get("id"), comment=comment,
+                    is_rollback=is_rollback
+                )
+                return
+
         for fill in fills:
             if fill.get("account") != account_id:
                 continue
             ticket = fill.get("ticket")
             if ticket in closed_tickets:
                 continue
+            
+            # If a specific ticket was requested for rollback, skip others
+            if target_ticket and str(ticket) != str(target_ticket) and not str(target_ticket).startswith("missing_"):
+                continue
+
             # Found an open position to close.
-            # Use the fill's own lot size (how it was originally opened),
+            # Use custom_lot_size if provided, otherwise the fill's own lot size,
             # falling back to the side/session lot_size if not recorded.
-            fill_lot_size = fill.get("lots") or fill.get("lot_size") or lot_size
+            fill_lot_size = custom_lot_size or fill.get("lots") or fill.get("lot_size") or lot_size
             pos_id = fill.get("pos_id") or str(ticket)
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
-            logger.info("[%s] Closing position ticket=%s lot_size=%.4f (fill lots=%.4f session lots=%.4f)",
+            
+            # For netting mode, dynamically override original_side based on actual broker exposure
+            ea_info = self.dd["ea_account_info"].get(account_id, {})
+            if ea_info.get("netting_mode", False):
+                lots_info = ea_info.get("lots_by_instrument", {}).get(pair, {})
+                buy_lots = lots_info.get("buy", 0.0)
+                sell_lots = lots_info.get("sell", 0.0)
+                if buy_lots > sell_lots:
+                    original_side = "buy"  # forces close_position to send a SELL
+                elif sell_lots > buy_lots:
+                    original_side = "sell" # forces close_position to send a BUY
+
+            logger.info("[%s] Closing position ticket=%s lot_size=%.4f (fill lots=%.4f session lots=%.4f custom=%.4f, directed_close_from_side=%s)",
                         account_id, ticket, fill_lot_size,
-                        fill.get("lots") or 0, lot_size)
-            fix_acct.close_position(
+                        fill.get("lots") or 0, lot_size, custom_lot_size or 0.0, original_side)
+            self.accounts[account_id].close_position(
                 pos_id, pair, original_side, fill_lot_size,
                 session_id=session.get("id"), comment=comment,
                 is_rollback=is_rollback

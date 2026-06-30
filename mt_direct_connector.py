@@ -3655,7 +3655,15 @@ class MTDirectManager:
         # Check if there's a specific rollback ticket to close
         rb_tickets = session.get("rollback_tickets", {}).get(account_id, [])
         if rb_tickets:
-            ticket = rb_tickets[0]
+            first_ticket = rb_tickets[0]
+            if isinstance(first_ticket, dict):
+                ticket = first_ticket.get("ticket")
+                custom_lots = first_ticket.get("lots")
+                if custom_lots:
+                    lot_size = custom_lots
+            else:
+                ticket = first_ticket
+
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
 
@@ -3664,7 +3672,8 @@ class MTDirectManager:
             try:
                 orders = direct_acct._get_open_orders()
                 for o in orders:
-                    if o.get('Ticket') and int(o['Ticket']) == int(ticket):
+                    # Don't try to parse "missing_X" dummy tickets
+                    if not str(ticket).startswith("missing_") and o.get('Ticket') and int(o['Ticket']) == int(ticket):
                         if o.get('Lots'):
                             actual_lots = float(o['Lots'])
                         elif o.get('Volume'):
