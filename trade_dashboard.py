@@ -1243,6 +1243,27 @@ def _load_sessions():
                     if s.get("rollback_start_ts"):
                         s["rollback_start_ts"] = {}
                         app.logger.info("Reset rollback_start_ts for session %s", sid[:8])
+                    # Clear stale rollback state for monitor-mode sessions.
+                    # If a cycle was aborted mid-execution the session is set to
+                    # action=monitor but rollback_needed may still hold counts from
+                    # that cycle. On restart those counts are stale — the hedge
+                    # monitor will re-detect any genuine imbalance within seconds.
+                    if s.get("action") == "monitor" and (
+                            s.get("rollback_needed") or s.get("rollback_tickets")):
+                        s["rollback_needed"] = {}
+                        s["rollback_tickets"] = {}
+                        app.logger.info(
+                            "Cleared stale rollback state for monitor session %s "
+                            "(likely from a mid-cycle abort)", sid[:8])
+                    # Clear user-rejection flags on restart. These flags suppress
+                    # rollback prompts after a user clicks NO. On restart the
+                    # broker state is re-evaluated from scratch, so any genuine
+                    # imbalance should prompt fresh rather than be silently skipped.
+                    if s.get("rollback_user_rejected"):
+                        s["rollback_user_rejected"] = {}
+                        app.logger.info(
+                            "Cleared rollback_user_rejected for session %s "
+                            "(fresh start — will re-prompt if imbalance is still present)", sid[:8])
                     # Migration: normalize pair extensions to lowercase
                     # and use base pair (no extension) as global pair.
                     # e.g. global USDCHF.B -> USDCHF, side USDCHF.B -> USDCHF.b
@@ -2507,6 +2528,7 @@ def _new_session(data):
 # Runs in a background thread — no longer tied to any specific poll endpoint.
 
 _hedge_monitor_last_run = [0.0]  # mutable container for closure
+_process_start_ts = time.time()  # used to suppress premature imbalance checks on startup
 
 def _get_pos_count(pos_val):
     if pos_val is None:
@@ -2757,17 +2779,50 @@ def _run_hedge_monitor_all():
                     if close_deal_ts and (now_ts - close_deal_ts) < 10:
                         pass  # Suppress — close_deal pair still settling
                     else:
-                        net_1 = _get_net_open(session, accs[0], ea_account_info)
-                        net_2 = _get_net_open(session, accs[1], ea_account_info)
-                        
-                        if net_1 != net_2:
+                        # Use broker-confirmed open counts, NOT session accounting.
+                        # Session accounting (filled - closed) becomes stale after a
+                        # cycle abort: old tickets are closed on the broker but never
+                        # recorded in close_fills, so the session thinks they are still
+                        # open. By intersecting session fills with ea_account_info
+                        # open_tickets, we only count positions the broker confirms exist.
+                        # This prevents "22 vs 0" false imbalances after cycle aborts.
+                        def _broker_confirmed_open(acc):
+                            info = ea_account_info.get(acc, {})
+                            if (now_ts - info.get("last_update", 0)) > 30:
+                                return None  # Stale broker data — skip
+                            if info.get("netting_mode"):
+                                # Netting: delegate to _get_net_open which handles lots
+                                return _get_net_open(session, acc, ea_account_info)
+                            ea_open = set(
+                                _normalize_ticket(t) for t in info.get("open_tickets", [])
+                            )
+                            close_set = set(
+                                _normalize_ticket(f["ticket"])
+                                for f in session.get("close_fills", [])
+                                if f.get("account") == acc
+                            )
+                            # Count session fills whose tickets are confirmed open on broker.
+                            # Old cycle tickets gone from broker won't be in ea_open → not counted.
+                            return sum(
+                                1 for f in session.get("fills", [])
+                                if f.get("account") == acc
+                                and _normalize_ticket(f.get("ticket")) not in close_set
+                                and _normalize_ticket(f.get("ticket")) in ea_open
+                            )
+
+                        net_1 = _broker_confirmed_open(accs[0])
+                        net_2 = _broker_confirmed_open(accs[1])
+
+                        if net_1 is None or net_2 is None:
+                            pass  # One or both sides have stale data — skip
+                        elif net_1 != net_2:
                             if net_1 > net_2:
                                 max_acc, min_acc = accs[0], accs[1]
                                 excess = net_1 - net_2
                             else:
                                 max_acc, min_acc = accs[1], accs[0]
                                 excess = net_2 - net_1
-                                
+
                             max_info = ea_account_info.get(max_acc, {})
                             last_upd = max_info.get("last_update", 0)
                             if last_upd == 0 or (now_ts - last_upd) > 30:
@@ -2783,7 +2838,7 @@ def _run_hedge_monitor_all():
                                     f for f in session.get("fills", [])
                                     if f.get("account") == max_acc
                                     and _normalize_ticket(f["ticket"]) not in close_tickets_set
-                                    and (max_netting or not ea_open_tickets or _normalize_ticket(f["ticket"]) in ea_open_tickets)
+                                    and (max_netting or _normalize_ticket(f["ticket"]) in ea_open_tickets)
                                 ]
                                 
                                 match_mode = session.get("match_mode", "ticket")
@@ -2799,19 +2854,24 @@ def _run_hedge_monitor_all():
                                     print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
                                     
                                 if tickets_to_close:
-                                    rb = session.setdefault("rollback_needed", {})
-                                    rb[max_acc] = rb.get(max_acc, 0) + len(tickets_to_close)
-                                    rb_tickets = session.setdefault("rollback_tickets", {})
-                                    rb_tickets.setdefault(max_acc, []).extend(tickets_to_close)
-                                    rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
-                                    session["imbalance_rebal_ts"] = now_ts
-                                    
-                                    net_1_display = net_1 if max_acc == accs[0] else net_2
-                                    net_2_display = net_2 if max_acc == accs[0] else net_1
-                                    print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess (net open {net_1_display} vs {net_2_display}) — queuing {len(tickets_to_close)} close(s) on {max_acc} (delay={rebal_delay}s)")
-                                    _log_event(sid, max_acc, "hedge_rebalance", f"Structural imbalance: net {net_1_display} vs {net_2_display}. Queuing {len(tickets_to_close)} close(s) to rebalance (excess={excess})")
-                                    _save_sessions()
-                                    continue
+                                    # Skip if user already rejected a rollback for this account.
+                                    # "NO means NO" — don't re-prompt until session is reimported.
+                                    if session.get("rollback_user_rejected", {}).get(max_acc):
+                                        print(f"[HEDGE-REBAL] Skipping re-queue for {max_acc} — user previously rejected rollback")
+                                    else:
+                                        rb = session.setdefault("rollback_needed", {})
+                                        rb[max_acc] = rb.get(max_acc, 0) + len(tickets_to_close)
+                                        rb_tickets = session.setdefault("rollback_tickets", {})
+                                        rb_tickets.setdefault(max_acc, []).extend(tickets_to_close)
+                                        rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
+                                        session["imbalance_rebal_ts"] = now_ts
+
+                                        net_1_display = net_1 if max_acc == accs[0] else net_2
+                                        net_2_display = net_2 if max_acc == accs[0] else net_1
+                                        print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess (net open {net_1_display} vs {net_2_display}) — queuing {len(tickets_to_close)} close(s) on {max_acc} (delay={rebal_delay}s)")
+                                        _log_event(sid, max_acc, "hedge_rebalance", f"Structural imbalance: net {net_1_display} vs {net_2_display}. Queuing {len(tickets_to_close)} close(s) to rebalance (excess={excess})")
+                                        _save_sessions()
+                                        continue
                         else:
                             # Fills balanced — clear imbalance cooldown so ticket
                             # detection resumes for genuine external closes
@@ -3083,7 +3143,11 @@ def _run_hedge_monitor_all():
                             print(f"[HEDGE-REBAL] Fallback: will close oldest ticket {f['ticket']} on {other_acc}")
 
                 # Queue the paired closes via rollback mechanism with specific tickets
+                user_rejected = session.get("rollback_user_rejected", {})
                 for other_acc, ticket in tickets_to_close:
+                    if user_rejected.get(other_acc):
+                        print(f"[HEDGE-REBAL] Skipping rollback queue for {other_acc} — user previously rejected rollback")
+                        continue
                     rb = session.setdefault("rollback_needed", {})
                     rb[other_acc] = rb.get(other_acc, 0) + 1
                     rb_tickets = session.setdefault("rollback_tickets", {})
@@ -3259,12 +3323,18 @@ def _should_issue_command(session, account):
                 # User approved — clear the flag and proceed
                 _rollback_pending_confirmations.pop(key, None)
             elif confirmed is False:
-                # User denied — clear rollback entirely
+                # User denied — clear rollback and suppress future re-queuing for
+                # this account. "NO means NO for all" — the hedge monitor will not
+                # re-prompt for the same account until the session is reimported
+                # or the user manually resets the rejection.
                 _rollback_pending_confirmations.pop(key, None)
                 rollback[account] = 0
                 session["rollback_needed"] = rollback
                 session.get("rollback_tickets", {}).pop(account, None)
-                app.logger.info("[ROLLBACK-PROMPT] Rollback DENIED by user for %s sid=%s",
+                session.setdefault("rollback_user_rejected", {})[account] = True
+                _save_sessions()
+                app.logger.info("[ROLLBACK-PROMPT] Rollback DENIED by user for %s sid=%s — "
+                                "suppressing future prompts for this account",
                                 account, session.get('id', '')[:8])
                 return False
             else:
@@ -3398,6 +3468,15 @@ def _should_issue_command(session, account):
                 print(f"[EXEC-HALT] Halting {acct_label} — execution timeout after {int(elapsed)}s")
                 _log_event(session.get('id', ''), account, 'exec_halt', f"Halted due to exec timeout ({int(elapsed)}s)")
                 session["action"] = "monitor"
+                # Clear any accumulated rollback state from the aborted cycle.
+                # Without this, stale rollback_needed counts are persisted to disk
+                # and fire as spurious rollback prompts after the next restart.
+                # The hedge monitor will re-detect any genuine imbalance.
+                if session.get("rollback_needed") or session.get("rollback_tickets"):
+                    session["rollback_needed"] = {}
+                    session["rollback_tickets"] = {}
+                    session.pop("rollback_start_ts", None)
+                    print(f"[EXEC-HALT] Cleared rollback state for {acct_label} to prevent stale prompts after restart")
                 _save_sessions()
                 return False
             # Retry close commands (safe — closing an already-closed position is a no-op)
@@ -3414,6 +3493,14 @@ def _should_issue_command(session, account):
                         print(f"[EXEC-RETRY-MAX] Max retries ({max_retries}) reached on {acct_label} — halting")
                         _log_event(session.get('id', ''), account, 'exec_retry_exhausted', f"Max retries ({max_retries}) reached, halting")
                         session["action"] = "monitor"
+                        # Clear any accumulated rollback state from the aborted cycle.
+                        # Without this, stale rollback_needed counts are persisted and
+                        # fire as spurious rollback prompts after the next restart.
+                        if session.get("rollback_needed") or session.get("rollback_tickets"):
+                            session["rollback_needed"] = {}
+                            session["rollback_tickets"] = {}
+                            session.pop("rollback_start_ts", None)
+                            print(f"[EXEC-RETRY-MAX] Cleared rollback state for {acct_label} to prevent stale prompts after restart")
                         _save_sessions()
                         in_flight_retry_counts.pop(flight_key, None)
                         return False
