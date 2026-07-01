@@ -1255,15 +1255,10 @@ def _load_sessions():
                         app.logger.info(
                             "Cleared stale rollback state for monitor session %s "
                             "(likely from a mid-cycle abort)", sid[:8])
-                    # Clear user-rejection flags on restart. These flags suppress
-                    # rollback prompts after a user clicks NO. On restart the
-                    # broker state is re-evaluated from scratch, so any genuine
-                    # imbalance should prompt fresh rather than be silently skipped.
-                    if s.get("rollback_user_rejected"):
-                        s["rollback_user_rejected"] = {}
-                        app.logger.info(
-                            "Cleared rollback_user_rejected for session %s "
-                            "(fresh start — will re-prompt if imbalance is still present)", sid[:8])
+                    # NOTE: rollback_user_rejected is intentionally NOT cleared on
+                    # restart. When a user clicks NO on a rollback prompt, that
+                    # decision should be respected persistently until the session is
+                    # reimported (which creates a fresh session dict without the flag).
                     # Migration: normalize pair extensions to lowercase
                     # and use base pair (no extension) as global pair.
                     # e.g. global USDCHF.B -> USDCHF, side USDCHF.B -> USDCHF.b
@@ -2803,6 +2798,13 @@ def _run_hedge_monitor_all():
             if any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides):
                 continue
 
+            # USER-REJECTED GUARD: if the user has ever declined a rollback for
+            # ANY account in this session, skip ALL imbalance detection.
+            # The user said "NO means NO" — don't re-detect any imbalance until
+            # the session is reimported (which creates a fresh session without the flag).
+            if session.get("rollback_user_rejected"):
+                continue
+
             # DATA FRESHNESS CHECK: Skip if any account lacks fresh broker data
             # This prevents executing on startup when ea_account_info is empty
             _all_fresh = True
@@ -2823,6 +2825,10 @@ def _run_hedge_monitor_all():
                     close_deal_ts = session.get("close_deal_ts", 0)
                     if close_deal_ts and (now_ts - close_deal_ts) < 10:
                         pass  # Suppress — close_deal pair still settling
+                    elif any(session.get("filled", {}).get(a, 0) == 0 for a in accs):
+                        pass  # One-sided session — one account has no fills, skip
+                          # (e.g. reimport only captured one side, or old session with
+                          # a disconnected account never had positions on that side)
                     else:
                         # Use broker-confirmed open counts, NOT session accounting.
                         # Session accounting (filled - closed) becomes stale after a
@@ -2838,8 +2844,14 @@ def _run_hedge_monitor_all():
                             if info.get("netting_mode"):
                                 # Netting: delegate to _get_net_open which handles lots
                                 return _get_net_open(session, acc, ea_account_info)
+                            ea_open_tickets_raw = info.get("open_tickets")
+                            if ea_open_tickets_raw is None:
+                                # open_tickets not provided in heartbeat — account connected
+                                # but not reporting ticket data (e.g. EA bridge reconnecting
+                                # or account has no position data). Treat as unknown, not 0.
+                                return None
                             ea_open = set(
-                                _normalize_ticket(t) for t in info.get("open_tickets", [])
+                                _normalize_ticket(t) for t in ea_open_tickets_raw
                             )
                             close_set = set(
                                 _normalize_ticket(f["ticket"])
@@ -2943,6 +2955,11 @@ def _run_hedge_monitor_all():
                 last_update = info.get("last_update", 0)
                 if last_update == 0 or (now_ts - last_update) > 30:
                     continue  # Data too stale
+
+                # Skip accounts with 0 fills — they were never imported for this
+                # session, so ticket comparison is meaningless (would flag all as missing)
+                if session.get("filled", {}).get(account, 0) == 0:
+                    continue
 
                 # Step 1: Count — get tickets this account should have open
                 acct_fill_tickets = [_normalize_ticket(f["ticket"]) for f in session.get("fills", [])
@@ -3209,6 +3226,11 @@ def _run_hedge_monitor_all():
 def _start_hedge_monitor_thread():
     """Start the background thread for the universal hedge monitor."""
     def _loop():
+        # Wait for startup cleanup to complete before first detection cycle.
+        # Startup cleanup clears stale rollback_needed from disk. Without this
+        # delay the hedge monitor fires before cleanup, causing immediate
+        # ROLLBACK PENDING on every restart for any persisted rb state.
+        time.sleep(10)
         while True:
             try:
                 _run_hedge_monitor_all()
