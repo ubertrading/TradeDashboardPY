@@ -1862,7 +1862,11 @@ def _check_margin_alerts(all_accounts_info):
 
 
 # ─── Position Change Alert ────────────────────────────────────────────────────
-_last_position_counts = {}  # account -> last known position count
+_last_position_counts = {}  # account -> last CONFIRMED (alerted) position count
+_pending_position_changes = {}  # account -> {"from": int, "to": int, "count": int}
+# Number of consecutive polls the new count must hold before an alert fires.
+# Prevents transient MT Bridge partial-reads from generating false alerts.
+_POS_ALERT_CONFIRM_POLLS = 3
 
 def _send_position_change_alert(account, old_count, new_count, margin_pct=None):
     """Send position change alert via enabled channels (in background)."""
@@ -1895,35 +1899,72 @@ def _send_position_change_alert(account, old_count, new_count, margin_pct=None):
     threading.Thread(target=_send, daemon=True, name=f"PosAlert-{account}").start()
 
 def _check_position_changes(all_accounts_info):
-    """Detect position count changes and send alerts."""
+    """Detect position count changes and send alerts.
+
+    Uses a consecutive-poll confirmation window (_POS_ALERT_CONFIRM_POLLS) before
+    firing. This prevents transient MT Bridge partial-reads (e.g. account returning
+    a lower count mid-reconnect) from generating false 'position closed' alerts.
+    """
     if not dashboard_settings.get("position_change_alert", False):
         return
-        
-    # Do not alert during the first 60 seconds of dashboard uptime 
+
+    # Do not alert during the first 60 seconds of dashboard uptime
     # to avoid spam as accounts connect and load their initial state
     is_startup = (time.time() - globals().get('_dashboard_start_time', 0)) < 60
-    
+
     for acct_id, info in all_accounts_info.items():
         try:
             pos = info.get("positions")
             if pos is None:
                 continue
             pos = int(pos)
-            prev = _last_position_counts.get(acct_id)
-            
+            confirmed = _last_position_counts.get(acct_id)  # last alerted/confirmed count
+
             if is_startup:
+                # Silently seed the confirmed baseline during startup window
+                _last_position_counts[acct_id] = pos
+                _pending_position_changes.pop(acct_id, None)
+                continue
+
+            if confirmed is None:
+                # First time seeing this account post-startup — seed without alerting
                 _last_position_counts[acct_id] = pos
                 continue
-                
-            if prev is not None and pos != prev:
-                is_open = pos > prev
-                is_close = pos < prev
+
+            if pos == confirmed:
+                # Count matches the confirmed baseline — cancel any pending change
+                _pending_position_changes.pop(acct_id, None)
+                continue
+
+            # Count differs from confirmed baseline — check if this matches an
+            # already-pending change or is a new deviation
+            pending = _pending_position_changes.get(acct_id)
+            if pending and pending["to"] == pos and pending["from"] == confirmed:
+                # Same change seen again — increment consecutive counter
+                pending["count"] += 1
+                app.logger.debug(
+                    "[POS-ALERT] %s: pending change %d->%d confirmed %d/%d polls",
+                    acct_id, confirmed, pos, pending["count"], _POS_ALERT_CONFIRM_POLLS
+                )
+            else:
+                # New deviation (or direction changed) — start fresh pending entry
+                _pending_position_changes[acct_id] = {"from": confirmed, "to": pos, "count": 1}
+                app.logger.debug(
+                    "[POS-ALERT] %s: new pending change %d->%d (poll 1/%d)",
+                    acct_id, confirmed, pos, _POS_ALERT_CONFIRM_POLLS
+                )
+                continue
+
+            # Fire only once the change has been seen _POS_ALERT_CONFIRM_POLLS times
+            if pending and pending["count"] >= _POS_ALERT_CONFIRM_POLLS:
+                is_open = pos > confirmed
+                is_close = pos < confirmed
                 should_alert = False
                 if is_open and dashboard_settings.get("position_change_opened", True):
                     should_alert = True
                 elif is_close and dashboard_settings.get("position_change_closed", True):
                     should_alert = True
-                
+
                 if should_alert:
                     margin_pct = None
                     try:
@@ -1933,8 +1974,12 @@ def _check_position_changes(all_accounts_info):
                             margin_pct = (float(margin) / float(equity)) * 100
                     except Exception:
                         pass
-                    _send_position_change_alert(acct_id, prev, pos, margin_pct=margin_pct)
-            _last_position_counts[acct_id] = pos
+                    _send_position_change_alert(acct_id, confirmed, pos, margin_pct=margin_pct)
+
+                # Promote pending to confirmed and clear the pending slot
+                _last_position_counts[acct_id] = pos
+                _pending_position_changes.pop(acct_id, None)
+
         except Exception:
             pass
 
