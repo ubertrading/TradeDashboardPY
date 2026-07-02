@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -612,21 +612,36 @@ def _compute_swap_deltas_live():
 
 def _calculate_optimal_fund_distributions(all_accounts_info):
     """
-    Groups accounts by AA-NN hedge code, calculates optimal equity distribution
-    between Side A and Side B based on leverage and stopout levels, and then
-    allocates that total per side based on margin used per account.
+    Groups accounts by AA-NN hedge code and calculates optimal equity
+    distribution between Side A and Side B.
+
+    PRIMARY METHOD — Pips-to-MC Equalization:
+        Allocates total group equity so both sides end up with the same
+        number of pips of runway before margin call. The allocation is
+        proportional to each side's actual pnl-per-pip exposure (derived
+        from real open positions) plus its margin maintenance requirement.
+
+        P  = (total_equity - margin_maint_a - margin_maint_b)
+             / (pnl_per_pip_a + pnl_per_pip_b)
+
+        optimal_equity_side = P × pnl_per_pip_side + margin_maint_side
+
+        where margin_maint_side = total_margin_side × stop_out_frac_side
+
+    FALLBACK — Leverage-ratio formula (used when no live position data):
+        Allocates based on theoretical margin requirements per unit volume
+        at each side's leverage and stop-out level.
+
+    Within each side, equity is split proportionally to margin used per account.
     """
     groups = {}  # group_id -> {"A": [acct_list], "B": [acct_list]}
-    
+
     # 1. Parse accounts into hedge groups
     for aid, ainfo in all_accounts_info.items():
-        # Try parsing from label first, fallback to account ID (aid)
         label = ainfo.get("label") or aid
         parts = label.split('-')
         if len(parts) < 3 or parts[2].upper() not in ('A', 'B'):
-            # Fallback to splitting aid directly
             parts = aid.split('-')
-
         if len(parts) >= 3:
             aa = parts[0]
             nn = parts[1]
@@ -634,139 +649,129 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
             if side in ('A', 'B'):
                 group_id = f"{aa}-{nn}"
                 groups.setdefault(group_id, {"A": [], "B": []})[side].append((aid, ainfo))
-                
+
     results = {}
-    
+
+    def _get_lev(acct_id, acct_info):
+        """Read configured leverage for an account, fallback to live value."""
+        lev = None
+        if fix_manager and acct_id in fix_manager.accounts:
+            lev = fix_manager.accounts[acct_id].config.get("leverage")
+        if lev is None and mt_direct_manager and acct_id in mt_direct_manager.accounts:
+            lev = mt_direct_manager.accounts[acct_id].config.get("leverage")
+        if lev is None:
+            lev = acct_info.get("leverage")
+        try:
+            return float(lev) if lev else 100.0
+        except (ValueError, TypeError):
+            return 100.0
+
+    def _side_pip_exposure(accts):
+        """
+        For a list of (aid, ainfo) accounts, compute:
+          pnl_per_pip  — sum of dominant_lots × pip_per_lot across all accounts
+          margin_maint — sum of margin_used × stop_out_frac across all accounts
+
+        Uses the dominant instrument (largest position) for pip size, same as
+        the per-account pips_to_mc calculation. Falls back to total_lots if
+        no lots_by_instrument breakdown is available.
+
+        Returns (pnl_per_pip, margin_maint, has_position_data).
+        """
+        total_ppl = 0.0
+        total_maint = 0.0
+        has_data = False
+        for aid, ainfo in accts:
+            sol = _get_stop_out_frac(aid)
+            margin = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
+            total_maint += margin * sol
+
+            lbi = ea_account_info.get(aid, {}).get("lots_by_instrument", {})
+            if lbi:
+                dom_sym = max(
+                    lbi.keys(),
+                    key=lambda s: abs(lbi[s].get("buy", 0)) + abs(lbi[s].get("sell", 0))
+                )
+                dom_lots = abs(lbi[dom_sym].get("buy", 0)) + abs(lbi[dom_sym].get("sell", 0))
+                sym = dom_sym.upper().replace("/", "").replace(".", "")
+                has_data = True
+            else:
+                raw = ainfo.get("total_lots")
+                dom_lots = abs(float(raw)) if raw is not None else 0.0
+                sym = (ainfo.get("symbol") or "").upper()
+
+            pip_per_lot = 1.0 if any(x in sym for x in ("JPY", "XAU", "XAG", "XPT", "XPD")) else 10.0
+            total_ppl += dom_lots * pip_per_lot
+
+        return total_ppl, total_maint, has_data
+
     for group_id, sides in groups.items():
         side_a_accts = sides["A"]
         side_b_accts = sides["B"]
-        
+
         if not side_a_accts or not side_b_accts:
-            # Must have at least one account on each side to calculate hedge distribution
             continue
-            
-        # 2. Gather total equity, margin used, and leverage/stopout for each side
-        # For Side A
-        total_equity_a = 0.0
-        total_margin_a = 0.0
-        
-        # Stop-out level default: Side A (institutional, swap) -> 50% (0.5), Side B (retail, noswap) -> 20% (0.2)
-        # Leverage default: 100
-        first_a_id, first_a_info = side_a_accts[0]
-        
-        # Determine Leverage A
-        lev_a = None
-        if fix_manager and first_a_id in fix_manager.accounts:
-            lev_a = fix_manager.accounts[first_a_id].config.get("leverage")
-        if lev_a is None and mt_direct_manager and first_a_id in mt_direct_manager.accounts:
-            lev_a = mt_direct_manager.accounts[first_a_id].config.get("leverage")
-        if lev_a is None:
-            lev_a = first_a_info.get("leverage")
-        try:
-            lev_a = float(lev_a) if lev_a else 100.0
-        except (ValueError, TypeError):
-            lev_a = 100.0
-            
-        # Determine Stop Out A
-        stop_out_a = None
-        if fix_manager and first_a_id in fix_manager.accounts:
-            stop_out_a = fix_manager.accounts[first_a_id].config.get("stop_out_level")
-        if stop_out_a is None and mt_direct_manager and first_a_id in mt_direct_manager.accounts:
-            stop_out_a = mt_direct_manager.accounts[first_a_id].config.get("stop_out_level")
-        if stop_out_a is None:
-            stop_out_a = manual_accounts.get(first_a_id, {}).get("stop_out_level")
-        if stop_out_a is None:
-            stop_out_a = 0.5
-        else:
-            try:
-                stop_out_a = float(stop_out_a)
-                if stop_out_a > 1.0:
-                    stop_out_a = stop_out_a / 100.0
-            except (ValueError, TypeError):
-                stop_out_a = 0.5
-                
-        for aid, ainfo in side_a_accts:
-            total_equity_a += float(ainfo.get("equity") or 0.0)
-            m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-            total_margin_a += m
-            
-        # For Side B
-        total_equity_b = 0.0
-        total_margin_b = 0.0
-        first_b_id, first_b_info = side_b_accts[0]
-        
-        # Determine Leverage B
-        lev_b = None
-        if fix_manager and first_b_id in fix_manager.accounts:
-            lev_b = fix_manager.accounts[first_b_id].config.get("leverage")
-        if lev_b is None and mt_direct_manager and first_b_id in mt_direct_manager.accounts:
-            lev_b = mt_direct_manager.accounts[first_b_id].config.get("leverage")
-        if lev_b is None:
-            lev_b = first_b_info.get("leverage")
-        try:
-            lev_b = float(lev_b) if lev_b else 100.0
-        except (ValueError, TypeError):
-            lev_b = 100.0
-            
-        # Determine Stop Out B
-        stop_out_b = None
-        if fix_manager and first_b_id in fix_manager.accounts:
-            stop_out_b = fix_manager.accounts[first_b_id].config.get("stop_out_level")
-        if stop_out_b is None and mt_direct_manager and first_b_id in mt_direct_manager.accounts:
-            stop_out_b = mt_direct_manager.accounts[first_b_id].config.get("stop_out_level")
-        if stop_out_b is None:
-            stop_out_b = manual_accounts.get(first_b_id, {}).get("stop_out_level")
-        if stop_out_b is None:
-            stop_out_b = 0.2
-        else:
-            try:
-                stop_out_b = float(stop_out_b)
-                if stop_out_b > 1.0:
-                    stop_out_b = stop_out_b / 100.0
-            except (ValueError, TypeError):
-                stop_out_b = 0.2
-                
-        for aid, ainfo in side_b_accts:
-            total_equity_b += float(ainfo.get("equity") or 0.0)
-            m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-            total_margin_b += m
-            
+
+        # 2. Gather equity and margin totals per side
+        total_equity_a = sum(float(i.get("equity") or 0.0) for _, i in side_a_accts)
+        total_equity_b = sum(float(i.get("equity") or 0.0) for _, i in side_b_accts)
+        total_margin_a = sum(float(i.get("margin") or i.get("margin_used") or 0.0) for _, i in side_a_accts)
+        total_margin_b = sum(float(i.get("margin") or i.get("margin_used") or 0.0) for _, i in side_b_accts)
         total_group_equity = total_equity_a + total_equity_b
-        
-        # 3. Apply optimal fund allocation formula based on Simulated Risk Buffer
-        # We calculate theoretical margin for 1 unit of volume
-        m_a = 1.0 / lev_a if lev_a > 0 else 0
-        m_b = 1.0 / lev_b if lev_b > 0 else 0
-        
-        # Stop-out equity required for 1 unit
-        so_eq_a = m_a * stop_out_a
-        so_eq_b = m_b * stop_out_b
-        
-        # Apply a proportional risk buffer (0.35 yields roughly 3:1 for 100:1 @ 80% vs 1000:1 @ 50%)
-        buffer_factor = 0.35
-        risk_buffer = max(m_a, m_b) * buffer_factor
-        
-        target_eq_a = so_eq_a + risk_buffer
-        target_eq_b = so_eq_b + risk_buffer
-        
-        if (target_eq_a + target_eq_b) > 0:
-            alloc_pct_a = target_eq_a / (target_eq_a + target_eq_b)
-            alloc_pct_b = 1.0 - alloc_pct_a
-        else:
-            alloc_pct_a = 0.5
-            alloc_pct_b = 0.5
-            
-        optimal_equity_a = total_group_equity * alloc_pct_a
-        optimal_equity_b = total_group_equity * alloc_pct_b
-        
-        # 4. Allocate within each side based on margin used per account
-        for aid, ainfo in side_a_accts:
-            if total_margin_a > 0:
-                acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-                share = acct_m / total_margin_a
+
+        # Stop-out fracs (per-account config, both default 50%)
+        first_a_id = side_a_accts[0][0]
+        first_b_id = side_b_accts[0][0]
+        stop_out_a = _get_stop_out_frac(first_a_id)
+        stop_out_b = _get_stop_out_frac(first_b_id)
+
+        # Leverage (used only in fallback formula)
+        lev_a = _get_lev(first_a_id, side_a_accts[0][1])
+        lev_b = _get_lev(first_b_id, side_b_accts[0][1])
+
+        # 3. PRIMARY: pips-to-MC equalization
+        ppl_a, maint_a, has_pos_a = _side_pip_exposure(side_a_accts)
+        ppl_b, maint_b, has_pos_b = _side_pip_exposure(side_b_accts)
+        total_ppl = ppl_a + ppl_b
+        total_maint = maint_a + maint_b
+
+        use_pip_formula = False
+        if total_ppl > 0 and (has_pos_a or has_pos_b):
+            # Solve for equalized runway P:
+            #   equity_side = P × pnl_per_pip_side + margin_maint_side
+            #   sum = total_group_equity  →  P × total_ppl + total_maint = total_group_equity
+            P = (total_group_equity - total_maint) / total_ppl
+            if P > 0:
+                optimal_equity_a = P * ppl_a + maint_a
+                optimal_equity_b = P * ppl_b + maint_b
+                if optimal_equity_a > 0 and optimal_equity_b > 0:
+                    use_pip_formula = True
+                    alloc_pct_a = optimal_equity_a / total_group_equity
+                    alloc_pct_b = optimal_equity_b / total_group_equity
+
+        if not use_pip_formula:
+            # FALLBACK: leverage-ratio formula
+            m_a = 1.0 / lev_a if lev_a > 0 else 0
+            m_b = 1.0 / lev_b if lev_b > 0 else 0
+            so_eq_a = m_a * stop_out_a
+            so_eq_b = m_b * stop_out_b
+            buffer_factor = 0.35
+            risk_buffer = max(m_a, m_b) * buffer_factor
+            target_eq_a = so_eq_a + risk_buffer
+            target_eq_b = so_eq_b + risk_buffer
+            if (target_eq_a + target_eq_b) > 0:
+                alloc_pct_a = target_eq_a / (target_eq_a + target_eq_b)
+                alloc_pct_b = 1.0 - alloc_pct_a
             else:
-                share = 1.0 / len(side_a_accts)
-                
+                alloc_pct_a = 0.5
+                alloc_pct_b = 0.5
+            optimal_equity_a = total_group_equity * alloc_pct_a
+            optimal_equity_b = total_group_equity * alloc_pct_b
+
+        # 4. Allocate within each side proportionally to margin used per account
+        for aid, ainfo in side_a_accts:
+            acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
+            share = (acct_m / total_margin_a) if total_margin_a > 0 else (1.0 / len(side_a_accts))
             opt_eq = optimal_equity_a * share
             curr_eq = float(ainfo.get("equity") or 0.0)
             results[aid] = {
@@ -775,16 +780,13 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
                 "optimal_equity": round(opt_eq, 2),
                 "suggested_transfer": round(opt_eq - curr_eq, 2),
                 "allocation_pct": round(alloc_pct_a * 100, 2),
-                "stop_out_level": stop_out_a
+                "stop_out_level": stop_out_a,
+                "method": "pips_eq" if use_pip_formula else "leverage_ratio",
             }
-            
+
         for aid, ainfo in side_b_accts:
-            if total_margin_b > 0:
-                acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-                share = acct_m / total_margin_b
-            else:
-                share = 1.0 / len(side_b_accts)
-                
+            acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
+            share = (acct_m / total_margin_b) if total_margin_b > 0 else (1.0 / len(side_b_accts))
             opt_eq = optimal_equity_b * share
             curr_eq = float(ainfo.get("equity") or 0.0)
             results[aid] = {
@@ -793,10 +795,12 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
                 "optimal_equity": round(opt_eq, 2),
                 "suggested_transfer": round(opt_eq - curr_eq, 2),
                 "allocation_pct": round(alloc_pct_b * 100, 2),
-                "stop_out_level": stop_out_b
+                "stop_out_level": stop_out_b,
+                "method": "pips_eq" if use_pip_formula else "leverage_ratio",
             }
-            
+
     return results
+
 
 def _swap_delta_loop():
     """Background thread: snapshot swap at 4:58 PM ET daily (pre-rollover)."""
