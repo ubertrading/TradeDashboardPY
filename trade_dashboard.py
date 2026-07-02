@@ -1715,6 +1715,66 @@ def _send_fee_alert(account, fee_entry):
                                account, err_e, err_t)
     threading.Thread(target=_send, daemon=True, name=f"FeeAlert-{account}").start()
 
+# ─── Pips to Margin Call ─────────────────────────────────────────────────────
+
+def _calc_pips_to_mc(equity, margin_used, total_lots_abs, stop_out_frac=0.50, symbol_hint=""):
+    """Return how many pips the market can move against open positions before
+    the account hits its stop-out level.
+
+    Formula:
+        free_equity  = equity - (margin_used * stop_out_frac)
+        pip_per_lot  = pip_size * contract_size
+                     = 10.0 for standard forex pairs (0.0001 * 100000)
+                     = 1.0  for JPY, XAU, XAG, and index pairs (0.01 * 100)
+        pnl_per_pip  = total_lots_abs * pip_per_lot
+        pips_to_mc   = free_equity / pnl_per_pip
+
+    Returns float (pips) or None if inputs are insufficient.
+    Note: pip value is approximated in account currency — accurate for USD-
+    denominated accounts, directionally correct for others.
+    """
+    if not equity or equity <= 0:
+        return None
+    if not total_lots_abs or total_lots_abs <= 0:
+        return None
+    margin_used = margin_used or 0.0
+    free_eq = float(equity) - (float(margin_used) * float(stop_out_frac))
+    if free_eq <= 0:
+        return 0.0
+    sym = (symbol_hint or "").upper().replace("/", "").replace(".", "")
+    # JPY pairs: pip = 0.01, standard contract 100,000 → $10/lot BUT pip_per_lot ~1
+    # Gold/Silver (XAU/XAG): pip = 0.01, contract 100 oz → pip_per_lot ~1
+    # Standard forex: pip = 0.0001, contract 100,000 → pip_per_lot ~10
+    if any(x in sym for x in ("JPY", "XAU", "XAG", "XPT", "XPD")):
+        pip_per_lot = 1.0
+    else:
+        pip_per_lot = 10.0
+    pnl_per_pip = float(total_lots_abs) * pip_per_lot
+    if pnl_per_pip <= 0:
+        return None
+    return round(free_eq / pnl_per_pip, 1)
+
+
+def _get_stop_out_frac(account_id):
+    """Return the stop-out fraction (0.0–1.0) for a given account.
+    Checks FIX, MT Direct, and manual account configs; defaults to 0.50.
+    """
+    sol = None
+    if fix_manager and account_id in fix_manager.accounts:
+        sol = fix_manager.accounts[account_id].config.get("stop_out_level")
+    if sol is None and mt_direct_manager and account_id in mt_direct_manager.accounts:
+        sol = mt_direct_manager.accounts[account_id].config.get("stop_out_level")
+    if sol is None:
+        sol = manual_accounts.get(account_id, {}).get("stop_out_level")
+    if sol is None:
+        return 0.50
+    try:
+        f = float(sol)
+        return f / 100.0 if f > 1.0 else f
+    except (ValueError, TypeError):
+        return 0.50
+
+
 # ─── Margin Use Alert ────────────────────────────────────────────────────────
 _margin_alert_cooldowns = {}  # account -> last alert timestamp
 
@@ -6027,6 +6087,58 @@ def api_status():
         except Exception:
             pass
 
+        # ── Pips-to-Margin-Call enrichment ──────────────────────────────
+        # Inject pips_to_mc into every account status dict so the frontend
+        # can display it alongside margin use.
+        try:
+            def _enrich_pips_to_mc(accts):
+                for aid, ainfo in accts.items():
+                    try:
+                        eq = ainfo.get("equity") or ainfo.get("balance")
+                        mu = ainfo.get("margin") or ainfo.get("margin_used")
+
+                        # Per-instrument lot data
+                        lbi = ea_account_info.get(aid, {}).get("lots_by_instrument", {})
+
+                        if lbi:
+                            # Find the instrument with the LARGEST position (buy + sell lots).
+                            # We calculate pips-to-MC using ONLY that instrument's lots,
+                            # because each instrument moves independently — mixing lots from
+                            # different instruments with one pip size is incorrect.
+                            dominant_sym = max(
+                                lbi.keys(),
+                                key=lambda s: abs(lbi[s].get("buy", 0)) + abs(lbi[s].get("sell", 0))
+                            )
+                            dom = lbi[dominant_sym]
+                            lots_abs = round(abs(dom.get("buy", 0)) + abs(dom.get("sell", 0)), 4)
+                            sym_hint = dominant_sym
+                        else:
+                            # Fallback: no per-instrument breakdown available
+                            raw_lots = ainfo.get("total_lots")
+                            lots_abs = abs(float(raw_lots)) if raw_lots is not None else None
+                            sym_hint = ainfo.get("symbol", "")
+
+                        sol_frac = _get_stop_out_frac(aid)
+                        ptmc = _calc_pips_to_mc(
+                            equity=float(eq) if eq is not None else None,
+                            margin_used=float(mu) if mu is not None else 0.0,
+                            total_lots_abs=lots_abs,
+                            stop_out_frac=sol_frac,
+                            symbol_hint=sym_hint,
+                        )
+                        ainfo["pips_to_mc"] = ptmc
+                        ainfo["stop_out_frac"] = sol_frac
+                        ainfo["pips_to_mc_sym"] = sym_hint  # shown in tooltip
+                    except Exception:
+                        ainfo["pips_to_mc"] = None
+            _enrich_pips_to_mc(fix_accts)
+            _enrich_pips_to_mc(mt_accts)
+            _enrich_pips_to_mc(ea_status)
+        except Exception:
+            pass
+
+
+
         # Include margin alert thresholds in response for frontend
         margin_alert_data = {
             "global_threshold": dashboard_settings.get("margin_alert_threshold", 85),
@@ -8754,20 +8866,21 @@ body {
             <th data-acol="9">Positions</th>
             <th data-acol="10">Lots</th>
             <th data-acol="11">Margin Use</th>
-            <th data-acol="12" title="Margin alert threshold (%)">Marg.Alrt%</th>
-            <th data-acol="13">Swap</th>
-            <th data-acol="14" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
-            <th data-acol="15" title="Oldest position age (rollover days)">Age</th>
-            <th data-acol="16">Last Poll</th>
-            <th data-acol="17" title="Auto connect account at start">Auto Conn</th>
-            <th data-acol="18" title="Alert Email(s) Override">Email Alert</th>
-            <th data-acol="19" title="Alert Telegram ID(s) Override">Telegram Alert</th>
-            <th data-acol="20" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
-            <th data-acol="21"></th>
+            <th data-acol="12" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
+            <th data-acol="13" title="Margin alert threshold (%)">Marg.Alrt%</th>
+            <th data-acol="14">Swap</th>
+            <th data-acol="15" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
+            <th data-acol="16" title="Oldest position age (rollover days)">Age</th>
+            <th data-acol="17">Last Poll</th>
+            <th data-acol="18" title="Auto connect account at start">Auto Conn</th>
+            <th data-acol="19" title="Alert Email(s) Override">Email Alert</th>
+            <th data-acol="20" title="Alert Telegram ID(s) Override">Telegram Alert</th>
+            <th data-acol="21" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
+            <th data-acol="22"></th>
           </tr>
         </thead>
         <tbody id="accountsBody">
-          <tr><td colspan="22" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
+          <tr><td colspan="23" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
         </tbody>
       </table>
     </div>
@@ -10421,16 +10534,16 @@ function toggleGroupView(enabled) {
 }
 
 // ─── Account column toggle ───────────────────────────────────────────
-let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["18", "19"]');
+let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["19", "20"]');
 const ACCT_COLUMNS = [
   {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
   {idx:'3', name:'Balance'}, {idx:'4', name:'Equity'},
   {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'},
   {idx:'7', name:'PnL'}, {idx:'8', name:'Leverage'}, {idx:'9', name:'Positions'}, {idx:'10', name:'Lots'},
-  {idx:'11', name:'Margin Use'}, {idx:'12', name:'Marg.Alrt%'},
-  {idx:'13', name:'Swap'}, {idx:'14', name:'Δ Swap'}, {idx:'15', name:'Age'}, {idx:'16', name:'Last Poll'},
-  {idx:'17', name:'Auto Conn'}, {idx:'18', name:'Email Alert'}, {idx:'19', name:'Telegram Alert'},
-  {idx:'20', name:'Stats'}, {idx:'21', name:'Actions'},
+  {idx:'11', name:'Margin Use'}, {idx:'12', name:'Pips to MC'}, {idx:'13', name:'Marg.Alrt%'},
+  {idx:'14', name:'Swap'}, {idx:'15', name:'Δ Swap'}, {idx:'16', name:'Age'}, {idx:'17', name:'Last Poll'},
+  {idx:'18', name:'Auto Conn'}, {idx:'19', name:'Email Alert'}, {idx:'20', name:'Telegram Alert'},
+  {idx:'21', name:'Stats'}, {idx:'22', name:'Actions'},
 ];
 function initAcctColToggleMenu() {
   const menu = document.getElementById('acctColToggleMenu');
@@ -13284,6 +13397,24 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     return `<td><input type="number" class="inl" style="width:50px;text-align:center;${hasCustom ? '' : 'color:var(--text2);'}" value="${displayVal}" placeholder="${placeholder}" onchange="${saveFunc}('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="${hasCustom ? 'Custom: ' + acctT + '%' : 'Using global: ' + globalT + '%'}"></td>`;
   }
 
+  // Pips to Margin Call cell — color-coded risk indicator
+  function _pipsToMcCell(info) {
+    const ptmc = (info != null && info.pips_to_mc != null) ? parseFloat(info.pips_to_mc) : null;
+    if (ptmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
+    if (ptmc <= 0) {
+      return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="Margin call threshold reached!">\u26a0 MC!</span></td>';
+    }
+    let color, weight;
+    if (ptmc < 200)       { color = 'var(--red)';    weight = '700'; }
+    else if (ptmc < 500)  { color = 'var(--orange)'; weight = '600'; }
+    else                  { color = 'var(--green)';  weight = '500'; }
+    const solPct = (info && info.stop_out_frac != null) ? (info.stop_out_frac * 100).toFixed(0) + '% SO' : '50% SO';
+    const sym = (info && info.pips_to_mc_sym) ? info.pips_to_mc_sym : '';
+    const display = ptmc >= 10000 ? (ptmc / 1000).toFixed(1) + 'k' : ptmc.toLocaleString(undefined, {maximumFractionDigits: 0});
+    const tooltip = `~${ptmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (${solPct}${sym ? ', pip size from ' + sym : ''})`;
+    return `<td style="color:${color};font-weight:${weight};font-size:0.82rem;" title="${tooltip}">${display}</td>`;
+  }
+
   // FIX accounts first — show with special styling
   if (fixAccounts) {
     Object.entries(fixAccounts).forEach(([id, info]) => {
@@ -13331,6 +13462,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${pos1}</td>
         ${_lotsCell(id, lots1, lots1Style)}
         <td>${mu1}</td>
+        ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, true)}
         <td>${swap1}</td>
         ${_swapDeltaCell(id)}
@@ -13394,6 +13526,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${posMt}</td>
         ${_lotsCell(id, lotsMt, lotsMtStyle)}
         <td>${muMt}</td>
+        ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, false)}
         <td>${swapMt}</td>
         ${_swapDeltaCell(id)}
@@ -13458,6 +13591,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muM}</td>
+        ${_pipsToMcCell(eaInfo || info)}
         ${_marginAlertCell(name, false)}
         <td>-</td>
         ${_swapDeltaCell(name)}
@@ -13506,6 +13640,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muE}</td>
+        ${_pipsToMcCell(info)}
         ${_marginAlertCell(acc, false)}
         <td>-</td>
         ${_swapDeltaCell(acc)}
@@ -13561,7 +13696,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const pnlStyle = hasPnl ? (totPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
     const fmtLots = hasLots ? totLots.toFixed(2) : '-';
     const lotsStyle = hasLots ? (totLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
-    const lotsBreakdown = hasLots ? `<br><a href="#" onclick="showLotsBreakdown();return false;" style="font-size:0.7rem;font-weight:400;color:#e2e8f0;text-decoration:underline;cursor:pointer;">(${totPosLots.toFixed(2)} / ${totNegLots.toFixed(2)})</a>` : '';
+    const lotsBreakdown = hasLots ? `<br><a href="#" onclick="showLotsBreakdown();return false;" style="font-size:0.7rem;font-weight:400;color:#e2e8f0;text-decoration:underline;cursor:pointer;">(${totPosLots.toFixed(2)} / ${totNegLots.toFixed(2)})</a>` : ``;
     const fmtSwap = hasSwap ? totSwap.toFixed(2) : '-';
 
     const fmtOptEq = hasOptEq ? totOptEq.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
@@ -13643,6 +13778,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   let gSwapDelta = 0, gHasSwapDelta = false;
   let gMaxAge = null;
   let gMaxMu = null;
+  let gMinPtmc = null;   // lowest pips-to-MC across all groups (worst risk)
   let gOptEq = 0, gShift = 0;
   let gHasOptEq = false, gHasShift = false;
 
@@ -13655,6 +13791,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let maxMu = null;  // highest margin use %
     let maxMuLev = null;  // leverage of the account with highest margin use
     let maxAge = null;
+    let minPtmc = null;  // lowest pips-to-MC in this group
     let sumSwapDelta = 0, hasSwapDelta = false;
     let sumOptEq = 0, sumShift = 0;
     let hasOptEq = false, hasShift = false;
@@ -13727,6 +13864,11 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           if (maxAge === null || numAge > maxAge) maxAge = numAge;
         }
       }
+      // Pips to Margin Call — track minimum (most dangerous) in group
+      const mPtmc = info.pips_to_mc != null ? parseFloat(info.pips_to_mc) : null;
+      if (mPtmc !== null) {
+        if (minPtmc === null || mPtmc < minPtmc) minPtmc = mPtmc;
+      }
       // Optimal Equity & Shift
       const dist = fundDists[m.id] || {};
       if (dist.optimal_equity != null) { sumOptEq += dist.optimal_equity; hasOptEq = true; }
@@ -13741,6 +13883,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     if (hasSwap) { gSwap += sumSwap; gHasSwap = true; }
     if (hasSwapDelta) { gSwapDelta += sumSwapDelta; gHasSwapDelta = true; }
     if (maxMu !== null && (gMaxMu === null || maxMu > gMaxMu)) gMaxMu = maxMu;
+    if (minPtmc !== null && (gMinPtmc === null || minPtmc < gMinPtmc)) gMinPtmc = minPtmc;
     if (maxAge !== null && (gMaxAge === null || maxAge > gMaxAge)) gMaxAge = maxAge;
     if (hasOptEq) { gOptEq += sumOptEq; gHasOptEq = true; }
     if (hasShift) { gShift += sumShift; gHasShift = true; }
@@ -13816,7 +13959,14 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td>${fPos}</td>
       ${groupLotsCell}
       <td>${fMu}</td>
-      <td></td>
+      ${(function(){
+        if (minPtmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
+        if (minPtmc <= 0) return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;">\u26a0 MC!</span></td>';
+        const _c = minPtmc < 200 ? 'var(--red)' : minPtmc < 500 ? 'var(--orange)' : 'var(--green)';
+        const _w = minPtmc < 200 ? '700' : minPtmc < 500 ? '600' : '500';
+        const _d = minPtmc >= 10000 ? (minPtmc/1000).toFixed(1)+'k' : minPtmc.toLocaleString(undefined,{maximumFractionDigits:0});
+        return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
+      })()}
       <td>${fSwap}</td>
       ${groupSwapDeltaCell}
       <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
@@ -13854,7 +14004,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td style="${gPnlStyle}">${fGPnl}</td>
     <td></td><td></td>
     <td style="${gLotsStyle}">${fGLots}${gLotsBreak}</td>
-    <td></td><td></td>
+    <td></td><td></td><td></td>
     <td>${fGSwap}</td>
     ${totalsSwapDeltaCell}
     <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
