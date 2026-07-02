@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -1479,6 +1479,12 @@ _DEFAULT_SETTINGS = {
     "exec_retry_max": 5,
     "fund_email_enabled": True,
     "fund_email_time": "08:00",
+    "adr_settings": {
+        "EURUSD": 80, "GBPUSD": 100, "USDJPY": 60, "USDCHF": 65,
+        "AUDUSD": 70, "USDCAD": 75, "NZDUSD": 60, "EURGBP": 55,
+        "EURJPY": 100, "GBPJPY": 140, "AUDJPY": 80, "XAUUSD": 200,
+        "XAGUSD": 30, "default": 80
+    },
 }
 
 # ─── PnL Request State ──────────────────────────────────────────────────────
@@ -6188,6 +6194,7 @@ def api_status():
             "cycle_reminders": cycle_reminders,
             "news_blackout": {"blocked": news_blocked, "event": news_reason},
             "margin_alert": margin_alert_data,
+            "adr_settings": dashboard_settings.get("adr_settings", {}),
             "swap_delta": _compute_swap_deltas_live(),
             "fund_distributions": _cached_fund_distributions,
             "fund_distributions_last_updated": dist_last_updated,
@@ -8249,6 +8256,14 @@ def api_update_settings():
             dashboard_settings["fund_email_enabled"] = bool(data["fund_email_enabled"])
         if "fund_email_time" in data:
             dashboard_settings["fund_email_time"] = str(data["fund_email_time"]).strip()
+        if "adr_settings" in data and isinstance(data["adr_settings"], dict):
+            adr = {}
+            for sym, val in data["adr_settings"].items():
+                try:
+                    adr[sym.upper()] = max(1, float(val))
+                except (ValueError, TypeError):
+                    pass
+            dashboard_settings["adr_settings"] = adr
         _save_settings()
         return jsonify({"ok": True})
     except Exception as e:
@@ -9100,6 +9115,21 @@ body {
       <input type="number" id="setMarginAlertThreshold" value="85" min="0" max="100" step="1" style="width:70px;text-align:center;" onchange="saveMarginAlertGlobal(this.value)">
     </div>
   </div>
+
+  <!-- Average Daily Range (ADR) per Instrument -->
+  <div class="settings-section">
+    <h3>📏 Average Daily Range (ADR) per Instrument</h3>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">
+      Used to scale the <strong>Pips to MC</strong> bar — 1 bar segment = 1 ADR of runway.
+      5 ADRs = full bar. Edit values in pips, then click <strong>Save ADR Settings</strong>.
+    </p>
+    <div id="adrSettingsWrap" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <button onclick="saveAdrSettings()" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:600;">💾 Save ADR Settings</button>
+      <span id="adrSaveStatus" style="font-size:0.8rem;color:var(--green);display:none;">Saved ✓</span>
+    </div>
+  </div>
+
 
   <!-- Position Change Alert -->
   <div class="settings-section">
@@ -12957,6 +12987,8 @@ async function loadSettings() {
     document.getElementById('setExecHaltOnTimeout').checked = !!s.exec_halt_on_timeout;
     document.getElementById('setExecRetryClose').checked = !!s.exec_retry_close;
     document.getElementById('setExecRetryMax').value = s.exec_retry_max != null ? s.exec_retry_max : 5;
+    // ADR Settings
+    renderAdrSettings(s.adr_settings || {});
   } catch(e) { console.error('Load settings error:', e); }
 }
 
@@ -12968,7 +13000,49 @@ async function saveMarginAlertGlobal(value) {
       body: JSON.stringify({margin_alert_threshold: val})
     });
     if (window._marginAlertData) { window._marginAlertData.global_threshold = val; }
+
   } catch(e) { console.error('Failed to save global margin threshold:', e); }
+}
+
+// ── ADR Settings ───────────────────────────────────────────────────────────
+const _ADR_DEFAULTS = {
+  EURUSD:80, GBPUSD:100, USDJPY:60, USDCHF:65, AUDUSD:70,
+  USDCAD:75, NZDUSD:60, EURGBP:55, EURJPY:100, GBPJPY:140,
+  AUDJPY:80, XAUUSD:200, XAGUSD:30, default:80
+};
+
+function renderAdrSettings(adrData) {
+  const wrap = document.getElementById('adrSettingsWrap');
+  if (!wrap) return;
+  const merged = Object.assign({}, _ADR_DEFAULTS, adrData);
+  wrap.innerHTML = Object.entries(merged).map(([sym, val]) => `
+    <label style="display:flex;align-items:center;gap:8px;font-size:0.83rem;">
+      <span style="width:72px;font-weight:600;color:var(--text1);">${sym}</span>
+      <input type="number" min="1" max="2000" step="1"
+        data-adr-sym="${sym}" value="${val}"
+        style="width:70px;text-align:center;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;">
+      <span style="color:var(--text2);font-size:0.75rem;">pips</span>
+    </label>`).join('');
+}
+
+async function saveAdrSettings() {
+  const wrap = document.getElementById('adrSettingsWrap');
+  if (!wrap) return;
+  const adr = {};
+  wrap.querySelectorAll('input[data-adr-sym]').forEach(inp => {
+    const sym = inp.dataset.adrSym;
+    const v = parseFloat(inp.value);
+    if (sym && !isNaN(v) && v > 0) adr[sym] = v;
+  });
+  try {
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({adr_settings: adr})
+    });
+    window._adrSettings = adr;
+    const st = document.getElementById('adrSaveStatus');
+    if (st) { st.style.display = 'inline'; setTimeout(() => st.style.display = 'none', 2500); }
+  } catch(e) { console.error('Failed to save ADR settings:', e); }
 }
 
 async function saveRebalCloseDelay(value) {
@@ -13244,6 +13318,9 @@ async function refreshData() {
     swap_delta_cache = data.swap_delta || {};
     window._newsBlackout = data.news_blackout || {};
     window._marginAlertData = data.margin_alert || {global_threshold: 85, per_account: {}};
+    // ADR settings — used by _pipsToMcCell for bar scaling
+    window._adrSettings = data.adr_settings || {default: 80};
+
     window._statsAccounts = Object.entries(ea_heartbeats_cache)
       .filter(([_, info]) => info.stats_log)
       .map(([acc, _]) => acc);
@@ -13401,22 +13478,45 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     return `<td><input type="number" class="inl" style="width:50px;text-align:center;${hasCustom ? '' : 'color:var(--text2);'}" value="${displayVal}" placeholder="${placeholder}" onchange="${saveFunc}('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="${hasCustom ? 'Custom: ' + acctT + '%' : 'Using global: ' + globalT + '%'}"></td>`;
   }
 
-  // Pips to Margin Call cell — color-coded risk indicator
+  // Pips to Margin Call cell — ADR-scaled bar overlay
   function _pipsToMcCell(info) {
     const ptmc = (info != null && info.pips_to_mc != null) ? parseFloat(info.pips_to_mc) : null;
-    if (ptmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
+    if (ptmc == null) return '<td style="color:var(--text2);font-size:0.82rem;text-align:center;">-</td>';
+
+    // Margin call reached
     if (ptmc <= 0) {
-      return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="Margin call threshold reached!">\u26a0 MC!</span></td>';
+      return '<td style="text-align:center;background:rgba(239,68,68,0.25);"><span style="color:#ef4444;font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="Margin call threshold reached!">\u26a0 MC!</span></td>';
     }
-    let color, weight;
-    if (ptmc < 200)       { color = 'var(--red)';    weight = '700'; }
-    else if (ptmc < 500)  { color = 'var(--orange)'; weight = '600'; }
-    else                  { color = 'var(--green)';  weight = '500'; }
-    const solPct = (info && info.stop_out_frac != null) ? (info.stop_out_frac * 100).toFixed(0) + '% SO' : '50% SO';
-    const sym = (info && info.pips_to_mc_sym) ? info.pips_to_mc_sym : '';
-    const display = ptmc >= 10000 ? (ptmc / 1000).toFixed(1) + 'k' : ptmc.toLocaleString(undefined, {maximumFractionDigits: 0});
-    const tooltip = `~${ptmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (${solPct}${sym ? ', pip size from ' + sym : ''})`;
-    return `<td style="color:${color};font-weight:${weight};font-size:0.82rem;" title="${tooltip}">${display}</td>`;
+
+    // Look up ADR for dominant instrument
+    const sym = (info && info.pips_to_mc_sym) ? info.pips_to_mc_sym.toUpperCase().replace(/[^A-Z]/g,'') : '';
+    const adrMap = window._adrSettings || {};
+    const adr = (sym && adrMap[sym]) ? parseFloat(adrMap[sym]) : (parseFloat(adrMap['default'] || adrMap['DEFAULT']) || 80);
+
+    const adrMult = ptmc / adr;  // how many ADRs of runway
+    const fillPct = Math.min(adrMult / 5, 1.0) * 100;  // 5 ADRs = 100%
+
+    // 6-stop color based on ADR multiples
+    let barColor, textColor, weight;
+    if      (adrMult < 1) { barColor = '#ef4444'; textColor = '#fff'; weight = '700'; }  // <1 ADR — red
+    else if (adrMult < 2) { barColor = '#f97316'; textColor = '#fff'; weight = '700'; }  // 1-2 ADR — orange
+    else if (adrMult < 3) { barColor = '#eab308'; textColor = '#1a1a1a'; weight = '600'; }  // 2-3 ADR — amber
+    else if (adrMult < 4) { barColor = '#84cc16'; textColor = '#1a1a1a'; weight = '500'; }  // 3-4 ADR — lime
+    else if (adrMult < 5) { barColor = '#22c55e'; textColor = '#fff'; weight = '500'; }  // 4-5 ADR — green
+    else                  { barColor = '#14b8a6'; textColor = '#fff'; weight = '500'; }  // 5+ ADR — teal
+
+    const pipsStr = ptmc >= 10000 ? (ptmc/1000).toFixed(1)+'k' : ptmc.toLocaleString(undefined,{maximumFractionDigits:0});
+    const adrStr  = adrMult.toFixed(1) + '\u00d7';  // e.g. "2.1×"
+    const solPct  = (info && info.stop_out_frac != null) ? (info.stop_out_frac*100).toFixed(0)+'% SO' : '50% SO';
+    const tooltip = `~${ptmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips (${adrMult.toFixed(2)} ADRs, ADR=${adr}pip, ${solPct}${sym ? ', ' + sym : ''})`;
+
+    return `<td style="padding:0;min-width:80px;" title="${tooltip}">
+      <div style="position:relative;overflow:hidden;border-radius:3px;margin:2px 4px;">
+        <div style="position:absolute;inset:0;background:${barColor};opacity:0.22;"></div>
+        <div style="position:absolute;top:0;left:0;height:100%;width:${fillPct.toFixed(1)}%;background:${barColor};opacity:0.55;border-radius:3px 0 0 3px;"></div>
+        <div style="position:relative;z-index:1;text-align:center;padding:2px 4px;color:${textColor};font-weight:${weight};font-size:0.75rem;white-space:nowrap;">${pipsStr}&thinsp;<span style="opacity:0.75;font-size:0.7rem;">${adrStr}</span></div>
+      </div>
+    </td>`;
   }
 
   // FIX accounts first — show with special styling
