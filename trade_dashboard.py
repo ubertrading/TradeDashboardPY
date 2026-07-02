@@ -1480,10 +1480,8 @@ _DEFAULT_SETTINGS = {
     "fund_email_enabled": True,
     "fund_email_time": "08:00",
     "adr_settings": {
-        "EURUSD": 80, "GBPUSD": 100, "USDJPY": 60, "USDCHF": 65,
-        "AUDUSD": 70, "USDCAD": 75, "NZDUSD": 60, "EURGBP": 55,
-        "EURJPY": 100, "GBPJPY": 140, "AUDJPY": 80, "XAUUSD": 200,
-        "XAGUSD": 30, "default": 80
+        "GBPCHF": 90, "USDCHF": 65,
+        "default": 80
     },
 }
 
@@ -13005,33 +13003,81 @@ async function saveMarginAlertGlobal(value) {
 }
 
 // ── ADR Settings ───────────────────────────────────────────────────────────
-const _ADR_DEFAULTS = {
-  EURUSD:80, GBPUSD:100, USDJPY:60, USDCHF:65, AUDUSD:70,
-  USDCAD:75, NZDUSD:60, EURGBP:55, EURJPY:100, GBPJPY:140,
-  AUDJPY:80, XAUUSD:200, XAGUSD:30, default:80
-};
+const _ADR_DEFAULTS = { GBPCHF:90, USDCHF:65, default:80 };
 
 function renderAdrSettings(adrData) {
   const wrap = document.getElementById('adrSettingsWrap');
   if (!wrap) return;
-  const merged = Object.assign({}, _ADR_DEFAULTS, adrData);
-  wrap.innerHTML = Object.entries(merged).map(([sym, val]) => `
-    <label style="display:flex;align-items:center;gap:8px;font-size:0.83rem;">
-      <span style="width:72px;font-weight:600;color:var(--text1);">${sym}</span>
-      <input type="number" min="1" max="2000" step="1"
-        data-adr-sym="${sym}" value="${val}"
-        style="width:70px;text-align:center;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;">
-      <span style="color:var(--text2);font-size:0.75rem;">pips</span>
-    </label>`).join('');
+  // Use server data directly; fall back to JS defaults only if nothing saved yet
+  const data = (adrData && Object.keys(adrData).length > 0) ? adrData : _ADR_DEFAULTS;
+  const rows = Object.entries(data).map(([sym, val]) => _adrRow(sym, val)).join('');
+  wrap.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.83rem;">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 8px;color:var(--text2);font-weight:600;">Symbol</th>
+        <th style="text-align:center;padding:4px 8px;color:var(--text2);font-weight:600;">ADR (pips)</th>
+        <th style="width:32px;"></th>
+      </tr></thead>
+      <tbody id="adrTableBody">${rows}</tbody>
+    </table>
+    <button onclick="addAdrRow()" style="margin-top:8px;padding:4px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;cursor:pointer;font-size:0.82rem;">+ Add instrument</button>`;
+}
+
+function _adrRow(sym, val) {
+  const isDefault = sym === 'default';
+  return `<tr class="adr-row">
+    <td style="padding:3px 8px;">
+      ${ isDefault
+        ? `<span style="color:var(--text2);font-size:0.8rem;font-style:italic;">default (fallback)</span><input type="hidden" data-adr-sym="default" value="default">`
+        : `<input type="text" data-adr-sym-name value="${sym}" maxlength="12"
+            style="width:90px;text-transform:uppercase;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;"
+            oninput="this.value=this.value.toUpperCase()">`
+      }
+    </td>
+    <td style="padding:3px 8px;text-align:center;">
+      <input type="number" min="1" max="5000" step="1" data-adr-val value="${val}"
+        style="width:75px;text-align:center;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;">
+      <span style="color:var(--text2);font-size:0.75rem;margin-left:4px;">pips</span>
+    </td>
+    <td style="padding:3px 4px;text-align:center;">
+      ${ isDefault ? '' : `<button onclick="this.closest('tr').remove()" title="Remove" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:1rem;line-height:1;">×</button>` }
+    </td>
+  </tr>`;
+}
+
+function addAdrRow() {
+  const tbody = document.getElementById('adrTableBody');
+  if (!tbody) return;
+  const tr = document.createElement('tr');
+  tr.className = 'adr-row';
+  tr.innerHTML = `
+    <td style="padding:3px 8px;">
+      <input type="text" data-adr-sym-name placeholder="e.g. EURUSD" maxlength="12"
+        style="width:90px;text-transform:uppercase;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;"
+        oninput="this.value=this.value.toUpperCase()">
+    </td>
+    <td style="padding:3px 8px;text-align:center;">
+      <input type="number" min="1" max="5000" step="1" data-adr-val placeholder="80"
+        style="width:75px;text-align:center;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;">
+      <span style="color:var(--text2);font-size:0.75rem;margin-left:4px;">pips</span>
+    </td>
+    <td style="padding:3px 4px;text-align:center;">
+      <button onclick="this.closest('tr').remove()" title="Remove" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:1rem;line-height:1;">×</button>
+    </td>`;
+  tbody.appendChild(tr);
+  tr.querySelector('input[data-adr-sym-name]').focus();
 }
 
 async function saveAdrSettings() {
   const wrap = document.getElementById('adrSettingsWrap');
   if (!wrap) return;
   const adr = {};
-  wrap.querySelectorAll('input[data-adr-sym]').forEach(inp => {
-    const sym = inp.dataset.adrSym;
-    const v = parseFloat(inp.value);
+  wrap.querySelectorAll('tr.adr-row').forEach(row => {
+    const symEl  = row.querySelector('[data-adr-sym-name]');
+    const hidSym = row.querySelector('[data-adr-sym]');  // hidden for "default" row
+    const valEl  = row.querySelector('[data-adr-val]');
+    const sym = (symEl ? symEl.value.trim().toUpperCase() : null) || (hidSym ? hidSym.value : null);
+    const v   = parseFloat(valEl ? valEl.value : null);
     if (sym && !isNaN(v) && v > 0) adr[sym] = v;
   });
   try {
