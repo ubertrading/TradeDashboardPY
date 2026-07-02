@@ -1466,6 +1466,7 @@ _DEFAULT_SETTINGS = {
     "disbalance_alert_telegram": True,
     "disbalance_alert_email": True,
     "disbalance_alert_period_sec": 30,
+    "disbalance_startup_grace_sec": 120,  # seconds after startup to suppress disbalance alerts (allows autoconnect accounts to come online)
     # Trading Parameters (execution timeout / retry)
     "exec_timeout_sec": 60,
     "exec_alert_on_timeout": False,
@@ -1990,6 +1991,23 @@ def _disbalance_alert_loop():
     while True:
         try:
             if not dashboard_settings.get("disbalance_alert_enabled", False):
+                _time.sleep(5)
+                continue
+
+            # ── Startup grace gate ─────────────────────────────────────────────
+            # After a server restart autoconnect accounts (FIX, MT-Bridge, etc.)
+            # may not yet have re-established their sessions.  Suppress disbalance
+            # evaluation entirely until the grace window has elapsed so we don't
+            # fire false "Possible Disbalance" alerts while accounts are still
+            # connecting.
+            grace_sec = int(dashboard_settings.get("disbalance_startup_grace_sec", 120))
+            elapsed_since_start = _time.time() - _dashboard_start_time
+            if elapsed_since_start < grace_sec:
+                remaining = int(grace_sec - elapsed_since_start)
+                app.logger.debug(
+                    "[DISBALANCE-ALERT] Startup grace active — suppressing for %ds more "
+                    "(autoconnect accounts may still be coming online)", remaining
+                )
                 _time.sleep(5)
                 continue
 
@@ -8090,6 +8108,11 @@ def api_update_settings():
                 dashboard_settings["disbalance_alert_period_sec"] = max(5, int(data["disbalance_alert_period_sec"]))
             except (ValueError, TypeError):
                 pass
+        if "disbalance_startup_grace_sec" in data:
+            try:
+                dashboard_settings["disbalance_startup_grace_sec"] = max(0, int(data["disbalance_startup_grace_sec"]))
+            except (ValueError, TypeError):
+                pass
         if "exec_timeout_sec" in data:
             try:
                 dashboard_settings["exec_timeout_sec"] = max(5, float(data["exec_timeout_sec"]))
@@ -9013,6 +9036,11 @@ body {
           <span>Confirmation Period (sec):</span>
           <input type="number" id="setDisbalancePeriod" style="width:60px;padding:2px 4px;background:#111827;border:1px solid #374151;color:#fff;border-radius:4px;" 
             onchange="saveDisbalanceSuboption('disbalance_alert_period_sec', parseInt(this.value, 10))">
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;cursor:pointer;" title="Suppresses disbalance alerts for this many seconds after server startup to allow autoconnect accounts time to reconnect.">
+          <span>Startup Grace Period (sec):</span>
+          <input type="number" id="setDisbalanceGrace" style="width:60px;padding:2px 4px;background:#111827;border:1px solid #374151;color:#fff;border-radius:4px;" 
+            onchange="saveDisbalanceSuboption('disbalance_startup_grace_sec', parseInt(this.value, 10))">
         </label>
       </div>
     </div>
@@ -12785,6 +12813,9 @@ async function loadSettings() {
         document.getElementById('setDisbalanceEmail').checked = s.disbalance_alert_email !== false;
         document.getElementById('setDisbalanceTelegram').checked = s.disbalance_alert_telegram !== false;
         document.getElementById('setDisbalancePeriod').value = s.disbalance_alert_period_sec != null ? s.disbalance_alert_period_sec : 30;
+        if (document.getElementById('setDisbalanceGrace')) {
+            document.getElementById('setDisbalanceGrace').value = s.disbalance_startup_grace_sec != null ? s.disbalance_startup_grace_sec : 120;
+        }
         toggleDisbalanceSuboptions(disbalanceAlertEnabled);
     }
 
