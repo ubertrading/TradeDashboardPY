@@ -1321,6 +1321,14 @@ class CTraderFixAccount:
         # if comment:
         #     fields.append((TAG_DESIGNATION, comment))
 
+        # Snapshot quote at the moment the order is dispatched
+        sym_clean = symbol_name.upper().replace("/", "")
+        quote_at_order = None
+        for k in self._bid.keys():
+            if k.upper().replace("/", "") == sym_clean:
+                quote_at_order = (self._bid[k], self._ask[k])
+                break
+
         # Track this order
         self._pending_orders[clordid] = {
             "session_id": session_id,
@@ -1332,6 +1340,7 @@ class CTraderFixAccount:
             "is_close": position_id is not None,
             "is_rollback": is_rollback,
             "ts": time.time(),
+            "quote_at_order": quote_at_order,
         }
 
         self.trade_session.send_message("D", fields)
@@ -1503,12 +1512,18 @@ class CTraderFixAccount:
                 else:
                     ticket = int(order_id.decode()) if order_id else int(time.time() * 1000)
                 
+                order_side = order_info.get("side", "buy").lower()
+                quote_at_order = order_info.get("quote_at_order")
+                quote_price = 0.0
+                if quote_at_order:
+                    quote_price = quote_at_order[1] if order_side == "buy" else quote_at_order[0]
                 self._post_trade_result({
                     "session_id": session_id,
                     "account": self.account_id,
                     "status": status,
                     "ticket": ticket,
                     "fill_price": fill_price,
+                    "quote_price": quote_price,
                     "spread": None,
                     "detail": f"FIX fill: {sym_name} @ {fill_price}",
                 })
@@ -1872,6 +1887,14 @@ class SwissquoteFixAccount:
         if comment:
             fields.append((TAG_TEXT, comment))
 
+        # Snapshot quote at the moment the order is dispatched
+        sym_clean = symbol_name.upper().replace("/", "")
+        quote_at_order = None
+        for k in self._bid.keys():
+            if k.upper().replace("/", "") == sym_clean:
+                quote_at_order = (self._bid[k], self._ask[k])
+                break
+
         # Track this order
         self._pending_orders[clordid] = {
             "session_id": session_id,
@@ -1883,6 +1906,7 @@ class SwissquoteFixAccount:
             "is_close": position_id is not None,
             "is_rollback": is_rollback,
             "ts": time.time(),
+            "quote_at_order": quote_at_order,
         }
 
         self.trade_session.send_message("D", fields)
@@ -1976,12 +2000,18 @@ class SwissquoteFixAccount:
                 else:
                     ticket = int(order_id_str) if order_id_str.isdigit() else int(time.time() * 1000)
                 
+                order_side = order_info.get("side", "buy").lower()
+                quote_at_order = order_info.get("quote_at_order")
+                quote_price = 0.0
+                if quote_at_order:
+                    quote_price = quote_at_order[1] if order_side == "buy" else quote_at_order[0]
                 self._post_trade_result({
                     "session_id": session_id,
                     "account": self.account_id,
                     "status": status,
                     "ticket": ticket,
                     "fill_price": fill_price,
+                    "quote_price": quote_price,
                     "spread": None,
                     "detail": f"SQ fill: {sym_name} @ {fill_price}",
                 })
@@ -2725,12 +2755,19 @@ class DukascopyFixAccount:
                                 ticket = pos_id_val
                     else:
                         ticket = int(order_id_str) if order_id_str.isdigit() else int(time.time() * 1000)
+                    # Compute quote_price at time of order dispatch
+                    order_side = order_info.get("side", "buy").lower()
+                    quote_at_order = order_info.get("quote_at_order")
+                    quote_price = 0.0
+                    if quote_at_order:
+                        quote_price = quote_at_order[1] if order_side == "buy" else quote_at_order[0]
                     self._post_trade_result({
                         "session_id": session_id,
                         "account": self.account_id,
                         "status": status,
                         "ticket": ticket,
                         "fill_price": fill_price,
+                        "quote_price": quote_price,
                         "spread": None,
                         "detail": f"DK fill: {sym_name} @ {fill_price}",
                     })
@@ -2936,6 +2973,14 @@ class DukascopyFixAccount:
         if comment:
             fields.append((TAG_TEXT, comment))
 
+        # Snapshot quote at the moment the order is dispatched
+        sym_clean = symbol_name.upper().replace("/", "")
+        quote_at_order = None
+        for k in self._bid.keys():
+            if k.upper().replace("/", "") == sym_clean:
+                quote_at_order = (self._bid[k], self._ask[k])
+                break
+
         # Track this order
         self._pending_orders[clordid] = {
             "session_id": session_id,
@@ -2947,6 +2992,7 @@ class DukascopyFixAccount:
             "is_close": position_id is not None,
             "is_rollback": is_rollback,
             "ts": time.time(),
+            "quote_at_order": quote_at_order,  # (bid, ask) snapshot
         }
 
         self.trade_session.send_message("D", fields)
@@ -3027,12 +3073,19 @@ class DukascopyFixAccount:
                             ticket = pos_id_val
                 else:
                     ticket = int(order_id_str) if order_id_str.isdigit() else int(time.time() * 1000)
+                # Compute quote_price: for buy = ask, for sell = bid at time of order
+                order_side = order_info.get("side", "buy").lower()
+                quote_at_order = order_info.get("quote_at_order")
+                quote_price = 0.0
+                if quote_at_order:
+                    quote_price = quote_at_order[1] if order_side == "buy" else quote_at_order[0]
                 self._post_trade_result({
                     "session_id": session_id,
                     "account": self.account_id,
                     "status": status,
                     "ticket": ticket,
                     "fill_price": fill_price,
+                    "quote_price": quote_price,
                     "spread": None,
                     "detail": f"DK fill: {sym_name} @ {fill_price}",
                 })

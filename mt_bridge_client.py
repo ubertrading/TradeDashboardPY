@@ -658,7 +658,8 @@ class MtBridgeAccount:
         if result and result.get("success"):
             ticket = result.get("ticket", 0)
             price = result.get("open_price", 0)
-            self._report_result(session_id, "filled", ticket, fill_price=price)
+            quote_price = result.get("quote_price", 0)
+            self._report_result(session_id, "filled", ticket, fill_price=price, quote_price=quote_price)
             return (True, ticket, price)
         else:
             detail = result.get("error", "Unknown error") if result else "Connection failed"
@@ -679,6 +680,7 @@ class MtBridgeAccount:
         if result and result.get("success"):
             close_ticket = result.get("ticket", 0)
             price = result.get("close_price", 0)
+            quote_price = result.get("quote_price", 0)
             
             # Determine rollback status
             status = "closed"
@@ -688,7 +690,7 @@ class MtBridgeAccount:
                 if session and session.get("rollback_needed", {}).get(self.account_id, 0) > 0:
                     status = "rollback_closed"
             
-            self._report_result(session_id, status, close_ticket, fill_price=price)
+            self._report_result(session_id, status, close_ticket, fill_price=price, quote_price=quote_price)
             return (True, close_ticket, price)
         else:
             detail = result.get("error", "Unknown error") if result else "Connection failed"

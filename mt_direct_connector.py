@@ -1354,9 +1354,9 @@ class MT4DirectAccount:
                                 break
                 except Exception:
                     pass  # Fallback to request price
-                logger.info("[%s] CLOSED: ticket=%d @ %.5f", self.account_id, ticket, actual_close_price)
+                logger.info("[%s] CLOSED: ticket=%d @ %.5f (quote=%.5f)", self.account_id, ticket, actual_close_price, price)
                 self._report_result(session_id, "rollback_closed" if session_id else "closed",
-                                    ticket, fill_price=actual_close_price)
+                                    ticket, fill_price=actual_close_price, quote_price=price)
                 return True
             else:
                 logger.error("[%s] OrderClose failed for ticket=%d", self.account_id, ticket)
@@ -3087,7 +3087,7 @@ class MT5DirectAccount:
                         self._report_result(
                             session_id,
                             "rollback_closed" if session_id else "closed",
-                            ticket, fill_price=close_price)
+                            ticket, fill_price=close_price, quote_price=close_price)
                         try:
                             self._client.OnOrderProgress -= _on_progress
                         except Exception:
@@ -3114,7 +3114,7 @@ class MT5DirectAccount:
                     self._report_result(
                         session_id,
                         "rollback_closed" if session_id else "closed",
-                        ticket, fill_price=close_price)
+                        ticket, fill_price=close_price, quote_price=close_price)
                     return True
             except Exception:
                 pass

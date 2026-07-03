@@ -1140,6 +1140,7 @@ public class MtAccount
                     success = true,
                     ticket = order.Ticket,
                     open_price = order.OpenPrice,
+                    quote_price = price,
                     symbol = order.Symbol,
                     lots = order.Lots
                 };
@@ -1161,6 +1162,7 @@ public class MtAccount
                     success = true,
                     ticket = order.Ticket,
                     open_price = order.OpenPrice,
+                    quote_price = price,
                     symbol = order.Symbol,
                     lots = order.Lots
                 };
@@ -1295,7 +1297,8 @@ public class MtAccount
                 {
                     success = true,
                     ticket = order.Ticket,
-                    close_price = order.ClosePrice
+                    close_price = order.ClosePrice,
+                    quote_price = pricePos
                 };
             }
             else if (_mt4 != null && _mt4Order != null)
@@ -1338,7 +1341,8 @@ public class MtAccount
                 {
                     success = true,
                     ticket = order.Ticket,
-                    close_price = order.ClosePrice
+                    close_price = order.ClosePrice,
+                    quote_price = price
                 };
             }
             return new { success = false, error = "Not connected" };
