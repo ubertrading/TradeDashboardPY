@@ -9121,7 +9121,7 @@ body {
       Used to scale the <strong>Pips to MC</strong> bar — 1 bar segment = 1 ADR of runway.
       5 ADRs = full bar. Edit values in pips, then click <strong>Save ADR Settings</strong>.
     </p>
-    <div id="adrSettingsWrap" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:12px;"></div>
+    <div id="adrSettingsWrap" style="margin-bottom:12px;"></div>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
       <button onclick="saveAdrSettings()" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:600;">💾 Save ADR Settings</button>
       <span id="adrSaveStatus" style="font-size:0.8rem;color:var(--green);display:none;">Saved ✓</span>
@@ -13025,22 +13025,23 @@ function renderAdrSettings(adrData) {
 
 function _adrRow(sym, val) {
   const isDefault = sym === 'default';
-  return `<tr class="adr-row">
-    <td style="padding:3px 8px;">
+  return `<tr class="adr-row" style="border-bottom:1px solid var(--border);">
+    <td style="padding:5px 10px;">
       ${ isDefault
         ? `<span style="color:var(--text2);font-size:0.8rem;font-style:italic;">default (fallback)</span><input type="hidden" data-adr-sym="default" value="default">`
         : `<input type="text" data-adr-sym-name value="${sym}" maxlength="12"
-            style="width:90px;text-transform:uppercase;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;"
+            style="width:90px;text-transform:uppercase;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;font-weight:600;"
             oninput="this.value=this.value.toUpperCase()">`
       }
     </td>
-    <td style="padding:3px 8px;text-align:center;">
+    <td style="padding:5px 10px;text-align:center;">
       <input type="number" min="1" max="5000" step="1" data-adr-val value="${val}"
         style="width:75px;text-align:center;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:5px;">
       <span style="color:var(--text2);font-size:0.75rem;margin-left:4px;">pips</span>
     </td>
-    <td style="padding:3px 4px;text-align:center;">
-      ${ isDefault ? '' : `<button onclick="this.closest('tr').remove()" title="Remove" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:1rem;line-height:1;">×</button>` }
+    <td style="padding:5px 10px;text-align:center;">
+      ${ isDefault ? '' : `<button onclick="this.closest('tr').remove()" title="Remove row"
+        style="padding:2px 8px;background:rgba(239,68,68,0.15);border:1px solid #ef4444;color:#ef4444;border-radius:4px;cursor:pointer;font-size:0.78rem;font-weight:600;">✕ Remove</button>` }
     </td>
   </tr>`;
 }
