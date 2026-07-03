@@ -3545,11 +3545,11 @@ class MTDirectManager:
 
                     lot_size = side_info.get("lot_size") or session.get("lot_size", 0.01)
                     comment = side_info.get("comment", "") or session.get("comment", "")
-                    max_spread = side_info.get("max_spread") if side_info.get("max_spread") is not None else session.get("max_spread_points", 999)
+                    max_spread = side_info.get("max_spread") if side_info.get("max_spread") is not None else session.get("max_spread_points")
                     try:
-                        max_spread = float(max_spread) if max_spread is not None else 999
+                        max_spread = float(max_spread) if max_spread is not None else None
                     except (ValueError, TypeError):
-                        max_spread = 999
+                        max_spread = None
 
                     # Check spread gating — but bypass for rollback (safety rebalancing must execute)
                     # and bypass for cycle reopen (once closed, must reopen immediately)
@@ -3591,7 +3591,7 @@ class MTDirectManager:
                             # No quotes yet — do not send orders blind
                             logger.info("[%s] Spread gate: no quotes for %s, skipping", account_id, pair)
                             continue
-                        if max_spread > 0 and current_spread > max_spread:
+                        if max_spread is not None and current_spread > max_spread:
                             logger.info("[%s] Spread gate: spread %.1f > max %s for %s", account_id, current_spread, max_spread, pair)
                             session.setdefault("spread_rejects", {})[account_id] = \
                                 session.get("spread_rejects", {}).get(account_id, 0) + 1

@@ -3751,6 +3751,71 @@ def _should_issue_command(session, account):
                 if skew_open == "d2>d1" and diff2 <= diff1:
                     return False
 
+        # ── Per-side spread gating (open) ──
+        # MAX SPD1 >= SPD1 and MAX SPD2 >= SPD2 must BOTH be met before opening.
+        for acc in sides:
+            s_info = sides[acc]
+            s_max_spread = s_info.get("max_spread") if s_info.get("max_spread") is not None else session.get("max_spread_points", 0)
+            if s_max_spread is None or s_max_spread == "":
+                continue  # No limit configured for this side
+            s_max_spread_int = int(float(s_max_spread))
+
+            instrument = (s_info.get("pair") or session.get("pair", "")).upper()
+            ei = ea_account_info.get(acc, {})
+            bid = 0
+            ask = 0
+            stored_spread = None
+
+            direct_acct = mt_direct_manager.accounts.get(acc) if mt_direct_manager else None
+            if direct_acct and instrument:
+                try:
+                    sq = direct_acct.get_quote_direct(instrument)
+                    if sq and sq.get("bid") and sq.get("ask"):
+                        q_bid = sq["bid"]
+                        q_ask = sq["ask"]
+                        is_jpy = "JPY" in instrument
+                        if (is_jpy and q_bid > 10) or (not is_jpy and q_bid < 10):
+                            bid = q_bid
+                            ask = q_ask
+                            stored_spread = sq.get("spread")
+                except Exception:
+                    pass
+
+            if not (bid > 0 and ask > 0):
+                fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
+                if fix_acct and hasattr(fix_acct, 'get_symbol_info') and instrument:
+                    try:
+                        sq = fix_acct.get_symbol_info(instrument)
+                        if sq and sq.get("bid") and sq.get("ask"):
+                            bid = sq["bid"]
+                            ask = sq["ask"]
+                            stored_spread = sq.get("spread")
+                    except Exception:
+                        pass
+
+            if not (bid > 0 and ask > 0):
+                bid = ei.get("bid", 0)
+                ask = ei.get("ask", 0)
+                stored_spread = ei.get("spread")
+
+            has_live_quotes = bid > 0 and ask > 0
+            if has_live_quotes:
+                pip_mult = 1000 if "JPY" in instrument else 100000
+                cur_spread = round((ask - bid) * pip_mult, 1)
+            else:
+                cur_spread = stored_spread
+
+            print(f"[OPEN-SPREAD-GATE] {acc}: cur_spread={cur_spread} max_spread={s_max_spread_int} live={has_live_quotes}")
+            if cur_spread is None:
+                print(f"[OPEN-SPREAD-GATE] {acc}: BLOCKED — no quotes")
+                return False
+            if not has_live_quotes and cur_spread == 0:
+                print(f"[OPEN-SPREAD-GATE] {acc}: BLOCKED — no live bid/ask (stale spread={cur_spread})")
+                return False
+            # Always enforce: 0 = block all, N = allow up to N pips
+            if float(cur_spread) > s_max_spread_int:
+                print(f"[OPEN-SPREAD-GATE] {acc}: BLOCKED — spread {cur_spread} > max {s_max_spread_int}")
+                return False
     elif action == "close":
         match_mode = session.get("match_mode", "ticket")
         if match_mode == "lots":
@@ -4117,7 +4182,7 @@ def _should_issue_command(session, account):
                 if not has_live_quotes:
                     print(f"[CYCLE-SPREAD] acct={account}: BLOCKED — no live bid/ask (stale spread={current_spread})")
                     return False  # Stale data — don't close blind
-                if side_max_spread > 0 and float(current_spread) > side_max_spread:
+                if float(current_spread) > side_max_spread:
                     print(f"[CYCLE-SPREAD] acct={account}: BLOCKED — spread {current_spread} (int={int(current_spread)}) > max {side_max_spread}")
                     return False  # Spread too wide
             print(f"[CYCLE-SPREAD] acct={account}: PASSED — returning cycle_close")
