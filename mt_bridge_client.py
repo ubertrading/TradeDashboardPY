@@ -1108,6 +1108,24 @@ class MtBridgeManager:
 
     def save_config(self):
         """Save config â€” delegates to bridge."""
+        # 1. Write JSON directly from Python -- authoritative on restart
+        config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
+        _configs = {aid: a.config for aid, a in self.accounts.items()}
+        try:
+            import tempfile as _tmpfile
+            _dir = os.path.dirname(os.path.abspath(config_path))
+            with _tmpfile.NamedTemporaryFile("w", dir=_dir, delete=False, suffix=".tmp") as _tf:
+                json.dump(_configs, _tf, indent=2)
+                _tmp = _tf.name
+            try:
+                os.replace(_tmp, config_path)
+            except Exception:
+                if os.path.exists(_tmp): os.unlink(_tmp)
+                raise
+            logger.info("MtBridgeManager: saved %d accounts to %s", len(_configs), config_path)
+        except Exception as _e:
+            logger.error("Failed to save MT Bridge config: %s", _e)
+        # 2. Also sync to bridge in-memory state
         for account_id, acct in self.accounts.items():
             cfg = {
                 "id": account_id,
@@ -1123,7 +1141,7 @@ class MtBridgeManager:
             }
             _put(f"/api/accounts/{account_id}", cfg)
             
-        config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
+
         _post("/api/config/save", {"path": os.path.abspath(config_path)})
 
     def add_account(self, account_id, config, save=True, auto_connect=True):
@@ -1160,6 +1178,11 @@ class MtBridgeManager:
             self.accounts[account_id].stop()
             del self.accounts[account_id]
         _delete(f"/api/accounts/{account_id}")
+        # Persist the removal so the account does not reappear on restart
+        self.save_config()
+        # Clean up stale dashboard data
+        self.dd.get("ea_account_info", {}).pop(account_id, None)
+        self.dd.get("ea_heartbeats", {}).pop(account_id, None)
         return True
 
     def connect_account(self, account_id):
