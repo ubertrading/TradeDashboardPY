@@ -1,4 +1,15 @@
 {
+  "account_intended_lots": {
+    "AL-1-A-YCM2145010745": 1000.0,
+    "AL-1-B-ICM11640257": 250.0,
+    "AL-1-B-ICM7363966": 250.0,
+    "AL-1-B-ICM7415899": 250.0,
+    "AL-1-B-ICM7946310": 250.0
+  },
+  "account_stop_out_levels": {
+    "AL-1-A-YCM2145010745": 80.0,
+    "YCM2145010745": 80.0
+  },
   "disbalance_alert_email": true,
   "disbalance_alert_enabled": false,
   "disbalance_alert_period_sec": 30,

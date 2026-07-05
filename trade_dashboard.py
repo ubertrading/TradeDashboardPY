@@ -666,6 +666,13 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
         except (ValueError, TypeError):
             return 100.0
 
+    def _get_il(aid, ainfo):
+        label = ainfo.get("label") or aid
+        il = dashboard_settings.get("account_intended_lots", {}).get(label)
+        if il is None:
+            il = dashboard_settings.get("account_intended_lots", {}).get(aid)
+        return float(il) if il not in (None, "", 0) else float(dashboard_settings.get("default_intended_lots", 0))
+
     def _side_pip_exposure(accts):
         """
         For a list of (aid, ainfo) accounts, compute:
@@ -719,6 +726,15 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
         total_margin_b = sum(float(i.get("margin") or i.get("margin_used") or 0.0) for _, i in side_b_accts)
         total_group_equity = total_equity_a + total_equity_b
 
+        # Calculate intended lot sums for fallback distribution
+        intended_a_sum = 0
+        for aid, ainfo in side_a_accts:
+            intended_a_sum += _get_il(aid, ainfo)
+
+        intended_b_sum = 0
+        for aid, ainfo in side_b_accts:
+            intended_b_sum += _get_il(aid, ainfo)
+
         # Stop-out fracs (per-account config, both default 50%)
         first_a_id = side_a_accts[0][0]
         first_b_id = side_b_accts[0][0]
@@ -734,8 +750,9 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
         ppl_b, maint_b, has_pos_b = _side_pip_exposure(side_b_accts)
         total_ppl = ppl_a + ppl_b
         total_maint = maint_a + maint_b
-
+        
         use_pip_formula = False
+
         if total_ppl > 0 and (has_pos_a or has_pos_b):
             # Solve for equalized runway P:
             #   equity_side = P × pnl_per_pip_side + margin_maint_side
@@ -748,6 +765,37 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
                     use_pip_formula = True
                     alloc_pct_a = optimal_equity_a / total_group_equity
                     alloc_pct_b = optimal_equity_b / total_group_equity
+        elif intended_a_sum > 0 or intended_b_sum > 0:
+            sim_ppl_a = 0
+            sim_maint_a = 0
+            for aid, ainfo in side_a_accts:
+                il = _get_il(aid, ainfo)
+                sim_ppl_a += il * 10.0
+                acct_lev = _get_lev(aid, ainfo)
+                acct_so = _get_stop_out_frac(aid)
+                sim_maint_a += ((il * 100000.0) / acct_lev) * acct_so
+
+            sim_ppl_b = 0
+            sim_maint_b = 0
+            for aid, ainfo in side_b_accts:
+                il = _get_il(aid, ainfo)
+                sim_ppl_b += il * 10.0
+                acct_lev = _get_lev(aid, ainfo)
+                acct_so = _get_stop_out_frac(aid)
+                sim_maint_b += ((il * 100000.0) / acct_lev) * acct_so
+
+            sim_total_ppl = sim_ppl_a + sim_ppl_b
+            sim_total_maint = sim_maint_a + sim_maint_b
+
+            if sim_total_ppl > 0:
+                P = (total_group_equity - sim_total_maint) / sim_total_ppl
+                if P > 0:
+                    optimal_equity_a = P * sim_ppl_a + sim_maint_a
+                    optimal_equity_b = P * sim_ppl_b + sim_maint_b
+                    if optimal_equity_a > 0 and optimal_equity_b > 0:
+                        use_pip_formula = True
+                        alloc_pct_a = optimal_equity_a / total_group_equity
+                        alloc_pct_b = optimal_equity_b / total_group_equity
 
         if not use_pip_formula:
             # FALLBACK: leverage-ratio formula
@@ -770,8 +818,14 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
 
         # 4. Allocate within each side proportionally to margin used per account
         for aid, ainfo in side_a_accts:
-            acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-            share = (acct_m / total_margin_a) if total_margin_a > 0 else (1.0 / len(side_a_accts))
+            if total_margin_a > 0:
+                acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
+                share = acct_m / total_margin_a
+            elif intended_a_sum > 0:
+                share = _get_il(aid, ainfo) / intended_a_sum
+            else:
+                share = 1.0 / len(side_a_accts)
+                
             opt_eq = optimal_equity_a * share
             curr_eq = float(ainfo.get("equity") or 0.0)
             results[aid] = {
@@ -785,8 +839,14 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
             }
 
         for aid, ainfo in side_b_accts:
-            acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
-            share = (acct_m / total_margin_b) if total_margin_b > 0 else (1.0 / len(side_b_accts))
+            if total_margin_b > 0:
+                acct_m = float(ainfo.get("margin") or ainfo.get("margin_used") or 0.0)
+                share = acct_m / total_margin_b
+            elif intended_b_sum > 0:
+                share = _get_il(aid, ainfo) / intended_b_sum
+            else:
+                share = 1.0 / len(side_b_accts)
+                
             opt_eq = optimal_equity_b * share
             curr_eq = float(ainfo.get("equity") or 0.0)
             results[aid] = {
@@ -1471,6 +1531,8 @@ _DEFAULT_SETTINGS = {
     "disbalance_alert_email": True,
     "disbalance_alert_period_sec": 30,
     "disbalance_startup_grace_sec": 120,  # seconds after startup to suppress disbalance alerts (allows autoconnect accounts to come online)
+    "default_intended_lots": 0,  # default lots to use for Opt Eq calculation when positions are closed
+    "account_intended_lots": {},   # account_id -> intended lots override
     # Trading Parameters (execution timeout / retry)
     "exec_timeout_sec": 60,
     "exec_alert_on_timeout": False,
@@ -1773,8 +1835,20 @@ def _get_stop_out_frac(account_id):
     if sol is None and mt_direct_manager and account_id in mt_direct_manager.accounts:
         sol = mt_direct_manager.accounts[account_id].config.get("stop_out_level")
     if sol is None:
+        sol = ea_account_info.get(account_id, {}).get("stop_out_level")
+    if sol is None:
+        sol = dashboard_settings.get("account_stop_out_levels", {}).get(account_id)
+        if sol is None:
+            # Also try by label if the account has a different label in the UI
+            label = manual_accounts.get(account_id, {}).get("group_label") or ea_account_info.get(account_id, {}).get("label")
+            if label:
+                sol = dashboard_settings.get("account_stop_out_levels", {}).get(label)
+    if sol is None:
         sol = manual_accounts.get(account_id, {}).get("stop_out_level")
     if sol is None:
+        # Fallback for YCM accounts to 80% as per Excel model
+        if "YCM" in str(account_id).upper():
+            return 0.80
         return 0.50
     try:
         f = float(sol)
@@ -6258,6 +6332,8 @@ def api_status():
             "news_blackout": {"blocked": news_blocked, "event": news_reason},
             "margin_alert": margin_alert_data,
             "adr_settings": dashboard_settings.get("adr_settings", {}),
+            "account_intended_lots": dashboard_settings.get("account_intended_lots", {}),
+            "default_intended_lots": dashboard_settings.get("default_intended_lots", 0),
             "swap_delta": _compute_swap_deltas_live(),
             "fund_distributions": _cached_fund_distributions,
             "fund_distributions_last_updated": dist_last_updated,
@@ -8222,6 +8298,7 @@ def api_get_settings():
 @app.route('/api/settings', methods=['POST'])
 def api_update_settings():
     """Update dashboard settings."""
+    global _last_fund_dist_ts
     try:
         data = request.get_json(force=True)
         if "email" in data:
@@ -8299,6 +8376,15 @@ def api_update_settings():
                 dashboard_settings["disbalance_startup_grace_sec"] = max(0, int(data["disbalance_startup_grace_sec"]))
             except (ValueError, TypeError):
                 pass
+        if "default_intended_lots" in data:
+            try:
+                dashboard_settings["default_intended_lots"] = max(0, float(data["default_intended_lots"]))
+                _last_fund_dist_ts = 0  # Invalidate cache
+            except (ValueError, TypeError):
+                pass
+        if "account_intended_lots" in data:
+            dashboard_settings["account_intended_lots"] = data["account_intended_lots"]
+            _last_fund_dist_ts = 0  # Invalidate cache
         if "exec_timeout_sec" in data:
             try:
                 dashboard_settings["exec_timeout_sec"] = max(5, float(data["exec_timeout_sec"]))
@@ -8943,22 +9029,23 @@ body {
             <th data-acol="4">Equity</th>
             <th data-acol="5" title="Optimal suggested equity distribution based on leverage and stopout levels">Opt Eq</th>
             <th data-acol="6" title="Suggested fund transfer to reach optimal equity (Optimal Equity - Current Equity)">Shift</th>
-            <th data-acol="7">PnL</th>
-            <th data-acol="8">Leverage</th>
-            <th data-acol="9">Positions</th>
-            <th data-acol="10">Lots</th>
-            <th data-acol="11">Margin Use</th>
-            <th data-acol="12" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
-            <th data-acol="13" title="Margin alert threshold (%)">Marg.Alrt%</th>
-            <th data-acol="14">Swap</th>
-            <th data-acol="15" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
-            <th data-acol="16" title="Oldest position age (rollover days)">Age</th>
-            <th data-acol="17">Last Poll</th>
-            <th data-acol="18" title="Auto connect account at start">Auto Conn</th>
-            <th data-acol="19" title="Alert Email(s) Override">Email Alert</th>
-            <th data-acol="20" title="Alert Telegram ID(s) Override">Telegram Alert</th>
-            <th data-acol="21" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
-            <th data-acol="22"></th>
+            <th data-acol="7" title="Override intended lots for this hedge group">Intended Lots</th>
+            <th data-acol="8">PnL</th>
+            <th data-acol="9">Leverage</th>
+            <th data-acol="10">Positions</th>
+            <th data-acol="11">Lots</th>
+            <th data-acol="12">Margin Use</th>
+            <th data-acol="13" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
+            <th data-acol="14" title="Margin alert threshold (%)">Marg.Alrt%</th>
+            <th data-acol="15">Swap</th>
+            <th data-acol="16" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
+            <th data-acol="17" title="Oldest position age (rollover days)">Age</th>
+            <th data-acol="18">Last Poll</th>
+            <th data-acol="19" title="Auto connect account at start">Auto Conn</th>
+            <th data-acol="20" title="Alert Email(s) Override">Email Alert</th>
+            <th data-acol="21" title="Alert Telegram ID(s) Override">Telegram Alert</th>
+            <th data-acol="22" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
+            <th data-acol="23"></th>
           </tr>
         </thead>
         <tbody id="accountsBody">
@@ -9290,6 +9377,8 @@ body {
       <label style="font-size:0.85rem;font-weight:600;">Close Delay (seconds)</label>
       <input type="number" id="setRebalCloseDelay" value="1" min="0" max="60" step="0.5" style="width:70px;text-align:center;" onchange="saveRebalCloseDelay(this.value)">
     </div>
+
+
     <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;cursor:pointer;margin-top:4px;">
       <input type="checkbox" id="setPromptOnRollbacks" onchange="saveExecSetting('prompt_on_rollbacks', this.checked)">
       <span>Prompt for confirmation before executing rollback closes</span>
@@ -10631,16 +10720,16 @@ function toggleGroupView(enabled) {
 }
 
 // ─── Account column toggle ───────────────────────────────────────────
-let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["19", "20"]');
+let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["20", "21"]');
 const ACCT_COLUMNS = [
   {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
   {idx:'3', name:'Balance'}, {idx:'4', name:'Equity'},
-  {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'},
-  {idx:'7', name:'PnL'}, {idx:'8', name:'Leverage'}, {idx:'9', name:'Positions'}, {idx:'10', name:'Lots'},
-  {idx:'11', name:'Margin Use'}, {idx:'12', name:'Pips to MC'}, {idx:'13', name:'Marg.Alrt%'},
-  {idx:'14', name:'Swap'}, {idx:'15', name:'Δ Swap'}, {idx:'16', name:'Age'}, {idx:'17', name:'Last Poll'},
-  {idx:'18', name:'Auto Conn'}, {idx:'19', name:'Email Alert'}, {idx:'20', name:'Telegram Alert'},
-  {idx:'21', name:'Stats'}, {idx:'22', name:'Actions'},
+  {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'}, {idx:'7', name:'Intended Lots'},
+  {idx:'8', name:'PnL'}, {idx:'9', name:'Leverage'}, {idx:'10', name:'Positions'}, {idx:'11', name:'Lots'},
+  {idx:'12', name:'Margin Use'}, {idx:'13', name:'Pips to MC'}, {idx:'14', name:'Marg.Alrt%'},
+  {idx:'15', name:'Swap'}, {idx:'16', name:'Δ Swap'}, {idx:'17', name:'Age'}, {idx:'18', name:'Last Poll'},
+  {idx:'19', name:'Auto Conn'}, {idx:'20', name:'Email Alert'}, {idx:'21', name:'Telegram Alert'},
+  {idx:'22', name:'Stats'}, {idx:'23', name:'Actions'},
 ];
 function initAcctColToggleMenu() {
   const menu = document.getElementById('acctColToggleMenu');
@@ -13038,6 +13127,7 @@ async function loadSettings() {
     loadThemeColorPickers(s.theme_colors || {});
     // Rebalance close delay
     document.getElementById('setRebalCloseDelay').value = s.rebalance_close_delay != null ? s.rebalance_close_delay : 1;
+    document.getElementById('setDefaultIntendedLots').value = s.default_intended_lots != null ? s.default_intended_lots : 0;
     // Prompt on rollbacks
     const porEl = document.getElementById('setPromptOnRollbacks');
     if (porEl) porEl.checked = !!s.prompt_on_rollbacks;
@@ -13319,6 +13409,24 @@ function renderMarginThresholds(globalDefault, perAccount) {
   tbody.innerHTML = rows.join('');
 }
 
+async function saveAccountIntendedLots(accountId, value) {
+  try {
+    const s = await (await fetch('/api/settings?_t=' + Date.now())).json();
+    const current = s.account_intended_lots || {};
+    const val = parseFloat(value);
+    if (isNaN(val) || val <= 0) {
+      delete current[accountId];
+    } else {
+      current[accountId] = val;
+    }
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_intended_lots: current})
+    });
+  } catch(e) { console.error('Failed to save account intended lots:', e); }
+}
+
+
 async function saveSettings(silent) {
   const payload = {
     email: {
@@ -13432,6 +13540,8 @@ async function refreshData() {
     window._marginAlertData = data.margin_alert || {global_threshold: 85, per_account: {}};
     // ADR settings — used by _pipsToMcCell for bar scaling
     window._adrSettings = data.adr_settings || {default: 80};
+    window._accountIntendedLots = data.account_intended_lots || {};
+    window._defaultIntendedLots = data.default_intended_lots || 0;
 
     window._statsAccounts = Object.entries(ea_heartbeats_cache)
       .filter(([_, info]) => info.stats_log)
@@ -13590,6 +13700,15 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     return `<td><input type="number" class="inl" style="width:50px;text-align:center;${hasCustom ? '' : 'color:var(--text2);'}" value="${displayVal}" placeholder="${placeholder}" onchange="${saveFunc}('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="${hasCustom ? 'Custom: ' + acctT + '%' : 'Using global: ' + globalT + '%'}"></td>`;
   }
 
+  function _intendedLotsCell(id, groupLabel, isGroupRow = false) {
+    if (isGroupRow) return '<td></td>'; // Don't allow editing on the group totals row
+
+    const overrides = window._accountIntendedLots || {};
+    const override = overrides[id] !== undefined && overrides[id] !== null ? overrides[id] : '';
+    const ph = window._defaultIntendedLots || 0;
+    return `<td><input type="number" class="inl" style="width:60px;text-align:center;${override === '' ? 'color:var(--text2);' : ''}" value="${override}" placeholder="${ph}" onchange="saveAccountIntendedLots('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="Override intended lots for ${id}"></td>`;
+  }
+
   // Pips to Margin Call cell — ADR-scaled bar overlay
   function _pipsToMcCell(info) {
     const ptmc = (info != null && info.pips_to_mc != null) ? parseFloat(info.pips_to_mc) : null;
@@ -13673,6 +13792,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${eq}</td>
         <td>${optEqVal}</td>
         <td style="${shiftColor}">${shiftVal}</td>
+        ${_intendedLotsCell(id, info.group_label)}
         <td style="${pnl1Style}">${pnl1}</td>
         <td>${lev}</td>
         <td>${pos1}</td>
@@ -13737,6 +13857,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${eq}</td>
         <td>${optEqMt}</td>
         <td style="${shiftMtColor}">${shiftMt}</td>
+        ${_intendedLotsCell(displayName, info.group_label)}
         <td style="${pnlMtStyle}">${pnlMt}</td>
         <td>${lev}</td>
         <td>${posMt}</td>
@@ -13802,6 +13923,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${eq}</td>
         <td>${optEqM}</td>
         <td style="${shiftMColor}">${shiftM}</td>
+        ${_intendedLotsCell(name, info.group_label)}
         <td>-</td>
         <td>${lev}</td>
         <td>-</td>
@@ -13851,6 +13973,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${eq}</td>
         <td>${optEqE}</td>
         <td style="${shiftEColor}">${shiftE}</td>
+        ${_intendedLotsCell(acc, mConfig.group_label)}
         <td>-</td>
         <td>${lev}</td>
         <td>-</td>
@@ -14170,6 +14293,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td>${fEq}</td>
       <td>${fOptEq}</td>
       <td style="${shiftColor}">${fShift}</td>
+      ${_intendedLotsCell(prefix, prefix, true)}
       <td style="${pnlColor}">${fPnl}</td>
       <td>${maxMuLev || '-'}</td>
       <td>${fPos}</td>
@@ -14217,13 +14341,14 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td>${fGEq}</td>
     <td>${fGOptEq}</td>
     <td style="${gShiftStyle}">${fGShift}</td>
+    <td></td>
     <td style="${gPnlStyle}">${fGPnl}</td>
     <td></td><td></td>
     <td style="${gLotsStyle}">${fGLots}${gLotsBreak}</td>
     <td></td><td></td><td></td>
     <td>${fGSwap}</td>
     ${totalsSwapDeltaCell}
-    <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+    <td></td><td></td><td></td><td></td><td></td><td></td>
   </tr>`);
   tbody.innerHTML = rows.join('');
 }
@@ -15674,6 +15799,13 @@ async function pollPnlStatus() {
 
 function renderPnlResults(data) {
   _pnlLastData = data;  // cache for pair breakdown popup
+  
+  const fromDate = data.from_date || '';
+  const toDate = data.to_date || '';
+  const name = data.name || _pnlCurrentName || '';
+  document.getElementById('pnlModalTitle').innerHTML = '📊 PnL Report — ' + name + 
+    (fromDate && toDate ? ' <span style="font-size:0.85rem;color:var(--text2);margin-left:12px;font-weight:400;">(Period: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong>)</span>' : '');
+
   const results = data.results || {};
   const totals = data.totals || {};
   const accounts = data.accounts || [];
