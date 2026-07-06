@@ -13635,6 +13635,15 @@ function renderCycleReminders(reminders) {
   }).join('');
 }
 
+function _intendedLotsCell(id, groupLabel, isGroupRow = false) {
+  if (isGroupRow) return '<td></td>'; // Don't allow editing on the group totals row
+
+  const overrides = window._accountIntendedLots || {};
+  const override = overrides[id] !== undefined && overrides[id] !== null ? overrides[id] : '';
+  const ph = window._defaultIntendedLots || 0;
+  return `<td><input type="number" class="inl" style="width:60px;text-align:center;${override === '' ? 'color:var(--text2);' : ''}" value="${override}" placeholder="${ph}" onchange="saveAccountIntendedLots('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="Override intended lots for ${id}"></td>`;
+}
+
 function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta) {
   // Stash args for re-render from toggleGroupView
   window._lastRenderAccountsArgs = [heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta];
@@ -13699,16 +13708,6 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const saveFunc = isFix ? 'saveFixMarginAlert' : 'saveMarginAlert';
     return `<td><input type="number" class="inl" style="width:50px;text-align:center;${hasCustom ? '' : 'color:var(--text2);'}" value="${displayVal}" placeholder="${placeholder}" onchange="${saveFunc}('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="${hasCustom ? 'Custom: ' + acctT + '%' : 'Using global: ' + globalT + '%'}"></td>`;
   }
-
-  function _intendedLotsCell(id, groupLabel, isGroupRow = false) {
-    if (isGroupRow) return '<td></td>'; // Don't allow editing on the group totals row
-
-    const overrides = window._accountIntendedLots || {};
-    const override = overrides[id] !== undefined && overrides[id] !== null ? overrides[id] : '';
-    const ph = window._defaultIntendedLots || 0;
-    return `<td><input type="number" class="inl" style="width:60px;text-align:center;${override === '' ? 'color:var(--text2);' : ''}" value="${override}" placeholder="${ph}" onchange="saveAccountIntendedLots('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="Override intended lots for ${id}"></td>`;
-  }
-
   // Pips to Margin Call cell — ADR-scaled bar overlay
   function _pipsToMcCell(info) {
     const ptmc = (info != null && info.pips_to_mc != null) ? parseFloat(info.pips_to_mc) : null;
@@ -14307,6 +14306,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
         const _d = minPtmc >= 10000 ? (minPtmc/1000).toFixed(1)+'k' : minPtmc.toLocaleString(undefined,{maximumFractionDigits:0});
         return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
       })()}
+      <td></td>
       <td>${fSwap}</td>
       ${groupSwapDeltaCell}
       <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
