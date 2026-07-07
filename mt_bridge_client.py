@@ -375,8 +375,9 @@ class MtBridgeAccount:
         # Safely compute fallback PNL (avoid 0 - 112000 = -112000 glitches)
         eq = info.get("equity", 0)
         bal = info.get("balance", 0)
+        credit = info.get("credit", 0)
         if eq > 0 and bal > 0:
-            acct["total_pnl"] = round(eq - bal, 2)
+            acct["total_pnl"] = round(eq - bal - credit, 2)
         else:
             acct["total_pnl"] = round(acct["profit"], 2)
             

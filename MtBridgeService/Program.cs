@@ -497,6 +497,7 @@ public class MtAccount
     private readonly ConcurrentDictionary<string, QuoteData> _quotes = new();
     private readonly ConcurrentDictionary<long, PositionData> _positions = new();
     private double _balance, _equity, _margin, _freeMargin, _profit;
+    private double _credit;
     private int _leverage;
     private readonly object _infoLock = new();
 
@@ -853,6 +854,7 @@ public class MtAccount
                         _margin = _mt5.AccountMargin;
                         _freeMargin = _mt5.AccountFreeMargin;
                         _profit = _mt5.AccountProfit;
+                        _credit = acct.Credit;
                         _leverage = (int)acct.Leverage;
 
                         // Note: Stale data handling is now done below for both MT4 and MT5
@@ -865,6 +867,7 @@ public class MtAccount
                     _margin = _mt4.AccountMargin;
                     _freeMargin = _mt4.AccountFreeMargin;
                     _profit = _mt4.AccountProfit;
+                    _credit = _mt4.AccountCredit;
                     _leverage = _mt4.AccountLeverage;
                 }
 
@@ -967,6 +970,7 @@ public class MtAccount
                 margin = _margin,
                 free_margin = _freeMargin,
                 profit = _profit,
+                credit = _credit,
                 leverage = _leverage,
                 positions = _positions.Count,
                 last_error = _lastError
