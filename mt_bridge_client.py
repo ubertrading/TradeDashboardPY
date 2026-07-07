@@ -456,8 +456,9 @@ class MtBridgeAccount:
             info = self.dd.get("ea_account_info", {}).get(self.account_id, {})
             eq = info.get("equity", 0)
             bal = info.get("balance", 0)
-            if eq > 0 and bal > 0 and abs(eq - bal) > 1.0:
-                logger.warning("[%s] _push_positions: rejecting empty positions array because equity (%.2f) != balance (%.2f). Broker is likely still syncing.", self.account_id, eq, bal)
+            credit = info.get("credit", 0)
+            if eq > 0 and bal > 0 and abs(eq - bal - credit) > 1.0:
+                logger.warning("[%s] _push_positions: rejecting empty positions array because equity (%.2f) != balance (%.2f) + credit (%.2f). Broker is likely still syncing.", self.account_id, eq, bal, credit)
                 return
 
         dd = self.dd
