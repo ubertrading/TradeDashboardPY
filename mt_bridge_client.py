@@ -366,8 +366,9 @@ class MtBridgeAccount:
             dd.setdefault("ea_account_info", {})[aid] = {}
 
         acct = dd["ea_account_info"][aid]
+        credit = info.get("credit", 0)
         acct["balance"] = info.get("balance", 0)
-        acct["equity"] = info.get("equity", 0)
+        acct["equity"] = info.get("equity", 0) - credit
         acct["margin"] = info.get("margin", 0)
         acct["free_margin"] = info.get("free_margin", 0)
         acct["profit"] = info.get("profit", 0)

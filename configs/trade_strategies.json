@@ -80,18 +80,6 @@
       "trade_alerts": false,
       "trade_start_time": "18:00",
       "trade_stop_time": "16:30"
-    },
-    "f434e2ab-ae71-40c8-8e58-1ab2ffed63fc": {
-      "account1": "73201770",
-      "account2": "2110248",
-      "created_at": "2026-06-19 11:07:21",
-      "enabled": true,
-      "id": "f434e2ab-ae71-40c8-8e58-1ab2ffed63fc",
-      "name": "GOMARKETS",
-      "running": false,
-      "trade_alerts": false,
-      "trade_start_time": "18:00",
-      "trade_stop_time": "16:30"
     }
   }
 }

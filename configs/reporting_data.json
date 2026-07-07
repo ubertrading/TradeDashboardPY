@@ -20420,6 +20420,229 @@
       "hedge_group_totals": {},
       "name_totals": {},
       "ts": 1782824268.587554
+    },
+    {
+      "accounts": {
+        "DEMO-CT-FIX-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-FIX-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT4-1218954455": {
+          "balance": 96334.97,
+          "equity": 96334.97,
+          "group_label": "DEMO-MT4-1218954455"
+        },
+        "DEMO-MT5-52769010": {
+          "balance": 4999913.22,
+          "equity": 5000031.549,
+          "group_label": "DEMO-MT5-52769010"
+        },
+        "DUKA-DEMO-DEMO2uotdK": {
+          "balance": 258177.5,
+          "equity": 258177.5,
+          "group_label": ""
+        },
+        "HUGO-1-A-SQ649159": {
+          "balance": 51234.3,
+          "equity": 46692.652830000006,
+          "group_label": "HUGO-1-A-SQ649159"
+        },
+        "HUGO-1-B-ORB91033": {
+          "balance": 44654.76,
+          "equity": 45746.11602,
+          "group_label": "HUGO-1-B-ORB808723"
+        }
+      },
+      "date": "2026-07-03",
+      "group_totals": {
+        "DEMO-MT4": {
+          "balance": 96334.97,
+          "equity": 96334.97
+        },
+        "DEMO-MT5": {
+          "balance": 4999913.22,
+          "equity": 5000031.549
+        },
+        "HUGO-1": {
+          "balance": 95889.06,
+          "equity": 92438.76885000001
+        }
+      },
+      "hedge_group_totals": {
+        "DEMO-MT4": {
+          "balance": 96334.97,
+          "equity": 96334.97
+        },
+        "DEMO-MT5": {
+          "balance": 4999913.22,
+          "equity": 5000031.549
+        },
+        "HUGO-1": {
+          "balance": 95889.06,
+          "equity": 92438.76885000001
+        }
+      },
+      "name_totals": {
+        "DEMO": {
+          "balance": 5096248.1899999995,
+          "equity": 5096366.518999999
+        },
+        "HUGO": {
+          "balance": 95889.06,
+          "equity": 92438.76885000001
+        }
+      },
+      "ts": 1783102063.2289686
+    },
+    {
+      "accounts": {
+        "DEMO-CT-FIX-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-FIX-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT4-1218954455": {
+          "balance": 96318.65,
+          "equity": 96354.72,
+          "group_label": "DEMO-MT4-1218954455"
+        },
+        "DEMO-MT5-52769010": {
+          "balance": 5000009.72,
+          "equity": 5000009.72,
+          "group_label": "DEMO-MT5-52769010"
+        },
+        "DUKA-DEMO-DEMO2uotdK": {
+          "balance": 258172.78,
+          "equity": 258172.78,
+          "group_label": ""
+        }
+      },
+      "date": "2026-07-06",
+      "group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96354.72
+        },
+        "DEMO-MT5": {
+          "balance": 5000009.72,
+          "equity": 5000009.72
+        }
+      },
+      "hedge_group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96354.72
+        },
+        "DEMO-MT5": {
+          "balance": 5000009.72,
+          "equity": 5000009.72
+        }
+      },
+      "name_totals": {
+        "DEMO": {
+          "balance": 5096328.37,
+          "equity": 5096364.4399999995
+        }
+      },
+      "ts": 1783341413.6927488
+    },
+    {
+      "accounts": {
+        "DEMO-CT-FIX-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-FIX-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT4-1218954455": {
+          "balance": 96318.65,
+          "equity": 96347.51,
+          "group_label": "DEMO-MT4-1218954455"
+        },
+        "DEMO-MT5-52769010": {
+          "balance": 5000009.72,
+          "equity": 5000009.72,
+          "group_label": "DEMO-MT5-52769010"
+        },
+        "DUKA-DEMO-DEMO2uotdK": {
+          "balance": 258172.78,
+          "equity": 258172.78,
+          "group_label": ""
+        }
+      },
+      "date": "2026-07-07",
+      "group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96347.51
+        },
+        "DEMO-MT5": {
+          "balance": 5000009.72,
+          "equity": 5000009.72
+        }
+      },
+      "hedge_group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96347.51
+        },
+        "DEMO-MT5": {
+          "balance": 5000009.72,
+          "equity": 5000009.72
+        }
+      },
+      "name_totals": {
+        "DEMO": {
+          "balance": 5096328.37,
+          "equity": 5096357.2299999995
+        }
+      },
+      "ts": 1783407676.0313983
     }
   ]
 }
