@@ -543,10 +543,12 @@ public class MtAccount
         try
         {
             _lastError = null;
-            // Clear any stale position data before attempting to connect so that
-            // old session positions are never returned while the new handshake is
-            // in progress.  _push_positions() will populate fresh data on success.
-            _positions.Clear();
+            // We intentionally do NOT clear _positions here. If we are merely
+            // reconnecting after a hiccup, we want to serve the last known
+            // positions rather than returning an empty array that might trigger
+            // a false cascade on the dashboard. Stale positions from a DIFFERENT
+            // account configuration are already cleared in UpdateConfig().
+            // _push_positions() will overwrite with fresh data on success.
             if (IsMt5)
                 return ConnectMt5();
             else

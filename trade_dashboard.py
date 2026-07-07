@@ -3190,9 +3190,9 @@ def _run_hedge_monitor_all():
                                   f"netting_mode — expected_lots={expected_lots} actual_lots={actual_lots} "
                                   f"missing_lots={missing_lots}")
 
-                            # Direct connections (FIX, MT4/MT5 Direct) are reliable and don't need 
-                            # the 3-tick debounce that EA HTTP polling requires for stability.
-                            threshold = 0 if info.get("direct_mode") else 2
+                            # Direct connections (FIX, MT4/MT5 Direct) receive a small 2-tick 
+                            # debounce to survive transient sync gaps during reconnects.
+                            threshold = 1 if info.get("direct_mode") else 2
                             
                             # Require consecutive detections
                             prev_count = session.get(mismatch_key, 0)
@@ -3254,9 +3254,9 @@ def _run_hedge_monitor_all():
                       f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
                       f"missing={len(missing_tickets)}")
 
-                # Direct connections (FIX, MT4/MT5 Direct) are reliable and don't need 
-                # the 3-tick debounce that EA HTTP polling requires for stability.
-                threshold = 0 if info.get("direct_mode") else 2
+                # Direct connections (FIX, MT4/MT5 Direct) receive a small 2-tick 
+                # debounce to survive transient sync gaps during reconnects.
+                threshold = 1 if info.get("direct_mode") else 2
                 
                 # Require consecutive detections to avoid glitches
                 mismatch_key = f"hedge_mismatch_{sid}_{account}"
@@ -3279,26 +3279,29 @@ def _run_hedge_monitor_all():
                 # Seen in incident 2026-05-28: ALEX-ICM-7415899 ea_has=200, expected=100,
                 # missing=100 → caused false cascade of 100 ALEX-YCM closes.
                 missing_real = missing_tickets.intersection(expected_open)
-                if expected_open and len(missing_real) == len(expected_open) and len(ea_open_tickets) >= len(expected_open):
-                    app.logger.warning(
-                        "[HEDGE-MON] CASCADE BLOCKED for %s sid=%s: ALL %d tickets missing "
-                        "but broker has %d positions (>= expected=%d). "
-                        "Likely ticket ID mismatch or data race — NOT cascading. "
-                        "Manual verification required.",
-                        account, sid[:8], len(missing_tickets), len(ea_open_tickets), len(expected_open)
-                    )
-                    try:
-                        _send_telegram(
-                            f"\u26a0\ufe0f <b>HEDGE CASCADE BLOCKED</b>: {account}\n"
-                            f"ALL {len(missing_tickets)} session tickets missing but broker "
-                            f"has {len(ea_open_tickets)} positions (\u2265 expected {len(expected_open)}).\n"
-                            f"Possible ticket ID mismatch \u2014 NOT auto-closing.\n"
-                            f"sid={sid[:8]} \u2014 manual check required.",
-                            account_id=account
+                if expected_open and len(missing_real) == len(expected_open):
+                    if len(ea_open_tickets) >= len(expected_open) or len(ea_open_tickets) == 0:
+                        reason = "ticket ID mismatch" if len(ea_open_tickets) > 0 else "bridge sync/reconnect (0 positions)"
+                        app.logger.warning(
+                            "[HEDGE-MON] CASCADE BLOCKED for %s sid=%s: ALL %d tickets missing "
+                            "and broker has %d positions. "
+                            "Likely %s \u2014 NOT cascading. Manual verification required.",
+                            account, sid[:8], len(missing_tickets), len(ea_open_tickets), reason
                         )
-                    except Exception:
-                        pass
-                    continue
+                        try:
+                            _send_telegram(
+                                f"\u26a0\ufe0f <b>HEDGE CASCADE BLOCKED</b>: {account}\n"
+                                f"ALL {len(missing_tickets)} session tickets missing but broker "
+                                f"has {len(ea_open_tickets)} positions.\n"
+                                f"Likely {reason} \u2014 NOT auto-closing.\n"
+                                f"sid={sid[:8]} \u2014 manual check required.",
+                                account_id=account
+                            )
+                        except Exception:
+                            pass
+                        session["status"] = "paused"
+                        _save_sessions()
+                        continue
 
                 print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
                       f"CONFIRMED {len(missing_tickets)} externally closed ticket(s): {missing_tickets}")
@@ -11354,7 +11357,14 @@ function showNewStrategyModal() {
   ['sAcct1','sAcct2'].forEach(selId => {
     const sel = document.getElementById(selId);
     sel.innerHTML = '<option value="">— select account —</option>' + allAccounts.map(a => {
-      const lbl = (manual_accounts_cache[a] || {}).group_label || '';
+      let lbl = '';
+      if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
+        lbl = manual_accounts_cache[a].group_label;
+      } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
+        lbl = fix_accounts_cache[a].group_label;
+      } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
+        lbl = mt_direct_accounts_cache[a].label;
+      }
       const display = lbl ? a + ' — ' + lbl : a;
       return `<option value="${a}">${display}</option>`;
     }).join('');
