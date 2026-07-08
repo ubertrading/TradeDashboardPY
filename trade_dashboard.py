@@ -14068,10 +14068,11 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       <td>${fmtEq}</td>
       <td>${fmtOptEq}</td>
       <td style="${shiftStyle}">${fmtShift}</td>
+      <td></td>
       <td style="${pnlStyle}">${fmtPnl}</td>
       <td></td><td></td>
       <td style="${lotsStyle}">${fmtLots}${lotsBreakdown}</td>
-      <td></td><td></td>
+      <td></td><td></td><td></td>
       <td>${fmtSwap}</td>
       ${totalsSwapDeltaCell}
       <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
@@ -14360,7 +14361,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td></td><td></td><td></td>
     <td>${fGSwap}</td>
     ${totalsSwapDeltaCell}
-    <td></td><td></td><td></td><td></td><td></td><td></td>
+    <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
   </tr>`);
   tbody.innerHTML = rows.join('');
 }
