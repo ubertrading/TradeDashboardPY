@@ -1977,6 +1977,8 @@ def _check_margin_alerts(all_accounts_info):
 
     for acct_id, info in all_accounts_info.items():
         try:
+            if info.get("_positions_desync"):
+                continue
             equity = info.get("equity")
             margin = info.get("margin") or info.get("margin_used")
             if not equity or not margin or equity <= 0:

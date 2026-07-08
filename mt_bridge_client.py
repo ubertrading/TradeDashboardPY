@@ -460,6 +460,7 @@ class MtBridgeAccount:
             credit = info.get("credit", 0)
             if eq > 0 and bal > 0 and abs(eq - bal - credit) > 1.0:
                 logger.warning("[%s] _push_positions: rejecting empty positions array because equity (%.2f) != balance (%.2f) + credit (%.2f). Broker is likely still syncing.", self.account_id, eq, bal, credit)
+                info["_positions_desync"] = True
                 return
 
         dd = self.dd
@@ -469,6 +470,7 @@ class MtBridgeAccount:
             dd.setdefault("ea_account_info", {})[aid] = {}
 
         acct = dd["ea_account_info"][aid]
+        acct["_positions_desync"] = False
         pos_dict = {}
         total_swap = 0.0
         tickets = []
