@@ -8577,7 +8577,7 @@ body {
   line-height: 1.5;
   min-height: 100vh;
 }
-.container { max-width: 1900px; margin: 0 auto; padding: 20px; }
+.container { max-width: 100%; margin: 0 auto; padding: 20px; }
 
 /* Header */
 .header {
