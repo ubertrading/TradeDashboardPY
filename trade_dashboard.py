@@ -5895,9 +5895,12 @@ def trade_result():
                             rb[other_acc] = rb.get(other_acc, 0) + diff
                             _log_event(session_id, other_acc, "rollback_triggered",
                                        f"Side error on {account} — scheduling {diff} rollback close(s) on {other_acc}")
-                    session["status"] = "paused"
-                    _log_event(session_id, account, "session_paused_on_error",
-                               f"Max errors ({max_errors}) reached — session paused. Errors: {total_errors}")
+                    # Switch to monitor to allow auto-rebalance to execute
+                    session["action"] = "monitor"
+                    session["status"] = "active"
+                    msg = f"Failed to open matching position on {account} after {max_errors} retries. Switching to monitor to auto-rebalance."
+                    _log_event(session_id, account, "open_failed_rebalance", msg)
+                    threading.Thread(target=_send_telegram, kwargs={"message": f"⚠️ <b>OPEN FAILED</b>\n{msg}", "account_id": account}, daemon=True).start()
 
             elif status == "no_positions":
                 # EA reports it cannot find matching positions to close
@@ -16329,6 +16332,34 @@ if __name__ == '__main__':
                                            f"error: {detail}) — will retry")
                                 print(f"[CYCLE-RETRY] {_mt_msg}")
                                 _log_event(session_id, account, "cycle_retry", _mt_msg)
+
+                    # ── Max-errors + rollback logic ──
+                    max_errors = session.get("max_errors", 1)
+                    total_errors = sum(len(v) for v in session.get("errors", {}).values())
+                    in_cycle_open = (
+                        _mt_action.startswith("cycle_") and
+                        session.get("cycle_progress", {}).get("phase") == "open"
+                    )
+                    should_pause = max_errors > 0 and total_errors >= max_errors and not in_cycle_open
+
+                    if should_pause and session.get("action") == "open":
+                        sides = session.get("sides", {})
+                        my_filled = session["filled"].get(account, 0)
+                        for other_acc in sides:
+                            if other_acc == account:
+                                continue
+                            other_filled = session["filled"].get(other_acc, 0)
+                            if other_filled > my_filled:
+                                diff = other_filled - my_filled
+                                rb = session.setdefault("rollback_needed", {})
+                                rb[other_acc] = rb.get(other_acc, 0) + diff
+                                _log_event(session_id, other_acc, "rollback_triggered",
+                                           f"Side error on {account} (MT-DIRECT) — scheduling {diff} rollback close(s) on {other_acc}")
+                        session["action"] = "monitor"
+                        session["status"] = "active"
+                        msg = f"Failed to open matching position on {account} after {max_errors} retries. Switching to monitor to auto-rebalance."
+                        _log_event(session_id, account, "open_failed_rebalance", msg)
+                        threading.Thread(target=_send_telegram, kwargs={"message": f"⚠️ <b>OPEN FAILED</b>\n{msg}", "account_id": account}, daemon=True).start()
 
                 session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 _save_sessions()
