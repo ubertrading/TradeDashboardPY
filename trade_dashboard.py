@@ -8940,7 +8940,10 @@ body {
 }
 /* Settings tab */
 .settings-section { margin-bottom: 28px; }
-.settings-section h3 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; }
+.settings-section h3 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; cursor: pointer; user-select: none; display: flex; justify-content: space-between; align-items: center; }
+.settings-section h3::after { content: '\25BC'; font-size: 0.75rem; color: var(--text2); transition: transform 0.2s; }
+.settings-section.collapsed h3::after { transform: rotate(-90deg); }
+.settings-section.collapsed > *:not(h3) { display: none !important; }
 .settings-grid {
   display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; align-items: center;
   max-width: 600px;
@@ -9202,7 +9205,36 @@ body {
 
 <!-- TAB 5: Settings -->
 <div class="tab-panel" id="tab-settings">
-<div class="card">
+<div class="card" id="settings-card-container">
+  <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+    <h2 style="margin:0; font-size: 1.25rem;">Settings</h2>
+    <label style="cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; color: var(--text2);">
+      <input type="checkbox" id="toggleAllSettings" onchange="toggleAllSettingsSections(this.checked)">
+      <span>Expand All Categories</span>
+    </label>
+  </div>
+  <script>
+    function toggleAllSettingsSections(expand) {
+      document.querySelectorAll('#settings-card-container .settings-section').forEach(sec => {
+        if (expand) sec.classList.remove('collapsed');
+        else sec.classList.add('collapsed');
+      });
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('#settings-card-container .settings-section').forEach(sec => {
+        sec.classList.add('collapsed');
+        const h3 = sec.querySelector('h3');
+        if (h3) {
+          h3.addEventListener('click', () => {
+            sec.classList.toggle('collapsed');
+            const anyCollapsed = Array.from(document.querySelectorAll('#settings-card-container .settings-section')).some(s => s.classList.contains('collapsed'));
+            const cb = document.getElementById('toggleAllSettings');
+            if (cb) cb.checked = !anyCollapsed;
+          });
+        }
+      });
+    });
+  </script>
   <!-- Email Settings -->
   <div class="settings-section">
     <h3>📧 Email Notifications</h3>
