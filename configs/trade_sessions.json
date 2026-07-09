@@ -6370,8 +6370,8 @@
     },
     "execution_order": "simultaneous",
     "filled": {
-      "DEMO-MT4-1218954455": 30,
-      "DEMO-MT5-52769010": 30
+      "DEMO-MT4-1218954455": 38,
+      "DEMO-MT5-52769010": 38
     },
     "fills": [
       {
@@ -7013,13 +7013,189 @@
         "ticket": 1793930822,
         "ts": "2026-07-07 08:04:20",
         "ts_epoch": 1783425860.95604
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461600.0497365,
+        "lots": 0.01,
+        "price": 1.14111,
+        "quote_price": 1.1411200000000001,
+        "spread": null,
+        "ticket": 248751772,
+        "ts": "2026-07-07 18:00:00",
+        "ts_epoch": 1783461600.268612
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461600.0996506,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.14057,
+        "spread": null,
+        "ticket": 1795095971,
+        "ts": "2026-07-07 18:00:00",
+        "ts_epoch": 1783461600.9117603
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461600.9924486,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751775,
+        "ts": "2026-07-07 18:00:01",
+        "ts_epoch": 1783461601.1838446
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461601.0343518,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.1407,
+        "spread": null,
+        "ticket": 1795096121,
+        "ts": "2026-07-07 18:00:01",
+        "ts_epoch": 1783461601.6725867
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461601.7029681,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751782,
+        "ts": "2026-07-07 18:00:01",
+        "ts_epoch": 1783461601.8459682
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461601.7224967,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.1407,
+        "spread": null,
+        "ticket": 1795096162,
+        "ts": "2026-07-07 18:00:02",
+        "ts_epoch": 1783461602.2774544
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461602.325851,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751788,
+        "ts": "2026-07-07 18:00:02",
+        "ts_epoch": 1783461602.4814963
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461602.3455858,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.1407,
+        "spread": null,
+        "ticket": 1795096215,
+        "ts": "2026-07-07 18:00:02",
+        "ts_epoch": 1783461602.8807652
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461602.9172487,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751794,
+        "ts": "2026-07-07 18:00:03",
+        "ts_epoch": 1783461603.0882323
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461602.944921,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.14069,
+        "spread": null,
+        "ticket": 1795096255,
+        "ts": "2026-07-07 18:00:03",
+        "ts_epoch": 1783461603.5198426
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461603.5555978,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751798,
+        "ts": "2026-07-07 18:00:03",
+        "ts_epoch": 1783461603.749436
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461603.5970259,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.1407,
+        "spread": null,
+        "ticket": 1795096283,
+        "ts": "2026-07-07 18:00:04",
+        "ts_epoch": 1783461604.1870866
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461604.232915,
+        "lots": 0.01,
+        "price": 1.14091,
+        "quote_price": 1.1408900000000002,
+        "spread": null,
+        "ticket": 248751800,
+        "ts": "2026-07-07 18:00:04",
+        "ts_epoch": 1783461604.3802629
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461604.2481363,
+        "lots": 0.01,
+        "price": 1.1407,
+        "quote_price": 1.1407,
+        "spread": null,
+        "ticket": 1795096325,
+        "ts": "2026-07-07 18:00:05",
+        "ts_epoch": 1783461605.227297
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1783461605.2813165,
+        "lots": 0.01,
+        "price": 1.14102,
+        "quote_price": 1.1410200000000001,
+        "spread": null,
+        "ticket": 248751801,
+        "ts": "2026-07-07 18:00:05",
+        "ts_epoch": 1783461605.4768772
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1783461605.3365068,
+        "lots": 0.01,
+        "price": 1.14069,
+        "quote_price": 1.14069,
+        "spread": null,
+        "ticket": 1795096347,
+        "ts": "2026-07-07 18:00:05",
+        "ts_epoch": 1783461605.913825
       }
     ],
     "hedge_monitor_start_ts": 1783105658.9614558,
     "id": "be2436f7-a9b0-41c8-8ca2-7a0a513eb7fc",
     "last_trade_ts": {
-      "DEMO-MT4-1218954455": 1783425836.960328,
-      "DEMO-MT5-52769010": 1783426997.830974
+      "DEMO-MT4-1218954455": 1783461605.475871,
+      "DEMO-MT5-52769010": 1783461605.913825
     },
     "lot_size": 0.01,
     "max_accum_deals": 0,
@@ -7031,9 +7207,7 @@
     "pair": "EURUSD",
     "require_diff_skew_close": "",
     "require_diff_skew_open": "",
-    "rollback_needed": {
-      "DEMO-MT5-52769010": 0
-    },
+    "rollback_needed": {},
     "rollback_start_ts": {},
     "rollback_tickets": {},
     "side1_max_spread": 99,
@@ -7064,6 +7238,6 @@
     "strategy_id": "558dadc8-2b67-4beb-b0e1-4e8ad9b28eaf",
     "total_positions": 10,
     "trade_pause": 0.0,
-    "updated_at": "2026-07-07 08:23:17"
+    "updated_at": "2026-07-07 18:00:05"
   }
 }

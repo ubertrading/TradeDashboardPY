@@ -132,5 +132,31 @@
     "cycle_reminder_days": null,
     "cycle_max_days": null,
     "auto_cycle_enabled": false
+  },
+  "DUKAS-IRINA": {
+    "label": "IR-DUKA",
+    "group_label": "DUKASCOPY",
+    "host": "live-api.dukascopy.com",
+    "trade_port": 10543,
+    "quote_port": 9543,
+    "sender_comp_id": "Sanantonio272_LIVEFIX",
+    "sender_comp_id_quote": "FEED_Sanantonio272_LIVEFIX",
+    "target_comp_id": "LIVEDUKASCOPYFIX",
+    "username": "Sanantonio272",
+    "password": "Pass1234!",
+    "heartbeat_interval": 30,
+    "lot_multiplier": 100000,
+    "use_ssl": true,
+    "implementation": "dukascopy",
+    "openapi_environment": "demo",
+    "auto_connect_start": true,
+    "cycle_reminder_enabled": false,
+    "cycle_reminder_days": null,
+    "cycle_max_days": null,
+    "auto_cycle_enabled": false,
+    "alert_email": null,
+    "alert_telegram": null,
+    "stop_out_level": null,
+    "notes": ""
   }
 }

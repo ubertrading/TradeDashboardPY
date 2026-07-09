@@ -1407,14 +1407,13 @@ def _load_reporting():
                 reporting_data.setdefault("snapshots", [])
                 reporting_data.setdefault("fees", [])
                 reporting_data.setdefault("fee_keywords", ["Holding Fee"])
-                reporting_data.setdefault("cashflow_adjustments", {})
                 app.logger.info("Loaded %d snapshots, %d fees from %s",
                                 len(reporting_data["snapshots"]),
                                 len(reporting_data["fees"]), REPORTING_FILE)
                 return
     except Exception:
         app.logger.exception("Failed loading reporting data")
-    reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee"], "cashflow_adjustments": {}}
+    reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee"]}
 
 _load_reporting()
 
@@ -1440,8 +1439,6 @@ def _take_balance_snapshot():
                 "balance": info.get("balance"),
                 "equity": info.get("equity"),
                 "group_label": grp,
-                # MT-native P/L: 'profit' = floating P/L reported by MT terminal
-                "floating_pnl": info.get("profit"),
             }
         # Include FIX/manual accounts that may not be in ea_account_info
         for acc, info in manual_accounts.items():
@@ -1450,34 +1447,13 @@ def _take_balance_snapshot():
                     "balance": info.get("balance"),
                     "equity": info.get("equity"),
                     "group_label": info.get("group_label", ""),
-                    "floating_pnl": None,
                 }
     if not accounts:
         return
-
-    # Fetch closed_pnl from MT deal history (all-time) via the bridge.
-    # This is the "Closed Trade P/L" number MT reports in its account summary.
-    # Performed OUTSIDE the lock as it makes network calls.
-    if mt_direct_manager:
-        for acc, acc_info in accounts.items():
-            try:
-                mt_acct = mt_direct_manager.accounts.get(acc)
-                if mt_acct and hasattr(mt_acct, 'get_deal_history'):
-                    hist = mt_acct.get_deal_history(0, int(time.time()), exclude_balance=True)
-                    if hist and isinstance(hist, dict):
-                        # pnl + swap = total closed trade P/L (matches MT account summary)
-                        closed = (hist.get("pnl") or 0) + (hist.get("swap") or 0)
-                        acc_info["closed_pnl"] = round(closed, 2)
-                    else:
-                        acc_info["closed_pnl"] = None
-            except Exception as e:
-                app.logger.warning("[REPORTING] Could not fetch closed_pnl for %s: %s", acc, e)
-                acc_info["closed_pnl"] = None
-
     # Build group totals: two levels
     # group_label format: NAME-HEDGEGROUP-SIDE (e.g. IRINA-6-A)
-    # name_totals:  {"IRINA": {balance, equity, floating_pnl, closed_pnl}}
-    # hedge_group_totals: {"IRINA-6": {balance, equity, floating_pnl, closed_pnl}}
+    # name_totals:  {"IRINA": {balance, equity}}  — all hedge groups under that name
+    # hedge_group_totals: {"IRINA-6": {balance, equity}} — one hedge pair
     name_totals = {}
     hedge_group_totals = {}
     for acc, info in accounts.items():
@@ -1485,35 +1461,21 @@ def _take_balance_snapshot():
         parts = grp.split("-")
         bal = info.get("balance") or 0
         eq = info.get("equity") or 0
-        fpnl = info.get("floating_pnl")
-        cpnl = info.get("closed_pnl")
         if len(parts) >= 3:
             name = parts[0].strip()
             hedge_grp = f"{parts[0].strip()}-{parts[1].strip()}"  # e.g. IRINA-6
-            nt = name_totals.setdefault(name, {"balance": 0, "equity": 0, "floating_pnl": None, "closed_pnl": None})
+            nt = name_totals.setdefault(name, {"balance": 0, "equity": 0})
             nt["balance"] += bal
             nt["equity"] += eq
-            if fpnl is not None:
-                nt["floating_pnl"] = (nt["floating_pnl"] or 0) + fpnl
-            if cpnl is not None:
-                nt["closed_pnl"] = (nt["closed_pnl"] or 0) + cpnl
-            ht = hedge_group_totals.setdefault(hedge_grp, {"balance": 0, "equity": 0, "floating_pnl": None, "closed_pnl": None})
+            ht = hedge_group_totals.setdefault(hedge_grp, {"balance": 0, "equity": 0})
             ht["balance"] += bal
             ht["equity"] += eq
-            if fpnl is not None:
-                ht["floating_pnl"] = (ht["floating_pnl"] or 0) + fpnl
-            if cpnl is not None:
-                ht["closed_pnl"] = (ht["closed_pnl"] or 0) + cpnl
         elif len(parts) == 2:
             # Fallback: 2-part label (GROUP-SIDE)
             prefix = parts[0].strip()
-            ht = hedge_group_totals.setdefault(prefix, {"balance": 0, "equity": 0, "floating_pnl": None, "closed_pnl": None})
+            ht = hedge_group_totals.setdefault(prefix, {"balance": 0, "equity": 0})
             ht["balance"] += bal
             ht["equity"] += eq
-            if fpnl is not None:
-                ht["floating_pnl"] = (ht["floating_pnl"] or 0) + fpnl
-            if cpnl is not None:
-                ht["closed_pnl"] = (ht["closed_pnl"] or 0) + cpnl
     snapshot = {"date": today, "ts": time.time(), "accounts": accounts,
                 "name_totals": name_totals, "hedge_group_totals": hedge_group_totals,
                 "group_totals": hedge_group_totals}  # backward compat
@@ -7830,7 +7792,6 @@ def api_reporting():
         "snapshots": reporting_data.get("snapshots", [])[-90:],
         "fees": reporting_data.get("fees", [])[-500:],
         "fee_keywords": reporting_data.get("fee_keywords", []),
-        "cashflow_adjustments": reporting_data.get("cashflow_adjustments", {}),
     })
 
 
@@ -7842,31 +7803,6 @@ def take_snapshot():
     reporting_data["snapshots"] = [s for s in reporting_data["snapshots"] if s.get("date") != today]
     _take_balance_snapshot()
     return jsonify({"ok": True, "date": today, "total_snapshots": len(reporting_data["snapshots"])})
-
-
-@app.route('/api/reporting/snapshots', methods=['DELETE'])
-def clear_snapshots():
-    """Delete all balance snapshots (full history wipe)."""
-    reporting_data["snapshots"] = []
-    _save_reporting()
-    app.logger.info("[REPORTING] All snapshots cleared by user")
-    return jsonify({"ok": True})
-
-
-@app.route('/api/reporting/cashflow', methods=['POST'])
-def update_cashflow():
-    """Update cashflow offset for a group."""
-    try:
-        data = request.get_json(force=True)
-        group = data.get("group")
-        offset = data.get("offset")
-        if group and offset is not None:
-            reporting_data.setdefault("cashflow_adjustments", {})[group] = float(offset)
-            _save_reporting()
-        return jsonify({"ok": True, "cashflow_adjustments": reporting_data.get("cashflow_adjustments", {})})
-    except Exception as e:
-        app.logger.error(f"Error updating cashflow: {e}")
-        return jsonify({"error": str(e)}), 400
 
 
 @app.route('/api/reporting/fee_keywords', methods=['POST'])
@@ -9208,10 +9144,7 @@ body {
   <div class="reporting-section">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <h3>📊 Account Groups</h3>
-      <div style="display:flex;gap:8px;">
-        <button class="btn btn-primary btn-sm" onclick="takeSnapshot()">📸 Take Snapshot</button>
-        <button class="btn btn-sm" style="background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b;" onclick="clearSnapshotHistory()">🗑 Clear History</button>
-      </div>
+      <button class="btn btn-primary btn-sm" onclick="takeSnapshot()">📸 Take Snapshot</button>
     </div>
     <div style="overflow-x:auto;">
       <table class="rpt-table" id="groupSummaryTable">
@@ -9243,11 +9176,6 @@ body {
             <option value="profit_total">Profit Total (U+R)</option>
           </select>
         </label>
-        <div style="display:flex;align-items:center;gap:6px;margin-left:12px;">
-          <span style="font-size:0.78rem;color:var(--text2);">Cash Flow Adj: $</span>
-          <input type="number" step="0.01" id="cashflowInput" style="width:100px;font-size:0.78rem;padding:2px 4px;background:var(--bg2);color:var(--text);border:1px solid var(--border);" value="0">
-          <button class="btn btn-sm" style="padding:2px 8px;font-size:0.7rem;background:var(--bg3);" onclick="saveCashflow()">Save</button>
-        </div>
       </div>
       <canvas id="balanceChart" width="800" height="220" style="width:100%;height:220px;"></canvas>
       <div id="chartEmpty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);font-size:0.9rem;">No snapshot data yet — click "Take Snapshot"</div>
@@ -13008,36 +12936,28 @@ function drawBalanceChart() {
 
   // Extract data points based on selection
   const points = snapshots.map(s => {
-    let bal = 0, eq = 0, fpnl = null, cpnl = null;
+    let bal = 0, eq = 0;
     if (selectedGroup === '__all__') {
       for (const g of Object.values(s.hedge_group_totals || s.group_totals || {})) {
         bal += (g.balance || 0);
         eq  += (g.equity || 0);
-        if (g.floating_pnl != null) fpnl = (fpnl || 0) + g.floating_pnl;
-        if (g.closed_pnl   != null) cpnl = (cpnl || 0) + g.closed_pnl;
       }
     } else if (selectedGroup.startsWith('name:')) {
       const name = selectedGroup.substring(5);
       const nt = (s.name_totals || {})[name];
-      bal  = nt ? (nt.balance || 0) : 0;
-      eq   = nt ? (nt.equity  || 0) : 0;
-      fpnl = nt && nt.floating_pnl != null ? nt.floating_pnl : null;
-      cpnl = nt && nt.closed_pnl   != null ? nt.closed_pnl   : null;
+      bal = nt ? (nt.balance || 0) : 0;
+      eq  = nt ? (nt.equity || 0) : 0;
     } else if (selectedGroup.startsWith('hg:')) {
       const hgKey = selectedGroup.substring(3);
       const ht = (s.hedge_group_totals || s.group_totals || {})[hgKey];
-      bal  = ht ? (ht.balance || 0) : 0;
-      eq   = ht ? (ht.equity  || 0) : 0;
-      fpnl = ht && ht.floating_pnl != null ? ht.floating_pnl : null;
-      cpnl = ht && ht.closed_pnl   != null ? ht.closed_pnl   : null;
+      bal = ht ? (ht.balance || 0) : 0;
+      eq  = ht ? (ht.equity || 0) : 0;
     } else {
       const gt = (s.group_totals || {})[selectedGroup];
-      bal  = gt ? (gt.balance || 0) : 0;
-      eq   = gt ? (gt.equity  || 0) : 0;
-      fpnl = gt && gt.floating_pnl != null ? gt.floating_pnl : null;
-      cpnl = gt && gt.closed_pnl   != null ? gt.closed_pnl   : null;
+      bal = gt ? (gt.balance || 0) : 0;
+      eq  = gt ? (gt.equity || 0) : 0;
     }
-    return { date: s.date, balance: bal, equity: eq, floating_pnl: fpnl, closed_pnl: cpnl };
+    return { date: s.date, balance: bal, equity: eq };
   }).filter(p => p.balance !== 0 || p.equity !== 0);
 
   if (points.length === 0) {
@@ -13055,21 +12975,11 @@ function drawBalanceChart() {
   // Compute min/max across all visible series
   let allVals = [];
   if (showProfit || showProfitTotal) {
-    // Prefer MT-native P/L values stored in snapshots.
-    // Fall back to balance/equity math only when not available (old snapshots).
-    const hasMtPnl = points.some(p => p.closed_pnl != null || p.floating_pnl != null);
     const baseBal = points[0].balance;
     points.forEach(p => {
-      if (hasMtPnl) {
-        // Use MT-reported values directly — immune to deposits/withdrawals
-        p.realized   = p.closed_pnl   != null ? p.closed_pnl   : (p.balance - baseBal);
-        p.unrealized = p.floating_pnl != null ? p.floating_pnl : (p.equity  - p.balance);
-      } else {
-        // Legacy fallback: derive from balance/equity delta
-        p.realized   = p.balance - baseBal;
-        p.unrealized = p.equity  - p.balance;
-      }
-      p.total_profit = p.realized + p.unrealized;
+      p.realized = p.balance - baseBal;
+      p.unrealized = p.equity - p.balance;
+      p.total_profit = p.equity - baseBal;
     });
     if (showProfit) {
       allVals = points.map(p => p.realized).concat(points.map(p => p.unrealized));
@@ -13224,27 +13134,6 @@ async function takeSnapshot() {
     await fetch('/api/reporting/snapshot', { method: 'POST' });
     await refreshReporting();
   } catch(e) { alert('Snapshot failed: ' + e); }
-}
-
-async function clearSnapshotHistory() {
-  if (!confirm('Delete ALL snapshot history? This cannot be undone.')) return;
-  try {
-    await fetch('/api/reporting/snapshots', { method: 'DELETE' });
-    await refreshReporting();
-  } catch(e) { alert('Clear failed: ' + e); }
-}
-
-async function saveCashflow() {
-  const grp = document.getElementById('chartGroupSelect').value;
-  const val = document.getElementById('cashflowInput').value;
-  try {
-    await fetch('/api/reporting/cashflow', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ group: grp, offset: parseFloat(val) || 0 })
-    });
-    await refreshReporting();
-  } catch(e) { alert('Save failed: ' + e); }
 }
 
 async function saveFeeKeywords() {

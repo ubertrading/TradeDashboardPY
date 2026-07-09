@@ -10,10 +10,17 @@
     "AL-1-A-YCM2145010745": 80.0,
     "YCM2145010745": 80.0
   },
-  "disbalance_alert_email": true,
-  "disbalance_alert_enabled": false,
+  "adr_settings": {
+    "GBPCHF": 90,
+    "USDCHF": 65,
+    "default": 80
+  },
+  "default_intended_lots": 0,
+  "disbalance_alert_email": false,
+  "disbalance_alert_enabled": true,
   "disbalance_alert_period_sec": 30,
   "disbalance_alert_telegram": true,
+  "disbalance_startup_grace_sec": 120,
   "ea_poll_enabled": false,
   "email": {
     "enabled": false,
