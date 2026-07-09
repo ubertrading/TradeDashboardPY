@@ -13143,7 +13143,8 @@ async function loadSettings() {
     loadThemeColorPickers(s.theme_colors || {});
     // Rebalance close delay
     document.getElementById('setRebalCloseDelay').value = s.rebalance_close_delay != null ? s.rebalance_close_delay : 1;
-    document.getElementById('setDefaultIntendedLots').value = s.default_intended_lots != null ? s.default_intended_lots : 0;
+    const dilEl = document.getElementById('setDefaultIntendedLots');
+    if (dilEl) dilEl.value = s.default_intended_lots != null ? s.default_intended_lots : 0;
     // Prompt on rollbacks
     const porEl = document.getElementById('setPromptOnRollbacks');
     if (porEl) porEl.checked = !!s.prompt_on_rollbacks;
