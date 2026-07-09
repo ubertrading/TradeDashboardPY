@@ -13184,7 +13184,7 @@ function renderAdrSettings(adrData) {
   const data = (adrData && Object.keys(adrData).length > 0) ? adrData : _ADR_DEFAULTS;
   const rows = Object.entries(data).map(([sym, val]) => _adrRow(sym, val)).join('');
   wrap.innerHTML = `
-    <table style="width:100%;border-collapse:collapse;font-size:0.83rem;">
+    <table style="max-width:450px;width:100%;border-collapse:collapse;font-size:0.83rem;">
       <thead><tr>
         <th style="text-align:left;padding:4px 8px;color:var(--text2);font-weight:600;">Symbol</th>
         <th style="text-align:center;padding:4px 8px;color:var(--text2);font-weight:600;">ADR (pips)</th>
