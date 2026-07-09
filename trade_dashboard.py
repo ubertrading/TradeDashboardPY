@@ -6816,6 +6816,7 @@ def disconnect_fix_account(account_id):
     acct = fix_manager.accounts.get(account_id)
     if not acct:
         return jsonify({"error": "Account not found"}), 404
+    acct.auto_connect_aborted = True
     acct.stop()
     _log_event(None, account_id, "fix_account_disconnected", "")
     return jsonify({"ok": True})

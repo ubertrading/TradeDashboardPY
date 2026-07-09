@@ -3352,6 +3352,9 @@ class FixAccountManager:
                 delay = 5  # base delay seconds
                 attempt = 0
                 while True:
+                    if getattr(acct, 'auto_connect_aborted', False):
+                        logger.info("[%s] FIX auto-connect aborted by user", aid)
+                        return
                     try:
                         attempt += 1
                         logger.info("[%s] FIX auto-connecting at startup (attempt #%d)...", aid, attempt)
@@ -3375,6 +3378,9 @@ class FixAccountManager:
                         logger.error("[%s] FIX auto-connect error: %s — retrying in %ds", aid, e, delay)
                     # Sleep in small increments
                     for _ in range(int(delay * 2)):
+                        if getattr(acct, 'auto_connect_aborted', False):
+                            logger.info("[%s] FIX auto-connect aborted by user", aid)
+                            return
                         time.sleep(0.5)
                     delay = min(delay * 2.0, 60)
 
@@ -3428,6 +3434,7 @@ class FixAccountManager:
         with self._lock:
             account = self.accounts.pop(account_id, None)
         if account:
+            account.auto_connect_aborted = True
             account.stop()
             self.save_config()
             return True
