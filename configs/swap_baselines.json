@@ -148,10 +148,10 @@
   },
   "DEMO-MT5-52769010:GBPJPY": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 11.639,
-    "swap_short": -23.153,
+    "swap_long": 11.405,
+    "swap_short": -22.856,
     "symbol": "GBPJPY",
-    "ts": 1783459087.6578524
+    "ts": 1783639777.925069
   },
   "DEMO-MT5-52769010:USDCHF": {
     "account": "DEMO-MT5-52769010",

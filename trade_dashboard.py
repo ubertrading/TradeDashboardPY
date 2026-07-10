@@ -395,7 +395,17 @@ def _check_cycle_reminders():
 
         # ── Auto-Cycle Trigger ──────────────────────────────────────
         if is_critical and cfg.get("auto_cycle_enabled"):
-            _trigger_auto_cycle(acct_id, label, days_held, max_days)
+            trigger = True
+            time_str = dashboard_settings.get("auto_cycle_time_est", "")
+            if time_str:
+                try:
+                    hour, minute = map(int, time_str.split(":"))
+                    if now_dt.hour < hour or (now_dt.hour == hour and now_dt.minute < minute):
+                        trigger = False
+                except Exception:
+                    pass
+            if trigger:
+                _trigger_auto_cycle(acct_id, label, days_held, max_days)
 
     cycle_reminders = new_reminders
 
@@ -1579,6 +1589,7 @@ _DEFAULT_SETTINGS = {
     "exec_retry_max": 5,
     "fund_email_enabled": True,
     "fund_email_time": "08:00",
+    "auto_cycle_time_est": "",
     "adr_settings": {
         "GBPCHF": 90, "USDCHF": 65,
         "default": 80
@@ -5892,6 +5903,20 @@ def trade_result():
                         if retries >= max_retries:
                             session["action"] = "monitor"
                             session["cycle_progress"] = {}
+                            
+                            # Auto-rollback on cycle fail
+                            my_filled = session.get("filled", {}).get(account, 0)
+                            for other_acc in session.get("sides", {}):
+                                if other_acc == account:
+                                    continue
+                                other_filled = session.get("filled", {}).get(other_acc, 0)
+                                if other_filled > my_filled:
+                                    diff = other_filled - my_filled
+                                    rb = session.setdefault("rollback_needed", {})
+                                    rb[other_acc] = rb.get(other_acc, 0) + diff
+                                    _log_event(session_id, other_acc, "rollback_triggered",
+                                               f"Cycle error on {account} - scheduling {diff} rollback close(s) on {other_acc}")
+
                             _save_sessions()
                             msg = (f"Cycle reopen FAILED after {retries} attempts on "
                                    f"{account} (error: {detail}) — reverting to MONITOR")
@@ -8478,6 +8503,8 @@ def api_update_settings():
             dashboard_settings["fund_email_enabled"] = bool(data["fund_email_enabled"])
         if "fund_email_time" in data:
             dashboard_settings["fund_email_time"] = str(data["fund_email_time"]).strip()
+        if "auto_cycle_time_est" in data:
+            dashboard_settings["auto_cycle_time_est"] = str(data["auto_cycle_time_est"]).strip()
         if "adr_settings" in data and isinstance(data["adr_settings"], dict):
             adr = {}
             for sym, val in data["adr_settings"].items():
@@ -9337,8 +9364,15 @@ body {
       <input type="time" id="setFundEmailTime" value="08:00">
     </div>
 
+    <h4 style="margin-top:20px; border-top:1px solid var(--border); padding-top:15px; color:var(--text1);">Auto-Cycle Trigger Time (EST)</h4>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Set an optional specific time to trigger auto-cycles (e.g. 17:00). If left blank, it triggers immediately upon the rollover day condition.</p>
+    <div class="settings-grid">
+      <label>Time</label>
+      <input type="time" id="setAutoCycleTimeEst">
+    </div>
+
     <div class="settings-actions">
-      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Email Settings</button>
+      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Email & Cycle Settings</button>
       <button class="btn btn-sm" onclick="testEmail()" id="testEmailBtn">📨 Test Email</button>
     </div>
   </div>
@@ -13055,20 +13089,22 @@ function drawBalanceChart() {
   // Compute min/max across all visible series
   let allVals = [];
   if (showProfit || showProfitTotal) {
-    // Prefer MT-native P/L values stored in snapshots.
-    // Fall back to balance/equity math only when not available (old snapshots).
-    const hasMtPnl = points.some(p => p.closed_pnl != null || p.floating_pnl != null);
-    const baseBal = points[0].balance;
+    // Only chart points that have real MT-native PnL data stored.
+    // DO NOT fall back to balance/equity math — that mixes in deposits/withdrawals.
+    const profitPoints = points.filter(p => p.closed_pnl != null || p.floating_pnl != null);
+    if (profitPoints.length === 0) {
+      emptyMsg.style.display = 'block';
+      emptyMsg.textContent = 'No Profit data yet — take a new snapshot to start tracking';
+      return;
+    }
+    // Replace points with only the valid ones for rendering below
+    points.length = 0;
+    profitPoints.forEach(p => points.push(p));
+
     points.forEach(p => {
-      if (hasMtPnl) {
-        // Use MT-reported values directly — immune to deposits/withdrawals
-        p.realized   = p.closed_pnl   != null ? p.closed_pnl   : (p.balance - baseBal);
-        p.unrealized = p.floating_pnl != null ? p.floating_pnl : (p.equity  - p.balance);
-      } else {
-        // Legacy fallback: derive from balance/equity delta
-        p.realized   = p.balance - baseBal;
-        p.unrealized = p.equity  - p.balance;
-      }
+      // Use whatever MT has; if one side is missing for a point use 0
+      p.realized   = p.closed_pnl   != null ? p.closed_pnl   : 0;
+      p.unrealized = p.floating_pnl != null ? p.floating_pnl : 0;
       p.total_profit = p.realized + p.unrealized;
     });
     if (showProfit) {
@@ -13282,6 +13318,7 @@ async function loadSettings() {
     if (document.getElementById('setFundEmailEnabled')) {
         document.getElementById('setFundEmailEnabled').checked = s.fund_email_enabled !== false;
         document.getElementById('setFundEmailTime').value = s.fund_email_time || '08:00';
+        document.getElementById('setAutoCycleTimeEst').value = s.auto_cycle_time_est || '';
     }
     document.getElementById('setTgEnabled').checked = s.telegram && s.telegram.enabled;
     document.getElementById('setTgBotToken').value = (s.telegram && s.telegram.bot_token) || '';
@@ -13644,7 +13681,8 @@ async function saveSettings(silent) {
       chat_id: document.getElementById('setTgChatId').value,
     },
     fund_email_enabled: document.getElementById('setFundEmailEnabled') ? document.getElementById('setFundEmailEnabled').checked : true,
-    fund_email_time: document.getElementById('setFundEmailTime') ? document.getElementById('setFundEmailTime').value : "08:00"
+    fund_email_time: document.getElementById('setFundEmailTime') ? document.getElementById('setFundEmailTime').value : "08:00",
+    auto_cycle_time_est: document.getElementById('setAutoCycleTimeEst') ? document.getElementById('setAutoCycleTimeEst').value : ""
   };
   try {
     const res = await fetch('/api/settings', {
@@ -16501,6 +16539,20 @@ if __name__ == '__main__':
                             if _mt_retries >= _mt_max_retries:
                                 session["action"] = "monitor"
                                 session["cycle_progress"] = {}
+                                
+                                # Auto-rollback on cycle fail
+                                my_filled = session.get("filled", {}).get(account, 0)
+                                for other_acc in session.get("sides", {}):
+                                    if other_acc == account:
+                                        continue
+                                    other_filled = session.get("filled", {}).get(other_acc, 0)
+                                    if other_filled > my_filled:
+                                        diff = other_filled - my_filled
+                                        rb = session.setdefault("rollback_needed", {})
+                                        rb[other_acc] = rb.get(other_acc, 0) + diff
+                                        _log_event(session_id, other_acc, "rollback_triggered",
+                                                   f"Cycle error on {account} (MT-DIRECT) - scheduling {diff} rollback close(s) on {other_acc}")
+
                                 _save_sessions()
                                 _mt_msg = (f"Cycle reopen FAILED after {_mt_retries} attempts on "
                                            f"{account} (MT-DIRECT error: {detail}) — reverting to MONITOR")

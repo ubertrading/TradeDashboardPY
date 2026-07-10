@@ -20777,6 +20777,78 @@
         }
       },
       "ts": 1783600881.2361052
+    },
+    {
+      "accounts": {
+        "DEMO-CT-FIX-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-FIX-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        },
+        "DEMO-MT4-1218954455": {
+          "balance": 96318.65,
+          "equity": 96391.01,
+          "group_label": "DEMO-MT4-1218954455"
+        },
+        "DEMO-MT5-52769010": {
+          "balance": 5000005.1,
+          "equity": 4999961.92,
+          "group_label": "DEMO-MT5-52769010"
+        },
+        "DUKA-DEMO-DEMO2uotdK": {
+          "balance": 258172.78,
+          "equity": 258172.78,
+          "group_label": ""
+        },
+        "DUKAS-IRINA": {
+          "balance": null,
+          "equity": null,
+          "group_label": ""
+        }
+      },
+      "date": "2026-07-10",
+      "group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96391.01
+        },
+        "DEMO-MT5": {
+          "balance": 5000005.1,
+          "equity": 4999961.92
+        }
+      },
+      "hedge_group_totals": {
+        "DEMO-MT4": {
+          "balance": 96318.65,
+          "equity": 96391.01
+        },
+        "DEMO-MT5": {
+          "balance": 5000005.1,
+          "equity": 4999961.92
+        }
+      },
+      "name_totals": {
+        "DEMO": {
+          "balance": 5096323.75,
+          "equity": 5096352.93
+        }
+      },
+      "ts": 1783667445.5761073
     }
   ]
 }
