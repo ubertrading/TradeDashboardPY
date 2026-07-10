@@ -9259,7 +9259,7 @@ body {
     <div class="rpt-chart-wrap">
       <div class="rpt-chart-controls" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
         <label style="font-size:0.78rem;color:var(--text2);">Group:
-          <select id="chartGroupSelect" onchange="drawBalanceChart()"><option value="__all__">All Groups</option></select>
+          <select id="chartGroupSelect" onchange="drawBalanceChart(); updateSnapshotCalculatorOptions();"><option value="__all__">All Groups</option></select>
         </label>
         <label style="font-size:0.78rem;color:var(--text2);">Show:
           <select id="chartMetricSelect" onchange="drawBalanceChart()">
@@ -9278,6 +9278,20 @@ body {
       </div>
       <canvas id="balanceChart" width="800" height="220" style="width:100%;height:220px;"></canvas>
       <div id="chartEmpty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);font-size:0.9rem;">No snapshot data yet — click "Take Snapshot"</div>
+    </div>
+    
+    <!-- Snapshot Timeframe Calculator -->
+    <div style="margin-top: 12px; padding: 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;">
+      <h4 style="margin:0 0 8px 0; font-size:0.85rem; color:var(--text);">Custom Timeframe Profit Calculator</h4>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; font-size:0.8rem;">
+        <label>From: <select id="calcStartSelect" onchange="calculateSnapshotProfit()"></select></label>
+        <label>To: <select id="calcEndSelect" onchange="calculateSnapshotProfit()"></select></label>
+        <div id="calcResults" style="margin-left: 12px; font-weight:500;">
+          Realized: <span id="calcRealized" style="color:var(--text);">--</span> | 
+          Unrealized: <span id="calcUnrealized" style="color:var(--text);">--</span> | 
+          Net Total: <span id="calcTotal" style="color:var(--text);">--</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -12896,6 +12910,7 @@ async function refreshReporting() {
     renderGroupSummary(_reportingCache);
     renderFeeLog(_reportingCache);
     drawBalanceChart();
+    updateSnapshotCalculatorOptions();
   } catch(e) { console.error('Reporting fetch error:', e); }
 }
 
@@ -13018,6 +13033,115 @@ function renderGroupSummary(data) {
   rows.push('<tr class="total-row"><td colspan="6" style="text-align:right;">Grand Total</td>' +
     '<td>' + fmt(grandBalance) + '</td><td>' + fmt(grandEquity) + '</td></tr>');
   tbody.innerHTML = rows.join('');
+}
+
+function updateSnapshotCalculatorOptions() {
+  const snapshots = _reportingCache.snapshots || [];
+  const startSelect = document.getElementById('calcStartSelect');
+  const endSelect = document.getElementById('calcEndSelect');
+  if (!startSelect || !endSelect) return;
+  
+  // Save current selections
+  const currentStart = startSelect.value;
+  const currentEnd = endSelect.value;
+  
+  startSelect.innerHTML = '';
+  endSelect.innerHTML = '';
+  
+  if (snapshots.length === 0) {
+    startSelect.innerHTML = '<option value="">No snapshots</option>';
+    endSelect.innerHTML = '<option value="">No snapshots</option>';
+    return;
+  }
+  
+  snapshots.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.date;
+    opt.textContent = s.date;
+    startSelect.appendChild(opt.cloneNode(true));
+    endSelect.appendChild(opt.cloneNode(true));
+  });
+  
+  // Restore selections or default to appropriate range
+  if (currentStart && Array.from(startSelect.options).some(o => o.value === currentStart)) {
+    startSelect.value = currentStart;
+  } else {
+    startSelect.value = snapshots[0].date;
+  }
+  
+  if (currentEnd && Array.from(endSelect.options).some(o => o.value === currentEnd)) {
+    endSelect.value = currentEnd;
+  } else {
+    endSelect.value = snapshots[snapshots.length - 1].date;
+  }
+  
+  calculateSnapshotProfit();
+}
+
+function calculateSnapshotProfit() {
+  const snapshots = _reportingCache.snapshots || [];
+  const startVal = document.getElementById('calcStartSelect').value;
+  const endVal = document.getElementById('calcEndSelect').value;
+  const selectedGroup = document.getElementById('chartGroupSelect').value;
+  
+  const spanR = document.getElementById('calcRealized');
+  const spanU = document.getElementById('calcUnrealized');
+  const spanT = document.getElementById('calcTotal');
+  
+  function setDashes() {
+    spanR.textContent = '--'; spanU.textContent = '--'; spanT.textContent = '--';
+    spanR.style.color = ''; spanU.style.color = ''; spanT.style.color = '';
+  }
+  
+  if (!startVal || !endVal || snapshots.length === 0) return setDashes();
+  
+  const startSnap = snapshots.find(s => s.date === startVal);
+  const endSnap = snapshots.find(s => s.date === endVal);
+  if (!startSnap || !endSnap) return setDashes();
+  
+  function getPnL(s) {
+    let cpnl = null, fpnl = null;
+    if (selectedGroup === '__all__') {
+      for (const g of Object.values(s.hedge_group_totals || s.group_totals || {})) {
+        if (g.floating_pnl != null) fpnl = (fpnl || 0) + g.floating_pnl;
+        if (g.closed_pnl   != null) cpnl = (cpnl || 0) + g.closed_pnl;
+      }
+    } else if (selectedGroup.startsWith('name:')) {
+      const nt = (s.name_totals || {})[selectedGroup.substring(5)];
+      if (nt) { cpnl = nt.closed_pnl; fpnl = nt.floating_pnl; }
+    } else if (selectedGroup.startsWith('hg:')) {
+      const ht = (s.hedge_group_totals || s.group_totals || {})[selectedGroup.substring(3)];
+      if (ht) { cpnl = ht.closed_pnl; fpnl = ht.floating_pnl; }
+    } else {
+      const gt = (s.group_totals || {})[selectedGroup];
+      if (gt) { cpnl = gt.closed_pnl; fpnl = gt.floating_pnl; }
+    }
+    return { c: cpnl, f: fpnl };
+  }
+  
+  const p1 = getPnL(startSnap);
+  const p2 = getPnL(endSnap);
+  
+  // If either snapshot lacks PnL data, we can't compute a full difference
+  if (p1.c == null || p2.c == null) return setDashes();
+  
+  const realDiff = p2.c - p1.c;
+  // If floating is null, treat as 0 for diff purposes
+  const unreadDiff = (p2.f != null ? p2.f : 0) - (p1.f != null ? p1.f : 0);
+  const totalDiff = realDiff + unreadDiff;
+  
+  function fmt(val) {
+    const s = val >= 0 ? '+' : '';
+    return s + '$' + val.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+  function clr(val) { return val >= 0 ? 'var(--profit)' : 'var(--loss)'; }
+  
+  spanR.textContent = fmt(realDiff);
+  spanR.style.color = clr(realDiff);
+  spanU.textContent = fmt(unreadDiff);
+  spanU.style.color = clr(unreadDiff);
+  spanT.textContent = fmt(totalDiff);
+  spanT.style.color = clr(totalDiff);
 }
 
 function drawBalanceChart() {
