@@ -13106,10 +13106,18 @@ function drawBalanceChart() {
     points.length = 0;
     profitPoints.forEach(p => points.push(p));
 
+    // closed_pnl stored in snapshots is the ALL-TIME cumulative figure from MT
+    // (deal history from epoch 0). Plotting raw values shows account inception history,
+    // not profit since tracking started. Subtract the first snapshot as the baseline
+    // so the chart shows delta P/L gained since tracking began.
+    const baseClosed = points[0].closed_pnl != null ? points[0].closed_pnl : 0;
+    const baseFloating = points[0].floating_pnl != null ? points[0].floating_pnl : 0;
+
     points.forEach(p => {
-      // Use whatever MT has; if one side is missing for a point use 0
-      p.realized   = p.closed_pnl   != null ? p.closed_pnl   : 0;
-      p.unrealized = p.floating_pnl != null ? p.floating_pnl : 0;
+      const rawRealized   = p.closed_pnl   != null ? p.closed_pnl   : 0;
+      const rawUnrealized = p.floating_pnl != null ? p.floating_pnl : 0;
+      p.realized   = rawRealized - baseClosed;
+      p.unrealized = rawUnrealized - baseFloating;
       p.total_profit = p.realized + p.unrealized;
     });
     if (showProfit) {
