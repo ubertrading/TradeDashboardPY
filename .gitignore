@@ -49,3 +49,6 @@ temp/
 # IDEs
 .idea/
 .vscode/
+
+# Data configs
+configs/reporting_data.json
