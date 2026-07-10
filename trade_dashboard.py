@@ -1475,8 +1475,8 @@ def _take_balance_snapshot():
                 if mt_acct and hasattr(mt_acct, 'get_deal_history'):
                     hist = mt_acct.get_deal_history(0, int(time.time()), exclude_balance=True)
                     if hist and isinstance(hist, dict):
-                        # pnl + swap = total closed trade P/L (matches MT account summary)
-                        closed = (hist.get("pnl") or 0) + (hist.get("swap") or 0)
+                        # pnl + swap + fees = total closed trade P/L (matches MT account summary net)
+                        closed = (hist.get("pnl") or 0) + (hist.get("swap") or 0) + (hist.get("fees") or 0)
                         acc_info["closed_pnl"] = round(closed, 2)
                     else:
                         acc_info["closed_pnl"] = None
