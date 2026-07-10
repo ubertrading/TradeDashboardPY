@@ -14424,6 +14424,15 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const totalsSwapDeltaCell = hasSwapDelta
       ? `<td style="${swapDeltaStyle};font-size:0.78rem"><a href="#" onclick="showSwapBreakdown();return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument swap breakdown (All Accounts)">${fmtSwapDelta}</a></td>`
       : `<td style="${swapDeltaStyle};font-size:0.78rem">${fmtSwapDelta}</td>`;
+    // Sort all account rows by name alphabetically
+    rows.sort((a, b) => {
+      const aMatch = a.match(/<td><strong>(.*?)<\/strong><\/td>/);
+      const bMatch = b.match(/<td><strong>(.*?)<\/strong><\/td>/);
+      const aName = aMatch ? aMatch[1] : '';
+      const bName = bMatch ? bMatch[1] : '';
+      return aName.localeCompare(bName);
+    });
+
     rows.push(`<tr style="border-top:2px solid var(--accent);font-weight:700;background:var(--surface2);">
       <td>TOTALS</td>
       <td></td><td></td>
