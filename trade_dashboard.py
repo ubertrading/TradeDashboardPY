@@ -9364,15 +9364,8 @@ body {
       <input type="time" id="setFundEmailTime" value="08:00">
     </div>
 
-    <h4 style="margin-top:20px; border-top:1px solid var(--border); padding-top:15px; color:var(--text1);">Auto-Cycle Trigger Time (EST)</h4>
-    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Set an optional specific time to trigger auto-cycles (e.g. 17:00). If left blank, it triggers immediately upon the rollover day condition.</p>
-    <div class="settings-grid">
-      <label>Time</label>
-      <input type="time" id="setAutoCycleTimeEst">
-    </div>
-
     <div class="settings-actions">
-      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Email & Cycle Settings</button>
+      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Email Settings</button>
       <button class="btn btn-sm" onclick="testEmail()" id="testEmailBtn">📨 Test Email</button>
     </div>
   </div>
@@ -9394,7 +9387,19 @@ body {
     </div>
   </div>
 
-  <!-- Per-Account Fee Thresholds -->
+  <!-- Auto-Cycle Settings -->
+  <div class="settings-section">
+    <h3>🔄 Auto-Cycle</h3>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Configure when auto-cycle is allowed to trigger. Per-account auto-cycle enable/disable is set in the Accounts tab.</p>
+    <div class="settings-grid">
+      <label>Trigger Time (EST)</label>
+      <input type="time" id="setAutoCycleTimeEst">
+    </div>
+    <p style="font-size:0.75rem;color:var(--text2);margin-top:8px;">Leave blank to trigger immediately once the max days threshold is reached. Set a time (e.g. 17:00) to delay until that time each day.</p>
+    <div class="settings-actions">
+      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Auto-Cycle Settings</button>
+    </div>
+  </div>
   <div class="settings-section">
     <h3>💰 Fee Alert Thresholds</h3>
     <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Set minimum fee amount to trigger alerts per account. Default 0 = alert on any fee.</p>
