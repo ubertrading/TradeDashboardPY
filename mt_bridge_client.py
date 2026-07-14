@@ -252,6 +252,7 @@ class MtBridgeAccount:
         self._heartbeat_thread = None
         self._reconnect_attempt = 0
         self._reconnect_delay = 5
+        self._empty_reads = 0
 
     @property
     def connected(self):
@@ -462,6 +463,20 @@ class MtBridgeAccount:
                 logger.warning("[%s] _push_positions: rejecting empty positions array because equity (%.2f) != balance (%.2f) + credit (%.2f). Broker is likely still syncing.", self.account_id, eq, bal, credit)
                 info["_positions_desync"] = True
                 return
+
+            # Debounce: MT4/MT5 can briefly report 0 positions and eq==bal during terminal restart
+            # before it finishes syncing trade history. We require 3 consecutive polls (1.5s) to confirm.
+            # Only debounce if the account previously had positions to prevent startup delays.
+            prev_count = info.get("open_count", 0)
+            if prev_count > 0:
+                self._empty_reads += 1
+                if self._empty_reads < 3:
+                    logger.info("[%s] _push_positions: debouncing empty positions array (%d/3) to prevent restart glitch.", self.account_id, self._empty_reads)
+                    return
+            else:
+                self._empty_reads = 3 # Already confirmed empty or never had positions
+        else:
+            self._empty_reads = 0
 
         dd = self.dd
         aid = self.account_id
