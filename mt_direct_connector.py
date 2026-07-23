@@ -4114,7 +4114,9 @@ class MTDirectManager:
                         quote = direct_acct.get_quote_direct(pair)
                         base_price = (quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)) if quote else 0
                         pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
-                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        digits = 3 if "JPY" in pair.upper() else 5
+                        raw_limit = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_price = round(raw_limit, digits)
                         limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
                         closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
                         batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
@@ -4141,7 +4143,9 @@ class MTDirectManager:
                         quote = direct_acct.get_quote_direct(pair)
                         base_price = (quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)) if quote else 0
                         pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
-                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        digits = 3 if "JPY" in pair.upper() else 5
+                        raw_limit = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_price = round(raw_limit, digits)
                         limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
                         order_result = direct_acct.send_limit_order(
                             pair, trade_side, lot_size, limit_price, limit_type,
