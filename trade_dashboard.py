@@ -5247,13 +5247,18 @@ def _should_issue_command(session, account):
             and str(f.get("ticket")) not in closed_tickets_set
         ]
         def _cl_fill_sort_key(f):
+            # Prefer ts_epoch (reliably set at import/fill time as broker open epoch)
+            ep = f.get("ts_epoch", 0) or 0
+            if ep > 0:
+                return ep
+            # Fallback: parse ts string
             ts_str = f.get("ts", "")
             if ts_str:
                 is_direct = mt_direct_manager and cycle_account in mt_direct_manager.accounts
                 epoch = _parse_broker_timestamp(ts_str, is_direct=is_direct)
                 if epoch is not None:
                     return epoch
-            return f.get("ts_epoch", 0) or 0
+            return 0
         acct_fills.sort(key=_cl_fill_sort_key)
         total_to_cycle = len(acct_fills)
 

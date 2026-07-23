@@ -4233,6 +4233,11 @@ class MTDirectManager:
                 # progress["index"] was set based on sorted acct_fills, so we must
                 # use the same sort here to close the correct position.
                 def _fill_sort_key(f):
+                    # Prefer ts_epoch (reliably set at import/fill time as broker open epoch)
+                    ep = f.get("ts_epoch", 0) or 0
+                    if ep > 0:
+                        return ep
+                    # Fallback: parse ts string
                     ts_str = f.get("ts", "")
                     if ts_str:
                         import re
@@ -4243,7 +4248,7 @@ class MTDirectManager:
                                 return time.mktime(time.strptime(s, fmt))
                             except (ValueError, TypeError):
                                 continue
-                    return f.get("ts_epoch", 0) or 0
+                    return 0
                 acct_fills.sort(key=_fill_sort_key)
                 if idx < len(acct_fills):
                     side_info = session.get("sides", {}).get(account_id, {})
