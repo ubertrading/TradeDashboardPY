@@ -566,7 +566,8 @@ class MtBridgeAccount:
         # This mirrors the same logic in the EA heartbeat route (trade_dashboard.py) which
         # only runs for EA poll-mode accounts. Bridge accounts bypass that route, so we
         # must do the sync here after every successful position push.
-        # Skip during cycling/closing — mid-cycle the broker briefly reports fewer positions.
+        # Skip during cycling/closing/opening — mid-execution the broker async delivery
+        # can lag behind fill callbacks, causing a false rollback of the filled count.
         ea_pos = len(pos_dict)
         _needs_save = False
         sessions_dict = dd.get("sessions", {})
@@ -576,13 +577,24 @@ class MtBridgeAccount:
             if aid not in _sess.get("sides", {}):
                 continue
             sess_action = _sess.get("action", "")
-            if sess_action.startswith("cycle_") or sess_action in ("close", "close_limit"):
-                continue  # Don't sync during cycling or closing
+            # Skip when the session is actively opening, cycling, or closing.
+            # During "open" the broker count can lag behind fill callbacks by 1-2 polls
+            # (500ms each) causing this sync to decrease filled and retrigger extra orders.
+            if sess_action in ("open", "close", "close_limit") or sess_action.startswith("cycle_"):
+                continue
             old_filled = _sess.get("filled", {}).get(aid, 0)
-            if ea_pos != old_filled:
-                logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed)", aid, _sid[:8], old_filled, ea_pos)
-                _sess.setdefault("filled", {})[aid] = ea_pos
-                _needs_save = True
+            if ea_pos == old_filled:
+                continue
+            # Safety: never decrease the filled count via auto-sync.
+            # A decrease means the broker hasn't fully propagated the new position yet.
+            # Only upward corrections (recovering from a missed fill callback) are safe.
+            if ea_pos < old_filled:
+                logger.debug("[%s] Bridge auto-sync sid=%s: suppressing downward correction %d -> %d (broker lag)",
+                             aid, _sid[:8], old_filled, ea_pos)
+                continue
+            logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed)", aid, _sid[:8], old_filled, ea_pos)
+            _sess.setdefault("filled", {})[aid] = ea_pos
+            _needs_save = True
         if _needs_save:
             save_fn = dd.get("save_sessions")
             if save_fn:
