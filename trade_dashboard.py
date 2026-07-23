@@ -13964,12 +13964,7 @@ function renderSide(session, sideNum) {
         }
         const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
 
-        if (session.imported) {
-            const isCycling = action.startsWith('cycle_');
-            count = isCycling ? Math.max(0, filled - totalPendingReopens) : filled;
-        } else {
-            count = Math.max(0, filled - closed - totalPendingReopens);
-        }
+        count = Math.max(0, filled - closed - totalPendingReopens);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
@@ -13987,12 +13982,7 @@ function renderSide(session, sideNum) {
         }
         const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
 
-        if (session.imported) {
-            const isCycling = action.startsWith('cycle_');
-            count = isCycling ? Math.max(0, filled - totalPendingReopens) : filled;
-        } else {
-            count = Math.max(0, filled - closed - totalPendingReopens);
-        }
+        count = Math.max(0, filled - closed - totalPendingReopens);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
