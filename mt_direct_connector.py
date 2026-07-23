@@ -1486,21 +1486,34 @@ class MT4DirectAccount:
                             sym_upper = _watch_symbol.upper().replace(".", "")
                             new_ticket = 0
                             new_price = price
+                            
+                            # 1. Exact match (MT4 reuses order ticket for position)
                             for o in orders:
                                 if not o.get('Ticket'):
                                     continue
                                 t = int(o['Ticket'])
                                 if t == _pending_ticket:
-                                    continue
-                                o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
-                                if sym_upper not in o_sym and o_sym not in sym_upper:
-                                    continue
-                                o_lots = float(o.get('Lots') or o.get('Volume') or 0)
-                                if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
-                                    continue
-                                new_ticket = t
-                                new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
-                                break
+                                    new_ticket = t
+                                    new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                    break
+                                    
+                            # 2. Fuzzy match fallback
+                            if new_ticket == 0:
+                                for o in orders:
+                                    if not o.get('Ticket'):
+                                        continue
+                                    t = int(o['Ticket'])
+                                    if t == _pending_ticket:
+                                        continue
+                                    o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                    if sym_upper not in o_sym and o_sym not in sym_upper:
+                                        continue
+                                    o_lots = float(o.get('Lots') or o.get('Volume') or 0)
+                                    if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
+                                        continue
+                                    new_ticket = t
+                                    new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                    break
 
                             if new_ticket == 0:
                                 for o in orders:
@@ -3520,29 +3533,41 @@ class MT5DirectAccount:
                             # Use a lock-guarded claimed-ticket set to atomically prevent
                             # multiple concurrent watchers from claiming the same position
                             # when a batch of limits all fill at the same time.
-                            new_ticket = 0
-                            new_price = price
                             with self._claimed_fill_lock:
+                                # 1. Exact match (MT5 Hedging/Netting often reuses ticket)
                                 for o in orders:
                                     if not o.get('Ticket'):
                                         continue
                                     t = int(o['Ticket'])
                                     if t == _pending_ticket:
-                                        continue
-                                    if t in self._claimed_fill_tickets:
-                                        continue  # Already claimed by another watcher
-                                    o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
-                                    if sym_upper not in o_sym and o_sym not in sym_upper:
-                                        continue
-                                    o_lots = float(o.get('Lots') or o.get('Volume') or 0)
-                                    if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
-                                        continue
-                                    # Atomically claim this ticket
-                                    new_ticket = t
-                                    new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
-                                    self._claimed_fill_tickets.add(t)
-                                    break
+                                        new_ticket = t
+                                        new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                        self._claimed_fill_tickets.add(t)
+                                        break
+                                
+                                # 2. Fuzzy match fallback
+                                if new_ticket == 0:
+                                    for o in orders:
+                                        if not o.get('Ticket'):
+                                            continue
+                                        t = int(o['Ticket'])
+                                        if t == _pending_ticket:
+                                            continue
+                                        if t in self._claimed_fill_tickets:
+                                            continue  # Already claimed by another watcher
+                                        o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                        if sym_upper not in o_sym and o_sym not in sym_upper:
+                                            continue
+                                        o_lots = float(o.get('Lots') or o.get('Volume') or 0)
+                                        if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
+                                            continue
+                                        # Atomically claim this ticket
+                                        new_ticket = t
+                                        new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                        self._claimed_fill_tickets.add(t)
+                                        break
 
+                                # 3. Safest broad fallback
                                 if new_ticket == 0:
                                     # Fallback: newest unclaimed position on this symbol that didn't exist before the batch
                                     for o in orders:

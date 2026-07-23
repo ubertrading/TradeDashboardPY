@@ -3813,6 +3813,7 @@ def _run_hedge_monitor_all():
                                         _prog["index"] = _prog.get("index", 0) + _heal_batch
                                         _prog["open_fill_received"] = True
                                         _prog.pop("open_dispatched", None)
+                                        _prog.pop("limit_placed_this_batch", None)
                                         _prog.pop("close_tp_set", None)
                                         _prog.pop("close_tp_set_ts", None)
                                         _prog.pop("close_tp_confirmed", None)
