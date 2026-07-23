@@ -491,9 +491,17 @@ class MtBridgeAccount:
         tickets = []
         pos_details = []
         _lbi = {}  # lots_by_instrument: symbol -> {"buy": x, "sell": y}
+        if positions and not getattr(self, '_bridge_pos_logged', False):
+            self._bridge_pos_logged = True
+            logger.warning("[%s] Bridge positions count: %d active positions", self.account_id, len(positions))
+
         for p in positions:
-            ticket = p.get("ticket", 0)
             side = p.get("side", "").lower()
+            # Filter out pending limit/stop orders (we only want active market positions)
+            if side not in ("buy", "sell", "0", "1", "op_buy", "op_sell", "position_type_buy", "position_type_sell"):
+                continue
+                
+            ticket = p.get("ticket", 0)
             symbol = p.get("symbol", "")
             lots = p.get("lots", 0)
             open_time_str = p.get("open_time", p.get("openTime", ""))
@@ -553,6 +561,32 @@ class MtBridgeAccount:
         acct["swap_by_instrument"] = _sbi
 
         acct["last_update"] = time.time()
+
+        # Sync imported session filled count with the broker-confirmed position count.
+        # This mirrors the same logic in the EA heartbeat route (trade_dashboard.py) which
+        # only runs for EA poll-mode accounts. Bridge accounts bypass that route, so we
+        # must do the sync here after every successful position push.
+        # Skip during cycling/closing — mid-cycle the broker briefly reports fewer positions.
+        ea_pos = len(pos_dict)
+        _needs_save = False
+        sessions_dict = dd.get("sessions", {})
+        for _sid, _sess in sessions_dict.items():
+            if not _sess.get("imported"):
+                continue
+            if aid not in _sess.get("sides", {}):
+                continue
+            sess_action = _sess.get("action", "")
+            if sess_action.startswith("cycle_") or sess_action in ("close", "close_limit"):
+                continue  # Don't sync during cycling or closing
+            old_filled = _sess.get("filled", {}).get(aid, 0)
+            if ea_pos != old_filled:
+                logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed)", aid, _sid[:8], old_filled, ea_pos)
+                _sess.setdefault("filled", {})[aid] = ea_pos
+                _needs_save = True
+        if _needs_save:
+            save_fn = dd.get("save_sessions")
+            if save_fn:
+                save_fn()
 
     def get_positions_for_import(self, pair_filter="", comment_filter=""):
         """Get open positions in import-compatible format."""
@@ -726,6 +760,125 @@ class MtBridgeAccount:
             self._report_result(session_id, "error", ticket, detail=detail)
             return (False, 0, 0)
 
+    def modify_position_tp(self, ticket, symbol, side, lots, tp, sl=None, price=None):
+        """Modify TakeProfit/StopLoss for an existing position."""
+        data = {
+            "ticket": ticket,
+            "symbol": symbol,
+            "side": side,
+            "lots": lots,
+            "sl": sl,
+            "tp": tp,
+            "price": price
+        }
+        result = _post(f"/api/accounts/{self.account_id}/modify", data, timeout=60)
+        if result and result.get("success"):
+            return True, ticket
+        return False, result.get("error", "Unknown error") if result else "Connection failed"
+
+    def modify_limit_price(self, ticket, symbol, side, lots, price):
+        """Modify the entry price of a pending limit order."""
+        return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
+
+    def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
+        """Send a limit/pending order."""
+        # Capture current positions to know what's new
+        _prev_positions = set(
+            int(p.get("Ticket", p.get("ticket", 0)))
+            for p in self._get_open_orders()
+        )
+
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "lots": lots,
+            "price": price,
+            "type": limit_type,
+            "sessionId": session_id,
+            "comment": comment
+        }
+        result = _post(f"/api/accounts/{self.account_id}/order", data, timeout=120)
+        if result and result.get("success"):
+            ticket = result.get("ticket", 0)
+            open_price = result.get("open_price", 0)
+            quote_price = result.get("quote_price", 0)
+            self._report_result(session_id, "limit_placed", ticket, fill_price=open_price, quote_price=quote_price)
+
+            # ── Background fill-watcher (Bridge Version) ─────────────────────
+            _watch_symbol = symbol
+            _watch_lots = float(lots)
+            
+            def _watch_limit_fill():
+                import time as _time
+                _timeout = 86400  # watch for up to 24h
+                _start = _time.time()
+                _poll_interval = 2.0
+                logger.info("[%s] LIMIT-WATCH: watching ticket=%d for fill (symbol=%s lots=%.2f)",
+                            self.account_id, ticket, _watch_symbol, _watch_lots)
+                
+                sym_upper = _watch_symbol.upper().replace(".", "")
+                while _time.time() - _start < _timeout:
+                    _time.sleep(_poll_interval)
+                    if not self._running:
+                        return
+                    try:
+                        orders = self._get_open_orders()
+                        new_ticket = 0
+                        new_price = price
+                        
+                        # Find new position matching symbol and lots
+                        for o in orders:
+                            t = int(o.get('Ticket', 0))
+                            if t == 0 or t in _prev_positions:
+                                continue
+                            o_sym = str(o.get('Symbol', '')).upper().replace(".", "")
+                            if sym_upper not in o_sym and o_sym not in sym_upper:
+                                continue
+                            
+                            # Match by lots (within 1% tolerance)
+                            o_lots = float(o.get('Lots', 0))
+                            if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
+                                continue
+                            
+                            new_ticket = t
+                            new_price = float(o.get('OpenPrice', price))
+                            break
+                            
+                        # Fallback: any new position on this symbol
+                        if new_ticket == 0:
+                            for o in orders:
+                                t = int(o.get('Ticket', 0))
+                                if t == 0 or t in _prev_positions:
+                                    continue
+                                o_sym = str(o.get('Symbol', '')).upper().replace(".", "")
+                                if sym_upper in o_sym or o_sym in sym_upper:
+                                    new_ticket = t
+                                    new_price = float(o.get('OpenPrice', price))
+                                    break
+                                    
+                        if new_ticket > 0:
+                            logger.info("[%s] LIMIT-WATCH: FILLED! pending=%d -> position=%d @ %.5f",
+                                        self.account_id, ticket, new_ticket, new_price)
+                            self._report_result(session_id, "filled", new_ticket,
+                                                fill_price=new_price, quote_price=new_price)
+                            return
+                            
+                    except Exception as _e:
+                        logger.debug("[%s] LIMIT-WATCH poll error: %s", self.account_id, _e)
+                logger.warning("[%s] LIMIT-WATCH: timed out watching ticket=%d", self.account_id, ticket)
+
+            import threading as _threading
+            _t = _threading.Thread(target=_watch_limit_fill, daemon=True,
+                                   name=f"BridgeLimitWatch-{self.account_id}-{ticket}")
+            _t.start()
+            # ─────────────────────────────────────────────────────────────────
+
+            return (True, ticket, open_price)
+        else:
+            detail = result.get("error", "Unknown error") if result else "Connection failed"
+            self._report_result(session_id, "error", 0, detail=detail)
+            return (False, 0, 0)
+
     def subscribe_symbol(self, symbol):
         """Ensure the symbol is watched (update ea_account_info with it)."""
         info = self.dd["ea_account_info"].get(self.account_id, {})
@@ -865,10 +1018,10 @@ class MtBridgeManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
-                    # Check spread gating â€“ bypass for rollback and cycle reopen
+                    # Check spread gating — bypass for rollback, cycle close, and cycle_limit_open
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result != "rollback" and result != "cycle_close" and not is_cycle_reopen:
+                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen:
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -895,7 +1048,7 @@ class MtBridgeManager:
                             session.setdefault("spread_rejects", {})[account_id] = session.get("spread_rejects", {}).get(account_id, 0) + 1
                             continue
 
-                    logger.info("[%s] PASSED all gates for %s â€” executing order", account_id, pair)
+                    logger.info("[%s] PASSED all gates for %s — executing order", account_id, pair)
 
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()
@@ -917,15 +1070,85 @@ class MtBridgeManager:
                     self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment)
                 elif result == "cycle_close":
                     self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment)
-                elif action == "close":
-                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment)
-                elif action == "open" or (action.startswith("cycle_") and result is True):
-                    # Normal open OR cycle reopen phase
+                elif result == "cycle_limit_close":
+                    limit_dist = session.get("cycle_limit_distance")
+                    limit_dist = 10 if limit_dist is None or limit_dist == "" else float(limit_dist)
+                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment,
+                                             is_limit=True, limit_dist=limit_dist, limit_batch=1, limit_days=0)
+                elif result == "cycle_limit_open":
+                    # Cycle-limit REOPEN: send batch_size passive limit orders to re-enter positions
                     trade_side = side_info.get("action", "buy")
-                    order_result = direct_acct.send_market_order(
-                        pair, trade_side, lot_size,
-                        session_id=session_id, comment=comment
-                    )
+                    limit_dist = session.get("cycle_limit_distance")
+                    limit_dist = 10 if limit_dist is None or limit_dist == "" else float(limit_dist)
+                    closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
+                    batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
+                    quote = direct_acct.get_quote_direct(pair)
+                    if not quote:
+                        logger.warning("[%s] cycle_limit_open: no quote for %s — clearing in-flight", account_id, pair)
+                        self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                    else:
+                        base_price = quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)
+                        is_jpy = "JPY" in pair.upper()
+                        pip_mult = 1000.0 if is_jpy else 100000.0
+                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_price = round(limit_price, 3 if is_jpy else 5)
+                        limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
+                        any_placed = False
+                        for i in range(batch_size):
+                            logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f (dist=%s pips, base=%.5f)",
+                                        account_id, i + 1, batch_size, limit_type, limit_price, limit_dist, base_price)
+                            order_result = direct_acct.send_limit_order(
+                                pair, trade_side, lot_size, limit_price, limit_type,
+                                session_id=session_id, comment=comment
+                            )
+                            if isinstance(order_result, tuple) and not order_result[0]:
+                                logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed", account_id, i + 1, batch_size)
+                            else:
+                                any_placed = True
+                        if not any_placed:
+                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight", account_id, batch_size)
+                            self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                        else:
+                            had_cycle = True
+                elif action == "close" or action.startswith("close_limit"):
+                    limit_dist = session.get("limit_distance")
+                    limit_dist = 100 if limit_dist is None or limit_dist == "" else float(limit_dist)
+                    limit_batch = session.get("limit_batch_size") or 1
+                    limit_days = session.get("limit_days") or 0
+                    
+                    target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
+                    my_side_num = side_info.get("side_number", 0)
+                    is_limit_side = action.startswith("close_limit") and ((target_side_num == 0) or (target_side_num == my_side_num))
+                    
+                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment, is_limit=is_limit_side, limit_dist=limit_dist, limit_batch=limit_batch, limit_days=limit_days)
+                elif action == "open" or (action.startswith("cycle_") and result is True) or action.startswith("open_limit"):
+                    # Normal open OR cycle reopen phase OR open_limit
+                    trade_side = side_info.get("action", "buy")
+                    
+                    target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
+                    my_side_num = side_info.get("side_number", 0)
+                    is_limit_side = action.startswith("open_limit") and ((target_side_num == 0) or (target_side_num == my_side_num))
+                    
+                    if is_limit_side:
+                        limit_dist = session.get("limit_distance")
+                        limit_dist = 100 if limit_dist is None or limit_dist == "" else float(limit_dist)
+                        quote = direct_acct.get_quote_direct(pair)
+                        base_price = (quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)) if quote else 0
+                        is_jpy = "JPY" in pair.upper()
+                        pip_mult = 1000.0 if is_jpy else 100000.0
+                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_price = round(limit_price, 3 if is_jpy else 5)
+                        limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
+                        order_result = direct_acct.send_limit_order(
+                            pair, trade_side, lot_size, limit_price, limit_type,
+                            session_id=session_id, comment=comment
+                        )
+                    else:
+                        order_result = direct_acct.send_market_order(
+                            pair, trade_side, lot_size,
+                            session_id=session_id, comment=comment
+                        )
+
                     if isinstance(order_result, tuple) and not order_result[0]:
                         logger.warning("[%s] Order failed (returned False) â€” clearing in-flight", account_id)
                         self.dd["in_flight_commands"].pop((session_id, account_id), None)
@@ -940,7 +1163,7 @@ class MtBridgeManager:
                 self.dd["in_flight_commands"].pop((session_id, account_id), None)
         return had_cycle
 
-    def _send_close_command(self, direct_acct, session, account_id, pair, lot_size, comment):
+    def _send_close_command(self, direct_acct, session, account_id, pair, lot_size, comment, is_limit=False, limit_dist=0, limit_batch=1, limit_days=0):
         """Send a close order for the oldest open position tracked in fills."""
         fills = session.get("fills", [])
         close_fills = session.get("close_fills", [])
@@ -1026,33 +1249,127 @@ class MtBridgeManager:
                             if o.get('Ticket') and int(o['Ticket']) == int(ticket):
                                 if o.get('Lots'):
                                     actual_lots = float(o['Lots'])
-                                elif o.get('Volume'):
-                                    actual_lots = float(o['Volume'])
+                                else:
+                                    actual_lots = float(o.get('Volume', lot_size))
                                 break
                     except Exception as e:
                         logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
                                      account_id, ticket, e)
 
-                    logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
-                                account_id, ticket, pair, original_side, actual_lots,
-                                idx + 1, len(acct_fills))
-                    direct_acct.close_position(
-                        ticket, pair, original_side, actual_lots,
-                        session_id=session.get("id", ""), comment=comment
-                    )
+                    if is_limit:
+                        # CYCLE-LIMIT: modify TakeProfit to passive limit price
+                        quote = direct_acct.get_quote_direct(pair)
+                        base_price = (quote.get("bid", 0) if original_side == "buy" else quote.get("ask", 0)) if quote else 0
+                        is_jpy = "JPY" in pair.upper()
+                        pip_mult = 1000.0 if is_jpy else 100000.0
+                        limit_price = base_price + (limit_dist / pip_mult) if original_side == "buy" else base_price - (limit_dist / pip_mult)
+                        limit_price = round(limit_price, 3 if is_jpy else 5)
+                        logger.info("[%s] CYCLE-LIMIT CLOSE: modifying TP ticket=%s pair=%s side=%s lots=%s TP=%.5f (fill #%d of %d)",
+                                    account_id, ticket, pair, original_side, actual_lots, limit_price,
+                                    idx + 1, len(acct_fills))
+                        ok, msg = direct_acct.modify_position_tp(ticket, pair, original_side, actual_lots, limit_price)
+                        
+                        if not ok and ("No changes" in msg or "no changes" in msg.lower()):
+                            logger.info("[%s] CYCLE-LIMIT TP already at %.5f - treating as success", account_id, limit_price)
+                            ok = True
+                            
+                        if not ok:
+                            logger.error("[%s] CYCLE-LIMIT CLOSE FAILED to modify TP: %s", account_id, msg)
+                            if "Ticket not found" in msg or "Invalid ticket" in msg:
+                                logger.info("[%s] CYCLE-LIMIT TP set failed because ticket %s is gone — advancing to open phase", account_id, ticket)
+                                with self.dd["lock"]:
+                                    prog = session.get("cycle_progress", {})
+                                    prog["phase"] = "open"
+                                    prog["cycle_close_ts"] = time.time()
+                                    prog.pop("close_tp_set", None)
+                                    prog.pop("close_tp_set_ts", None)
+                                    prog.pop("close_tp_confirmed", None)
+                                    prog.pop("open_dispatched", None)
+                                    prog.pop("open_fill_received", None)
+                                    prog["closed_ticket"] = ticket
+                                    # Add to close fills so idx advances
+                                    session.setdefault("close_fills", []).append({
+                                        "account": account_id,
+                                        "ticket": ticket,
+                                        "price": limit_price,
+                                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                        "ts_epoch": time.time(),
+                                        "external": True,
+                                    })
+                                    session["cycle_progress"] = prog
+                            else:
+                                # Clear close_tp_set so _should_issue_command retries on next poll
+                                with self.dd["lock"]:
+                                    prog = session.get("cycle_progress", {})
+                                    prog.pop("close_tp_set", None)
+                                    prog.pop("close_tp_set_ts", None)
+                                    prog.pop("close_tp_confirmed", None)
+                                    session["cycle_progress"] = prog
+                            
+                            # Clear in-flight lock so it doesn't block for 60s
+                            self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                            
+                            save_fn = self.dd.get("save_sessions")
+                            if save_fn:
+                                save_fn()
+                        else:
+                            logger.info("[%s] CYCLE-LIMIT CLOSE TP modified successfully — waiting for market to hit TP=%.5f", account_id, limit_price)
+                            # Mark as broker-confirmed so the stale guard does NOT re-fire
+                            with self.dd["lock"]:
+                                prog = session.get("cycle_progress", {})
+                                prog["close_tp_set"] = True
+                                prog["close_tp_set_ts"] = time.time()
+                                prog["close_tp_confirmed"] = True
+                                prog["close_tp_price"] = limit_price
+                                session["cycle_progress"] = prog
+                            self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                            save_fn = self.dd.get("save_sessions")
+                            if save_fn:
+                                save_fn()
+                        # We don't append to close_limit_fills because cycle tracking handles state
+                    else:
+                        logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
+                                    account_id, ticket, pair, original_side, actual_lots,
+                                    idx + 1, len(acct_fills))
+                        direct_acct.close_position(
+                            ticket, pair, original_side, actual_lots,
+                            session_id=session.get("id", ""), comment=comment
+                        )
                     return
                 else:
                     logger.warning("[%s] CYCLE: idx=%d >= acct_fills=%d â€” nothing to close",
                                    account_id, idx, len(acct_fills))
                     return
 
-        # Otherwise close oldest open fill
+        # Otherwise close oldest open fill (or limit batch)
+        # Filter for batch closing
+        eligible_fills = []
+        now_epoch = time.time()
         for fill in fills:
             if fill.get("account") != account_id:
                 continue
             ticket = fill.get("ticket")
             if ticket in closed_tickets:
                 continue
+            
+            # Age filter for limit orders
+            if is_limit and limit_days > 0:
+                ts_epoch = fill.get("ts_epoch", 0)
+                if ts_epoch:
+                    days_held = (now_epoch - ts_epoch) / (24 * 3600)
+                    if days_held < limit_days:
+                        continue
+                        
+            eligible_fills.append(fill)
+
+        batch_count = int(limit_batch) if is_limit else 1
+        processed_count = 0
+
+        for fill in eligible_fills:
+            if processed_count >= batch_count:
+                break
+
+            ticket = fill.get("ticket")
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
 
@@ -1077,19 +1394,16 @@ class MtBridgeManager:
 
             if not ticket_found:
                 # Safety: if broker returned zero open orders, don't auto-skip
-                if len(orders) <= 0:
-                    logger.warning("[%s] SKIP ABORTED: broker has 0 open orders â€” likely disconnected, "
-                                   "not marking ticket %s as closed", account_id, ticket)
-                    break
+                try:
+                    orders = direct_acct._get_open_orders()
+                    if len(orders) <= 0:
+                        logger.warning("[%s] SKIP ABORTED: broker has 0 open orders â€” likely disconnected, "
+                                       "not marking ticket %s as closed", account_id, ticket)
+                        break
+                except Exception:
+                    pass
 
                 # Ticket genuinely gone â€” mark as closed, but only ONE per call
-                order_tickets = sorted([o.get('Ticket', 0) for o in orders])
-                t_min = order_tickets[0] if order_tickets else '?'
-                t_max = order_tickets[-1] if order_tickets else '?'
-                logger.info("[%s] SKIP: ticket=%s not found in %d broker orders "
-                            "(ticket range %s..%s) â€” marking as closed",
-                            account_id, ticket, len(orders), t_min, t_max)
-                print(f"[AUTO-SKIP] {account_id}: ticket {ticket} not on broker, auto-marking closed")
                 session.setdefault("close_fills", []).append({
                     "ticket": ticket, "account": account_id,
                     "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1098,13 +1412,53 @@ class MtBridgeManager:
                 session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
                 break  # Only handle ONE auto-skip per call
 
-            logger.info("[%s] CLOSE: ticket=%s pair=%s side=%s lots=%s",
-                        account_id, ticket, pair, original_side, actual_lots)
-            direct_acct.close_position(
-                ticket, pair, original_side, actual_lots,
-                session_id=session.get("id", ""), comment=comment
-            )
-            break
+            if is_limit:
+                # Limit Mode: Modify Take Profit
+                quote = direct_acct.get_quote_direct(pair)
+                base_price = (quote.get("bid", 0) if original_side == "buy" else quote.get("ask", 0)) if quote else 0
+                is_jpy = "JPY" in pair.upper()
+                pip_mult = 1000.0 if is_jpy else 100000.0
+                limit_price = base_price + (limit_dist / pip_mult) if original_side == "buy" else base_price - (limit_dist / pip_mult)
+                limit_price = round(limit_price, 3 if is_jpy else 5)
+                
+                logger.info("[%s] LIMIT CLOSE: modifying TP for ticket=%s pair=%s side=%s lots=%s TP=%s",
+                            account_id, ticket, pair, original_side, actual_lots, limit_price)
+                
+                direct_acct.modify_position_tp(
+                    ticket, pair, original_side, actual_lots, limit_price
+                )
+                
+                # Mark as 'close_limit_placed' so we don't keep modifying it
+                session.setdefault("close_limit_fills", []).append({
+                    "account": account_id,
+                    "ticket": ticket,
+                    "tp": limit_price,
+                    "lots": actual_lots,
+                    "ts_epoch": time.time()
+                })
+                
+                # CYCLE-LIMIT: Mark TP as confirmed so watchdog can take over
+                if session.get("action", "").startswith("cycle_limit_"):
+                    with self.dd["lock"]:
+                        prog = session.get("cycle_progress", {})
+                        prog["close_tp_set"] = True
+                        prog["close_tp_set_ts"] = time.time()
+                        prog["close_tp_confirmed"] = True
+                        prog["close_tp_price"] = limit_price
+                        session["cycle_progress"] = prog
+                    self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                    save_fn = self.dd.get("save_sessions")
+                    if save_fn:
+                        save_fn()
+            else:
+                logger.info("[%s] CLOSE: ticket=%s pair=%s side=%s lots=%s",
+                            account_id, ticket, pair, original_side, actual_lots)
+                direct_acct.close_position(
+                    ticket, pair, original_side, actual_lots,
+                    session_id=session.get("id", ""), comment=comment
+                )
+
+            processed_count += 1
 
     def _load_config(self):
         """Load Direct accounts from config file and connect via bridge."""

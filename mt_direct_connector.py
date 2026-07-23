@@ -293,6 +293,7 @@ class MT4DirectAccount:
         self.dd = dashboard_data
         self.label = config.get("label", f"MT4-{account_id}")
         self.conn_type = "mt4_direct"
+        self.lot_divisor = config.get("lot_divisor", 1.0)
 
         self._client = None  # QuoteClient instance
         self._order_client = None  # OrderClient instance
@@ -911,7 +912,15 @@ class MT4DirectAccount:
             info = self.dd["ea_account_info"].get(self.account_id, {})
             # Get open orders from the client
             orders = self._get_open_orders()
-            tickets = [o['Ticket'] for o in orders]
+            # Filter to only include active market positions (exclude pending limit/stop orders)
+            active_types = ('buy', 'sell', '0', '1', 'op_buy', 'op_sell', 'position_type_buy', 'position_type_sell')
+            
+            raw_types = [str(o.get('Type', '')) for o in orders]
+            logger.warning("[%s] MT4 _push_positions raw_types: %s", self.account_id, raw_types)
+            
+            tickets = [o['Ticket'] for o in orders if str(o.get('Type', '')).lower() in active_types]
+            logger.warning("[%s] MT4 _push_positions filtered %d orders down to %d tickets", self.account_id, len(orders), len(tickets))
+            
             info["open_tickets"] = tickets
             info["positions"] = len(tickets)
             # Aggregate PnL, swap, and lots for Accounts tab display
@@ -995,7 +1004,7 @@ class MT4DirectAccount:
                             'Ticket': _normalize_ticket(getattr(o, 'Ticket', 0)),
                             'Symbol': str(getattr(o, 'Symbol', '')),
                             'Type': str(getattr(o, 'Type', '')),
-                            'Lots': float(getattr(o, 'Lots', 0)),
+                            'Lots': float(getattr(o, 'Lots', 0)) / self.lot_divisor,
                             'Comment': str(getattr(o, 'Comment', '')),
                             'OpenPrice': float(getattr(o, 'OpenPrice', 0)),
                             'OpenTime': str(getattr(o, 'OpenTime', '')),
@@ -1043,8 +1052,8 @@ class MT4DirectAccount:
                         self.account_id, len(positions), pair_filter, comment_filter)
             if positions:
                 sample = positions[0]
-                logger.info("[%s] Import sample pos: ticket=%s open_time=%r open_epoch=%s",
-                            self.account_id, sample.get('ticket'), sample.get('open_time'), sample.get('open_epoch'))
+                logger.info("[%s] Import sample pos: ticket=%s lots=%s side=%s open_time=%r open_epoch=%s",
+                            self.account_id, sample.get('ticket'), sample.get('lots'), sample.get('side'), sample.get('open_time'), sample.get('open_epoch'))
         except Exception as e:
             logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
         return positions
@@ -1121,7 +1130,7 @@ class MT4DirectAccount:
                         close_time_raw = getattr(o, 'CloseTime', None)
                         sym = str(getattr(o, 'Symbol', '') or '').upper().strip()
                         # Try every common attribute name for lot size on closed MT4 orders.
-                        lots = float(getattr(o, 'Lots', getattr(o, 'Volume', getattr(o, 'CloseVolume', getattr(o, 'OpenVolume', 0)))) or 0)
+                        lots = float(getattr(o, 'Lots', getattr(o, 'Volume', getattr(o, 'CloseVolume', getattr(o, 'OpenVolume', 0)))) or 0) / self.lot_divisor
                         
                         if lots == 0 and otype in ('buy', 'sell', '0', '1', 'op_buy', 'op_sell'):
                             try:
@@ -1368,6 +1377,161 @@ class MT4DirectAccount:
             self._report_result(session_id, "error", ticket, detail=str(e))
             return False
 
+    def modify_position_tp(self, ticket, symbol, side, lots, tp, sl=None, price=None):
+        """Modify the TakeProfit (and optionally StopLoss) of an open position.
+        Used by CLOSE-LIMIT mode to set a passive TP instead of a market close."""
+        if not self._connected or not self._order_client:
+            logger.error("[%s] MT4 modify_position_tp blocked: not connected", self.account_id)
+            return False, "Not connected"
+        try:
+            from TradingAPI.MT4Server import Op
+            import System
+            ticket = int(ticket)
+            op = Op.Buy if side.lower() == "buy" else Op.Sell
+            sl_val = float(sl) if sl is not None else 0.0
+            tp_val = float(tp) if tp is not None else 0.0
+            target_price = float(price) if price is not None else 0.0
+            # For MT4 OrderModify: price is the open price of the position (0 = use current)
+            result = self._order_client.OrderModify(
+                ticket, symbol, op, lots, target_price,
+                sl_val, tp_val,
+                System.DateTime.MaxValue
+            )
+            if result:
+                logger.info("[%s] MT4 position modified: ticket=%d price=%.5f tp=%.5f", self.account_id, ticket, target_price, tp_val)
+                return True, ticket
+            else:
+                logger.error("[%s] MT4 OrderModify returned False for ticket=%d", self.account_id, ticket)
+                return False, "OrderModify returned False"
+        except Exception as e:
+            logger.error("[%s] MT4 modify_position_tp error: %s", self.account_id, e)
+            return False, str(e)
+
+    def modify_limit_price(self, ticket, symbol, side, lots, price):
+        """Modify the entry price of a pending limit order."""
+        return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
+
+    def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
+        """Send a pending limit order (BuyLimit/SellLimit).
+        Used by OPEN-LIMIT mode."""
+        if not self._connected or not self._order_client:
+            logger.error("[%s] MT4 send_limit_order blocked: not connected", self.account_id)
+            return False, 0, 0
+        try:
+            from TradingAPI.MT4Server import Op
+            import System
+            if limit_type.lower() in ("buylimit", "buy_limit"):
+                op = Op.BuyLimit
+            else:
+                op = Op.SellLimit
+            slippage = int(self.config.get("slippage", 3))
+            magic = int(self.config.get("magic_number", 777888))
+            logger.info("[%s] MT4 Sending %s %s %.2f lots @ %.5f (limit)", self.account_id, limit_type, symbol, lots, price)
+            order = self._order_client.OrderSend(
+                symbol, op, lots, float(price), slippage,
+                0.0, 0.0, comment, magic,
+                System.DateTime.MinValue, None
+            )
+            if order and order.Ticket > 0:
+                ticket = _normalize_ticket(order.Ticket)
+                logger.info("[%s] MT4 LIMIT PLACED: ticket=%d %s %s %.2f @ %.5f", self.account_id, ticket, limit_type, symbol, lots, price)
+                self._report_result(session_id, "limit_placed", ticket, fill_price=float(price), quote_price=float(price))
+
+                # ── Background fill-watcher (MT4 Direct Version) ─────────────────
+                _pending_ticket = ticket
+                _watch_symbol = symbol
+                _watch_lots = float(lots)
+                _watch_side = side.lower()
+
+                def _watch_limit_fill():
+                    import time as _time
+                    _timeout = 86400  # watch for up to 24h
+                    _start = _time.time()
+                    _poll_interval = 2.0
+                    logger.info("[%s] LIMIT-WATCH: watching ticket=%d for fill (symbol=%s side=%s lots=%.2f)",
+                                self.account_id, _pending_ticket, _watch_symbol, _watch_side, _watch_lots)
+                    _prev_positions = set()
+                    while _time.time() - _start < _timeout:
+                        _time.sleep(_poll_interval)
+                        if not self._connected or not self._client:
+                            return
+                        try:
+                            with _clr_lock:
+                                orders = self._get_open_orders()
+                            still_pending = any(
+                                o.get('Ticket') and int(o['Ticket']) == _pending_ticket
+                                for o in orders
+                            )
+                            if still_pending:
+                                _prev_positions = set(
+                                    int(o['Ticket']) for o in orders
+                                    if o.get('Ticket') and o.get('Type') in ('Buy', 'Sell', 0, 1)
+                                )
+                                continue
+
+                            # Pending order gone — find the new filled position
+                            sym_upper = _watch_symbol.upper().replace(".", "")
+                            new_ticket = 0
+                            new_price = price
+                            for o in orders:
+                                if not o.get('Ticket'):
+                                    continue
+                                t = int(o['Ticket'])
+                                if t == _pending_ticket:
+                                    continue
+                                o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                if sym_upper not in o_sym and o_sym not in sym_upper:
+                                    continue
+                                o_lots = float(o.get('Lots') or o.get('Volume') or 0)
+                                if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
+                                    continue
+                                new_ticket = t
+                                new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                break
+
+                            if new_ticket == 0:
+                                for o in orders:
+                                    if not o.get('Ticket'):
+                                        continue
+                                    o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                    if sym_upper in o_sym or o_sym in sym_upper:
+                                        t = int(o['Ticket'])
+                                        if t != _pending_ticket and t not in _prev_positions:
+                                            new_ticket = t
+                                            new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                            break
+
+                            if new_ticket > 0:
+                                logger.info("[%s] LIMIT-WATCH: FILLED! pending=%d -> position=%d @ %.5f",
+                                            self.account_id, _pending_ticket, new_ticket, new_price)
+                                self._report_result(session_id, "filled", new_ticket,
+                                                    fill_price=new_price, quote_price=new_price)
+                            else:
+                                logger.warning("[%s] LIMIT-WATCH: pending=%d gone but no new position found",
+                                               self.account_id, _pending_ticket)
+                                self._report_result(session_id, "filled", _pending_ticket,
+                                                    fill_price=price, quote_price=price)
+                            return
+                        except Exception as _e:
+                            logger.debug("[%s] LIMIT-WATCH poll error: %s", self.account_id, _e)
+                            continue
+
+                import threading as _threading
+                _t = _threading.Thread(target=_watch_limit_fill, daemon=True,
+                                       name=f"LimitWatch-{self.account_id}-{ticket}")
+                _t.start()
+                # ─────────────────────────────────────────────────────────────────
+
+                return True, ticket, float(price)
+            else:
+                logger.error("[%s] MT4 limit OrderSend returned no ticket", self.account_id)
+                self._report_result(session_id, "error", 0, detail="MT4 limit OrderSend returned no ticket")
+                return False, 0, 0
+        except Exception as e:
+            logger.error("[%s] MT4 send_limit_order error: %s", self.account_id, e)
+            self._report_result(session_id, "error", 0, detail=str(e))
+            return False, 0, 0
+
     def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0):
         """Report trade result back to dashboard (same as EA's trade_result)."""
         try:
@@ -1531,6 +1695,7 @@ class MT5DirectAccount:
         self.dd = dashboard_data
         self.label = config.get("label", f"MT5-{account_id}")
         self.conn_type = "mt5_direct"
+        self.lot_divisor = config.get("lot_divisor", 1.0)
 
         self._client = None  # MT5API instance
         self._connected = False
@@ -1540,6 +1705,11 @@ class MT5DirectAccount:
         self._last_error = None
         self._events_subscribed = False
         self._order_update_pending = threading.Event()  # Flag for deferred order refresh
+
+        # Batch fill tracking: prevents multiple concurrent fill-watchers from
+        # claiming the same new position ticket when a batch of limits fills at once.
+        self._claimed_fill_tickets = set()
+        self._claimed_fill_lock = threading.Lock()
 
         # Auto-reconnect state
         self._reconnect_delay = RECONNECT_BASE_DELAY
@@ -1982,6 +2152,25 @@ class MT5DirectAccount:
                             info[prop] = int(val) if prop == "leverage" else float(val)
                     except Exception:
                         pass
+
+                # Detect netting mode via Account.TradeMode.
+                # MT5 TradeMode: 0=Demo hedge, 1=Contest/Netting, 2=Real hedge, etc.
+                # The canonical netting value is ACCOUNT_TRADE_MODE_NETTING = 1,
+                # but some brokers use 0 for netting on demo — so we also check
+                # the string representation for 'netting'.
+                try:
+                    trade_mode = getattr(acct, 'TradeMode', None)
+                    if trade_mode is not None:
+                        tm_str = str(trade_mode).lower()
+                        is_netting = ('netting' in tm_str) or (str(trade_mode) == '1')
+                        prev_netting = info.get('netting_mode', None)
+                        info['netting_mode'] = is_netting
+                        if prev_netting != is_netting:
+                            logger.info("[%s] MT5 netting_mode=%s (TradeMode=%s)",
+                                        self.account_id, is_netting, trade_mode)
+                except Exception:
+                    pass
+
         except Exception:
             pass
 
@@ -2123,8 +2312,17 @@ class MT5DirectAccount:
             return
         try:
             info = self.dd["ea_account_info"].get(self.account_id, {})
+            # Get open orders from the client
             orders = self._get_open_orders()
-            tickets = [o['Ticket'] for o in orders]
+            # Filter to only include active market positions (exclude pending limit/stop orders)
+            active_types = ('buy', 'sell', '0', '1', 'op_buy', 'op_sell', 'position_type_buy', 'position_type_sell')
+            
+            raw_types = [str(o.get('Type', '')) for o in orders]
+            logger.warning("[%s] MT5 _push_positions raw_types: %s", self.account_id, raw_types)
+            
+            tickets = [o['Ticket'] for o in orders if str(o.get('Type', '')).lower() in active_types]
+            logger.warning("[%s] MT5 _push_positions filtered %d orders down to %d tickets", self.account_id, len(orders), len(tickets))
+            
             # Zero-drop guard: if we previously had N positions and now see 0,
             # this is almost certainly a transient API error (connection hiccup,
             # mid-reconnect race, order-update callback firing too early).
@@ -2249,7 +2447,7 @@ class MT5DirectAccount:
                                     'Ticket': _normalize_ticket(getattr(o, 'Ticket', getattr(o, 'Id', 0))),
                                     'Symbol': str(getattr(o, 'Symbol', '')),
                                     'Type': str(getattr(o, 'Type', getattr(o, 'PositionType', getattr(o, 'OrderType', '')))),
-                                    'Lots': float(getattr(o, 'Lots', getattr(o, 'Volume', 0))),
+                                    'Lots': float(getattr(o, 'Lots', getattr(o, 'Volume', 0))) / self.lot_divisor,
                                     'Comment': str(getattr(o, 'Comment', '')),
                                     'OpenPrice': float(getattr(o, 'OpenPrice', getattr(o, 'PriceOpen', 0))),
                                     'OpenTime': str(getattr(o, 'OpenTime', getattr(o, 'TimeCreate', ''))),
@@ -2263,6 +2461,47 @@ class MT5DirectAccount:
             return []
         except Exception as e:
             logger.error("[%s] MT5 Get open orders error: %s", self.account_id, e)
+            return []
+
+    def _get_pending_orders(self):
+        """Get list of pending orders (limits/stops) from MT5API.
+        In MT5, pending orders are separate from open positions."""
+        if not self._client:
+            return []
+        try:
+            # 'Orders' typically contains the pending orders in MT5API
+            for attr in ('Orders', 'GetOpenedOrders'):
+                if not hasattr(self._client, attr):
+                    continue
+                try:
+                    with _clr_lock:
+                        raw = getattr(self._client, attr)
+                        raw_list = None
+                        try:
+                            raw_list = list(raw())
+                        except Exception:
+                            try:
+                                raw_list = list(raw)
+                            except Exception:
+                                pass
+                        if raw_list is not None:
+                            result = []
+                            for o in raw_list:
+                                d = {}
+                                for p in dir(o):
+                                    if not p.startswith('_'):
+                                        try:
+                                            d[p] = getattr(o, p)
+                                        except Exception:
+                                            pass
+                                if d.get('Ticket'):
+                                    result.append(d)
+                            return result
+                except Exception as e:
+                    logger.debug("[%s] MT5 _get_pending_orders attr %s failed: %s", self.account_id, attr, e)
+            return []
+        except Exception as e:
+            logger.error("[%s] MT5 Get pending orders error: %s", self.account_id, e)
             return []
 
     def get_positions_for_import(self, pair_filter="", comment_filter=""):
@@ -2301,8 +2540,8 @@ class MT5DirectAccount:
                         self.account_id, len(positions), pair_filter, comment_filter)
             if positions:
                 sample = positions[0]
-                logger.info("[%s] MT5 Import sample pos: ticket=%s open_time=%r open_epoch=%s",
-                            self.account_id, sample.get('ticket'), sample.get('open_time'), sample.get('open_epoch'))
+                logger.info("[%s] MT5 Import sample pos: ticket=%s lots=%s side=%s open_time=%r open_epoch=%s",
+                            self.account_id, sample.get('ticket'), sample.get('lots'), sample.get('side'), sample.get('open_time'), sample.get('open_epoch'))
         except Exception as e:
             logger.error("[%s] MT5 get_positions_for_import error: %s", self.account_id, e)
         return positions
@@ -2430,7 +2669,7 @@ class MT5DirectAccount:
                         close_time_raw = getattr(o, 'CloseTime', getattr(o, 'TimeCreate', None))
                         sym = str(getattr(o, 'Symbol', '') or '').upper().strip()
                         # MT5 uses Volume (in lots); fall back to Lots attribute
-                        lots = float(getattr(o, 'Volume', None) or getattr(o, 'Lots', 0) or 0)
+                        lots = float(getattr(o, 'Volume', None) or getattr(o, 'Lots', 0) or 0) / self.lot_divisor
 
                     # Filter by close time within exact [from_ts, to_ts] range
                     if close_time_raw:
@@ -3136,6 +3375,209 @@ class MT5DirectAccount:
             self._report_result(session_id, "error", ticket, detail=err_str)
             return False
 
+    def modify_position_tp(self, ticket, symbol, side, lots, tp, sl=None, price=None):
+        """Modify the TakeProfit (and optionally StopLoss) of an open position.
+        Used by CLOSE-LIMIT mode to set a passive TP instead of a market close."""
+        if not self._connected or not self._client:
+            logger.error("[%s] MT5 modify_position_tp blocked: not connected", self.account_id)
+            return False, "Not connected"
+        try:
+            from mtapi.mt5 import OrderType, Expiration
+            import System
+            ticket = int(ticket)
+            order_type = OrderType.Buy if side.lower() == "buy" else OrderType.Sell
+            sl_val = float(sl) if sl is not None else 0.0
+            tp_val = float(tp) if tp is not None else 0.0
+            
+            # Get current price for the modify call if a new price wasn't specified
+            if price is not None:
+                target_price = float(price)
+            else:
+                quote = self._client.GetQuote(symbol)
+                target_price = float(quote.Bid if order_type == OrderType.Buy else quote.Ask) if quote else 0.0
+                
+            self._client.OrderModify(
+                System.Int64(ticket), symbol, float(lots), target_price, order_type,
+                sl_val, tp_val, System.Int64(0), 0.0, Expiration(), ""
+            )
+            logger.info("[%s] MT5 position modified: ticket=%d price=%.5f tp=%.5f", self.account_id, ticket, target_price, tp_val)
+            return True, ticket
+        except Exception as e:
+            logger.error("[%s] MT5 modify_position_tp error: %s", self.account_id, e)
+            return False, str(e)
+
+    def modify_limit_price(self, ticket, symbol, side, lots, price):
+        """Modify the entry price of a pending limit order."""
+        return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
+
+    def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
+        """Send a pending limit order (BuyLimit/SellLimit).
+        Used by OPEN-LIMIT mode."""
+        if not self._connected or not self._client:
+            logger.error("[%s] MT5 send_limit_order blocked: not connected", self.account_id)
+            return False, 0, 0
+        try:
+            from mtapi.mt5 import OrderType, FillPolicy
+            import System
+            if limit_type.lower() in ("buylimit", "buy_limit"):
+                order_type = OrderType.BuyLimit
+            else:
+                order_type = OrderType.SellLimit
+            magic = int(self.config.get("magic_number", 777888))
+            logger.info("[%s] MT5 Sending %s %s %.2f lots @ %.5f (limit)", self.account_id, limit_type, symbol, lots, price)
+            policies = [FillPolicy.ImmediateOrCancel, FillPolicy.FillOrKill, FillPolicy.FlashFill, FillPolicy.Any]
+
+            # Snapshot all current open/pending tickets BEFORE this limit is placed.
+            # The watcher uses this to identify which tickets are genuinely new, even if
+            # the limit order fills instantly before the first watcher poll.
+            try:
+                with _clr_lock:
+                    _snap = self._get_open_orders()
+                _pre_batch_tickets = set(int(o['Ticket']) for o in _snap if o.get('Ticket'))
+            except Exception:
+                _pre_batch_tickets = set()
+
+            order = None
+            last_ex = None
+            for fp in policies:
+                try:
+                    order = self._client.OrderSend(
+                        symbol, float(lots), float(price), order_type,
+                        0.0, 0.0, System.Int64(1000), comment, System.Int64(magic), fp
+                    )
+                    break
+                except Exception as ex:
+                    last_ex = ex
+                    continue
+            if order and order.Ticket > 0:
+                ticket = _normalize_ticket(order.Ticket)
+                logger.info("[%s] MT5 LIMIT PLACED: ticket=%d %s %s %.2f @ %.5f", self.account_id, ticket, limit_type, symbol, lots, price)
+                self._report_result(session_id, "limit_placed", ticket, fill_price=float(price), quote_price=float(price))
+
+                # ── Background fill-watcher ──────────────────────────────────────
+                # MT5 executes the pending order asynchronously when market hits it.
+                # Poll every 2s for the pending order to disappear, then report "filled"
+                # with the new position ticket. This is the ONLY reliable detection path
+                # for cycle_limit fills — broker strips comments so auto-heal can't match.
+                _pending_ticket = ticket
+                _watch_symbol = symbol
+                _watch_lots = float(lots)
+                _watch_side = side.lower()
+
+                def _watch_limit_fill():
+                    import time as _time
+                    _timeout = 86400  # watch for up to 24h
+                    _start = _time.time()
+                    _poll_interval = 2.0
+                    logger.info("[%s] LIMIT-WATCH: watching ticket=%d for fill (symbol=%s side=%s lots=%.2f) pre_snap=%d tickets",
+                                self.account_id, _pending_ticket, _watch_symbol, _watch_side, _watch_lots, len(_pre_batch_tickets))
+                    _prev_positions = set()
+                    while _time.time() - _start < _timeout:
+                        _time.sleep(_poll_interval)
+                        if not self._connected or not self._client:
+                            logger.warning("[%s] LIMIT-WATCH: disconnected — stopping watcher for ticket=%d",
+                                           self.account_id, _pending_ticket)
+                            return
+                        try:
+                            with _clr_lock:
+                                orders = self._get_open_orders()
+                                pending_orders = self._get_pending_orders()
+                            # Check if pending order is still there (in the pending orders list)
+                            still_pending = any(
+                                o.get('Ticket') and int(o['Ticket']) == _pending_ticket
+                                for o in pending_orders
+                            )
+                            if still_pending:
+                                # Still waiting — continue polling
+                                _prev_positions = set(
+                                    int(o['Ticket']) for o in orders
+                                    if o.get('Ticket') and o.get('Type') in (None, 'Buy', 'Sell', 0, 1)
+                                )
+                                continue
+
+                            # Pending order gone — find the new filled position
+                            logger.info("[%s] LIMIT-WATCH: pending ticket=%d gone — searching for filled position",
+                                        self.account_id, _pending_ticket)
+                            # Get current positions and find new ones matching symbol/lots/side
+                            sym_upper = _watch_symbol.upper().replace(".", "")
+                            new_ticket = 0
+                            new_price = price
+
+                            # Use a lock-guarded claimed-ticket set to atomically prevent
+                            # multiple concurrent watchers from claiming the same position
+                            # when a batch of limits all fill at the same time.
+                            new_ticket = 0
+                            new_price = price
+                            with self._claimed_fill_lock:
+                                for o in orders:
+                                    if not o.get('Ticket'):
+                                        continue
+                                    t = int(o['Ticket'])
+                                    if t == _pending_ticket:
+                                        continue
+                                    if t in self._claimed_fill_tickets:
+                                        continue  # Already claimed by another watcher
+                                    o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                    if sym_upper not in o_sym and o_sym not in sym_upper:
+                                        continue
+                                    o_lots = float(o.get('Lots') or o.get('Volume') or 0)
+                                    if abs(o_lots - _watch_lots) > _watch_lots * 0.01 + 0.001:
+                                        continue
+                                    # Atomically claim this ticket
+                                    new_ticket = t
+                                    new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                    self._claimed_fill_tickets.add(t)
+                                    break
+
+                                if new_ticket == 0:
+                                    # Fallback: newest unclaimed position on this symbol that didn't exist before the batch
+                                    for o in orders:
+                                        if not o.get('Ticket'):
+                                            continue
+                                        o_sym = str(o.get('Symbol', '') or o.get('symbol', '')).upper().replace(".", "")
+                                        if sym_upper in o_sym or o_sym in sym_upper:
+                                            t = int(o['Ticket'])
+                                            if t != _pending_ticket and t not in _pre_batch_tickets and t not in self._claimed_fill_tickets:
+                                                new_ticket = t
+                                                new_price = float(o.get('OpenPrice') or o.get('PriceOpen') or price)
+                                                self._claimed_fill_tickets.add(t)
+                                                break
+
+                            if new_ticket > 0:
+                                logger.info("[%s] LIMIT-WATCH: FILLED! pending=%d -> position=%d @ %.5f",
+                                            self.account_id, _pending_ticket, new_ticket, new_price)
+                                self._report_result(session_id, "filled", new_ticket,
+                                                    fill_price=new_price, quote_price=new_price)
+                            else:
+                                # Order filled but couldn't find unclaimed position — report with original ticket
+                                logger.warning("[%s] LIMIT-WATCH: pending=%d gone but no unclaimed position found — reporting fill with original ticket",
+                                               self.account_id, _pending_ticket)
+                                self._report_result(session_id, "filled", _pending_ticket,
+                                                    fill_price=price, quote_price=price)
+                            return  # Done watching
+                        except Exception as _e:
+                            logger.debug("[%s] LIMIT-WATCH poll error: %s", self.account_id, _e)
+                            continue
+                    logger.warning("[%s] LIMIT-WATCH: timed out watching ticket=%d", self.account_id, _pending_ticket)
+
+                import threading as _threading
+                _t = _threading.Thread(target=_watch_limit_fill, daemon=True,
+                                       name=f"LimitWatch-{self.account_id}-{ticket}")
+                _t.start()
+                # ─────────────────────────────────────────────────────────────────
+
+                return True, ticket, float(price)
+            else:
+                err = str(last_ex) if last_ex else "OrderSend returned no ticket"
+                logger.error("[%s] MT5 limit OrderSend failed: %s", self.account_id, err)
+                self._report_result(session_id, "error", 0, detail=err)
+                return False, 0, 0
+        except Exception as e:
+            logger.error("[%s] MT5 send_limit_order error: %s", self.account_id, e)
+            self._report_result(session_id, "error", 0, detail=str(e))
+            return False, 0, 0
+
+
     def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0):
         """Report trade result back to dashboard."""
         try:
@@ -3486,6 +3928,12 @@ class MTDirectManager:
         pending_commands = []  # list of (direct_acct, session, session_id, account_id, pair, lot_size, comment, result, side_info)
 
         with self.dd["lock"]:
+            # Track sessions that already dispatched a close this cycle to enforce
+            # sequential hedge-pair closing: once one side closes, the other must
+            # wait for the next loop iteration (by which time session["closed"] will
+            # reflect the first close and _should_issue_command will correctly block it).
+            _sessions_with_close_dispatched = set()
+
             for session_id, session in self.dd["sessions"].items():
                 if session.get("status") not in ("active", "partial_close"):
                     continue
@@ -3551,11 +3999,29 @@ class MTDirectManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
+                    action = session.get("action", "open")
+
+                    # ── Close sequencing guard ────────────────────────────────────────
+                    # _should_issue_command uses session["closed"] to gate cross-account
+                    # sequencing. But session["closed"] is only incremented AFTER the
+                    # broker confirms the close (via _report_result). In Phase 1 we
+                    # evaluate ALL accounts before any broker call is made, so BOTH sides
+                    # can pass the gate simultaneously (both see closed==0, other_closed==0).
+                    # Solution: once we queue a close for any account in this session,
+                    # skip all remaining accounts in this session for this cycle so that
+                    # on the next loop the first close will be in-flight and the gate will
+                    # correctly block the second side.
+                    if (action == "close" or action.startswith("close_limit")) and result not in ("rollback",):
+                        if session_id in _sessions_with_close_dispatched:
+                            logger.info("[%s] CLOSE-SEQ: skipping — another account in session already queued a close this cycle", account_id)
+                            continue
+                    # ─────────────────────────────────────────────────────────────────
+
                     # Check spread gating — but bypass for rollback (safety rebalancing must execute)
                     # and bypass for cycle reopen (once closed, must reopen immediately)
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result != "rollback" and result != "cycle_close" and not is_cycle_reopen:
+                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen:
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -3601,7 +4067,10 @@ class MTDirectManager:
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()
 
-                    action = session.get("action", "open")
+                    # Track that this session dispatched a close this cycle so the
+                    # close-sequencing guard above can block the other side of the hedge.
+                    if action == "close" or action.startswith("close_limit"):
+                        _sessions_with_close_dispatched.add(session_id)
 
                     # Queue the command for execution outside the lock
                     pending_commands.append((
@@ -3622,31 +4091,84 @@ class MTDirectManager:
                     # synchronously, which already transitions phase→open and clears open_dispatched.
                     # If we return had_cycle=True the outer loop re-enters immediately and fires
                     # a SECOND open for the same step before the first one is even dispatched.
-                elif action == "close":
-                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment)
-                elif action == "open" or (action.startswith("cycle_") and result is True):
-                    # Normal open OR cycle reopen phase
+                elif result == "cycle_limit_close":
+                    logger.info("[%s] ENTERED elif cycle_limit_close block! action=%s", account_id, action)
+                    limit_dist = session.get("cycle_limit_distance") or 10
+                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment,
+                                             is_limit=True, limit_dist=limit_dist, limit_batch=1, limit_days=0)
+                elif action == "close" or action.startswith("close_limit"):
+                    limit_dist = session.get("limit_distance") or 100
+                    limit_batch = session.get("limit_batch_size") or 1
+                    limit_days = session.get("limit_days") or 0
+                    self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment,
+                                             is_limit=(action == "close_limit"),
+                                             limit_dist=limit_dist, limit_batch=limit_batch, limit_days=limit_days)
+                elif action == "open" or (action.startswith("cycle_") and result is True) or action == "open_limit" or result == "cycle_limit_open":
+                    # Normal open OR cycle reopen phase OR open_limit OR cycle_limit open
                     trade_side = side_info.get("action", "buy")
-                    order_result = direct_acct.send_market_order(
-                        pair, trade_side, lot_size,
-                        session_id=session_id, comment=comment
-                    )
-                    # send_market_order returns (success, ticket, price) or raises
-                    if isinstance(order_result, tuple) and not order_result[0]:
-                        logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
-                        self.dd["in_flight_commands"].pop((session_id, account_id), None)
-                    elif action.startswith("cycle_"):
-                        had_cycle = True
+                    if result == "cycle_limit_open":
+                        # Place batch_size limit orders for cycle reopen
+                        limit_dist = session.get("cycle_limit_distance") or 10
+                        quote = direct_acct.get_quote_direct(pair)
+                        base_price = (quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)) if quote else 0
+                        pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
+                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
+                        closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
+                        batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
+                        any_placed = False
+                        for i in range(batch_size):
+                            logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
+                                        account_id, i + 1, batch_size, limit_type, limit_price)
+                            order_result = direct_acct.send_limit_order(
+                                pair, trade_side, lot_size, limit_price, limit_type,
+                                session_id=session_id, comment=comment
+                            )
+                            if isinstance(order_result, tuple) and not order_result[0]:
+                                logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed",
+                                               account_id, i + 1, batch_size)
+                            else:
+                                any_placed = True
+                        if not any_placed:
+                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight", account_id, batch_size)
+                            self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                        else:
+                            had_cycle = True
+                    elif action == "open_limit":
+                        limit_dist = session.get("limit_distance") or 100
+                        quote = direct_acct.get_quote_direct(pair)
+                        base_price = (quote.get("ask", 0) if trade_side == "buy" else quote.get("bid", 0)) if quote else 0
+                        pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
+                        limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                        limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
+                        order_result = direct_acct.send_limit_order(
+                            pair, trade_side, lot_size, limit_price, limit_type,
+                            session_id=session_id, comment=comment
+                        )
+                        if isinstance(order_result, tuple) and not order_result[0]:
+                            logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
+                            self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                    else:
+                        order_result = direct_acct.send_market_order(
+                            pair, trade_side, lot_size,
+                            session_id=session_id, comment=comment
+                        )
+                        # send_market_order returns (success, ticket, price) or raises
+                        if isinstance(order_result, tuple) and not order_result[0]:
+                            logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
+                            self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                        elif action.startswith("cycle_"):
+                            had_cycle = True
                 else:
                     logger.warning("[%s] Unknown action=%s result=%s — skipping",
-                                   account_id, action, result)
+                                   account_id, action, repr(result))
             except Exception as e:
                 logger.error("[%s] Command execution error: %s", account_id, e)
                 # Clear in-flight so the command can be retried on next loop
                 self.dd["in_flight_commands"].pop((session_id, account_id), None)
         return had_cycle
 
-    def _send_close_command(self, direct_acct, session, account_id, pair, lot_size, comment):
+    def _send_close_command(self, direct_acct, session, account_id, pair, lot_size, comment, is_limit=False, limit_dist=0, limit_batch=1, limit_days=0):
         """Send a close order for the oldest open position tracked in fills."""
         fills = session.get("fills", [])
         close_fills = session.get("close_fills", [])
@@ -3724,52 +4246,171 @@ class MTDirectManager:
                     return f.get("ts_epoch", 0) or 0
                 acct_fills.sort(key=_fill_sort_key)
                 if idx < len(acct_fills):
-                    fill = acct_fills[idx]
-                    ticket = fill.get("ticket")
                     side_info = session.get("sides", {}).get(account_id, {})
                     original_side = side_info.get("action", "buy")
+                    batch_size = int(session.get("cycle_limit_batch_size", 1))
 
-                    # Look up actual position volume from broker
-                    actual_lots = lot_size
-                    try:
-                        orders = direct_acct._get_open_orders()
-                        for o in orders:
-                            if o.get('Ticket') and int(o['Ticket']) == int(ticket):
-                                if o.get('Lots'):
-                                    actual_lots = float(o['Lots'])
-                                elif o.get('Volume'):
-                                    actual_lots = float(o['Volume'])
+                    if is_limit:
+                        # CYCLE-LIMIT: modify TakeProfit to passive limit price for all batch tickets
+                        quote = direct_acct.get_quote_direct(pair)
+                        base_price = (quote.get("bid", 0) if original_side == "buy" else quote.get("ask", 0)) if quote else 0
+                        pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
+                        limit_price = base_price + (limit_dist / pip_mult) if original_side == "buy" else base_price - (limit_dist / pip_mult)
+
+                        any_tp_ok = False
+                        all_gone = True  # True if every ticket in batch is gone (already closed)
+                        for i in range(batch_size):
+                            if idx + i >= len(acct_fills):
                                 break
-                    except Exception as e:
-                        logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
-                                     account_id, ticket, e)
+                            fill = acct_fills[idx + i]
+                            ticket = fill.get("ticket")
 
-                    logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
-                                account_id, ticket, pair, original_side, actual_lots,
-                                idx + 1, len(acct_fills))
-                    direct_acct.close_position(
-                        ticket, pair, original_side, actual_lots,
-                        session_id=session.get("id", ""), comment=comment
-                    )
+                            # Look up actual position volume from broker
+                            actual_lots = lot_size
+                            try:
+                                orders = direct_acct._get_open_orders()
+                                for o in orders:
+                                    if o.get('Ticket') and int(o['Ticket']) == int(ticket):
+                                        if o.get('Lots'):
+                                            actual_lots = float(o['Lots'])
+                                        elif o.get('Volume'):
+                                            actual_lots = float(o['Volume'])
+                                        break
+                            except Exception as e:
+                                logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
+                                             account_id, ticket, e)
+
+                            logger.info("[%s] CYCLE-LIMIT CLOSE: modifying TP ticket=%s pair=%s side=%s lots=%s TP=%.5f (batch item %d, fill #%d of %d)",
+                                        account_id, ticket, pair, original_side, actual_lots, limit_price,
+                                        i + 1, idx + i + 1, len(acct_fills))
+                            tp_result = direct_acct.modify_position_tp(ticket, pair, original_side, actual_lots, limit_price)
+                            tp_ok = isinstance(tp_result, tuple) and tp_result[0]
+                            msg = str(tp_result[1]) if isinstance(tp_result, tuple) and len(tp_result) > 1 else str(tp_result)
+
+                            if not tp_ok and ("No changes" in msg or "no changes" in msg.lower()):
+                                logger.info("[%s] CYCLE-LIMIT TP already at %.5f for ticket %s - treating as success", account_id, limit_price, ticket)
+                                tp_ok = True
+
+                            if tp_ok:
+                                any_tp_ok = True
+                                all_gone = False
+                            elif "Ticket not found" in msg or "Invalid ticket" in msg:
+                                logger.info("[%s] CYCLE-LIMIT ticket %s is gone — already closed", account_id, ticket)
+                                # Ticket is gone — already closed, that's OK
+                            else:
+                                logger.warning("[%s] CYCLE-LIMIT: TP modify failed for ticket %s (result=%s)",
+                                               account_id, ticket, tp_result)
+                                all_gone = False
+
+                        if all_gone and not any_tp_ok:
+                            # All tickets in this batch are already gone — advance to open phase
+                            logger.info("[%s] CYCLE-LIMIT: all batch tickets gone — advancing to open phase", account_id)
+                            with self.dd["lock"]:
+                                prog = session.get("cycle_progress", {})
+                                prog["phase"] = "open"
+                                prog["cycle_close_ts"] = time.time()
+                                prog.pop("close_tp_set", None)
+                                prog.pop("close_tp_set_ts", None)
+                                prog.pop("close_tp_confirmed", None)
+                                prog.pop("open_dispatched", None)
+                                prog.pop("open_fill_received", None)
+                                batch_tickets = [acct_fills[idx + i].get("ticket") for i in range(batch_size) if idx + i < len(acct_fills)]
+                                prog["closed_tickets"] = batch_tickets
+                                for ticket in batch_tickets:
+                                    session.setdefault("close_fills", []).append({
+                                        "account": account_id,
+                                        "ticket": ticket,
+                                        "price": limit_price,
+                                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                        "ts_epoch": time.time(),
+                                        "external": True,
+                                    })
+                                session["cycle_progress"] = prog
+                            self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                        elif any_tp_ok:
+                            # At least one TP set successfully — mark as broker-confirmed
+                            with self.dd["lock"]:
+                                prog = session.get("cycle_progress", {})
+                                prog["close_tp_set"] = True
+                                prog["close_tp_set_ts"] = time.time()
+                                prog["close_tp_confirmed"] = True
+                                prog["close_tp_price"] = limit_price
+                                session["cycle_progress"] = prog
+                            self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                            save_fn = self.dd.get("save_sessions")
+                            if save_fn:
+                                save_fn()
+                            logger.info("[%s] CYCLE-LIMIT: TP confirmed at %.5f for batch — in-flight cleared, watchdog active",
+                                        account_id, limit_price)
+                        else:
+                            # All failed for non-gone reasons — clear in-flight for retry
+                            logger.warning("[%s] CYCLE-LIMIT: all TP modifies failed — clearing in-flight for retry", account_id)
+                            self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
+                        # We don't append to close_limit_fills because cycle tracking handles state
+                    else:
+                        fill = acct_fills[idx]
+                        ticket = fill.get("ticket")
+                        actual_lots = lot_size
+                        try:
+                            orders = direct_acct._get_open_orders()
+                            for o in orders:
+                                if o.get('Ticket') and int(o['Ticket']) == int(ticket):
+                                    if o.get('Lots'):
+                                        actual_lots = float(o['Lots'])
+                                    elif o.get('Volume'):
+                                        actual_lots = float(o['Volume'])
+                                    break
+                        except Exception as e:
+                            logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
+                                         account_id, ticket, e)
+                        logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
+                                    account_id, ticket, pair, original_side, actual_lots,
+                                    idx + 1, len(acct_fills))
+                        direct_acct.close_position(
+                            ticket, pair, original_side, actual_lots,
+                            session_id=session.get("id", ""), comment=comment
+                        )
                     return
                 else:
                     logger.warning("[%s] CYCLE: idx=%d >= acct_fills=%d — nothing to close",
                                    account_id, idx, len(acct_fills))
                     return
 
-        # Otherwise close oldest open fill
+
+        # Otherwise close oldest open fill (or limit batch)
+        # Filter eligible fills (apply age filter for limit mode)
+        eligible_fills = []
+        now_epoch = time.time()
         for fill in fills:
             if fill.get("account") != account_id:
                 continue
             ticket = fill.get("ticket")
             if ticket in closed_tickets:
                 continue
+            # Age filter for limit orders
+            if is_limit and limit_days > 0:
+                ts_epoch = fill.get("ts_epoch", 0)
+                if ts_epoch:
+                    days_held = (now_epoch - ts_epoch) / (24 * 3600)
+                    if days_held < limit_days:
+                        continue
+            eligible_fills.append(fill)
+
+        batch_count = int(limit_batch) if is_limit else 1
+        processed_count = 0
+
+        for fill in eligible_fills:
+            if processed_count >= batch_count:
+                break
+
+            ticket = fill.get("ticket")
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
 
             # Look up actual position volume from broker — MT5 rejects mismatched lots
             actual_lots = lot_size
             ticket_found = False
+            orders = []
             try:
                 orders = direct_acct._get_open_orders()
                 for o in orders:
@@ -3788,14 +4429,12 @@ class MTDirectManager:
 
             if not ticket_found:
                 # Safety: if broker returned zero open orders, don't auto-skip
-                # — broker might be disconnected or not ready
                 if len(orders) <= 0:
                     logger.warning("[%s] SKIP ABORTED: broker has 0 open orders — likely disconnected, "
                                    "not marking ticket %s as closed", account_id, ticket)
                     break
 
-                # Ticket genuinely gone — mark as closed, but only ONE per call
-                # Log diagnostic info to help detect truncated results
+                # Ticket genuinely gone — mark as closed
                 order_tickets = sorted([o.get('Ticket', 0) for o in orders])
                 t_min = order_tickets[0] if order_tickets else '?'
                 t_max = order_tickets[-1] if order_tickets else '?'
@@ -3809,12 +4448,31 @@ class MTDirectManager:
                     "note": "auto-skipped: not in broker open orders"
                 })
                 session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
-                break  # Only handle ONE auto-skip per call — let command loop re-invoke
+                break  # Only handle ONE auto-skip per call
 
-            logger.info("[%s] CLOSE: ticket=%s pair=%s side=%s lots=%s",
-                        account_id, ticket, pair, original_side, actual_lots)
-            direct_acct.close_position(
-                ticket, pair, original_side, actual_lots,
-                session_id=session.get("id", ""), comment=comment
-            )
-            break
+            if is_limit:
+                # CLOSE-LIMIT: modify TakeProfit to passive limit price
+                quote = direct_acct.get_quote_direct(pair)
+                base_price = (quote.get("bid", 0) if original_side == "buy" else quote.get("ask", 0)) if quote else 0
+                pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
+                limit_price = base_price + (limit_dist / pip_mult) if original_side == "buy" else base_price - (limit_dist / pip_mult)
+                logger.info("[%s] LIMIT CLOSE: modifying TP ticket=%s pair=%s side=%s lots=%s TP=%.5f",
+                            account_id, ticket, pair, original_side, actual_lots, limit_price)
+                direct_acct.modify_position_tp(ticket, pair, original_side, actual_lots, limit_price)
+                # Track that TP has been placed (prevents re-applying on every loop)
+                session.setdefault("close_limit_fills", []).append({
+                    "account": account_id,
+                    "ticket": ticket,
+                    "tp": limit_price,
+                    "lots": actual_lots,
+                    "ts_epoch": time.time()
+                })
+            else:
+                logger.info("[%s] CLOSE: ticket=%s pair=%s side=%s lots=%s",
+                            account_id, ticket, pair, original_side, actual_lots)
+                direct_acct.close_position(
+                    ticket, pair, original_side, actual_lots,
+                    session_id=session.get("id", ""), comment=comment
+                )
+
+            processed_count += 1

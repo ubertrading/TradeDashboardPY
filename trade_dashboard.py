@@ -1285,6 +1285,43 @@ def _normalize_ticket(t):
     except (ValueError, TypeError):
         return t
 
+
+import re as _re
+_SYMBOL_SUFFIX_RE = _re.compile(
+    r"""(?x)
+    (?:
+        [._]        # separator: dot or underscore
+        [a-zA-Z0-9]+ # followed by any alphanumeric tail (.b, .ecn, _raw, etc.)
+    |   [+\-]$      # OR a trailing + or - (GBPCHF+ / GBPCHF-)
+    )$"""
+)
+
+def _normalize_symbol(sym):
+    """Strip broker-specific suffixes from a symbol name so that cross-broker
+    variants of the same instrument (GBPCHF, GBPCHF.b, GBPCHF+, GBPCHFm)
+    collapse to the same canonical 6-letter FX pair (or plain name for others).
+
+    Rules applied in order:
+      1. Uppercase + strip whitespace
+      2. Strip a trailing '+' or '-' (GBPCHF+, EURUSD-)
+      3. Strip a '.' or '_' followed by any alphanumeric tail
+         (GBPCHF.b, EURUSD.ecn, XAUUSD_pro, USDJPY.raw)
+      4. If what remains looks like a standard 6-char FX pair (all alpha)
+         return it, otherwise return the stripped version anyway.
+    """
+    if not sym:
+        return sym
+    s = str(sym).upper().strip()
+    # Iteratively strip suffixes (handles stacked suffixes like EURUSD.b.ecn)
+    for _ in range(5):
+        m = _SYMBOL_SUFFIX_RE.search(s)
+        if m:
+            s = s[:m.start()]
+        else:
+            break
+    return s
+
+
 # ─── Persistence ────────────────────────────────────────────────────────────
 def _save_sessions():
     try:
@@ -2394,13 +2431,23 @@ def _cycle_get_account(session, account):
     cyc_acc = session.get("cycle_account", "")
     if cyc_acc:
         return account == cyc_acc
-    # Derive from sides
+    
+    # Derive from sides using side_number
     sides = session.get("sides", {})
-    accs = list(sides.keys())
-    if len(accs) < 2:
-        return False
-    derived = accs[0] if action == "cycle_acc1" else accs[1]
-    return account == derived
+    target_side_num = 1 if action in ("cycle_acc1", "cycle_limit_acc1") else 2
+    
+    for acc_key, side_info in sides.items():
+        if side_info.get("side_number") == target_side_num:
+            return account == acc_key
+            
+    # Absolute fallback if side_number is somehow missing in memory
+    acc_keys = list(sides.keys())
+    if len(acc_keys) >= target_side_num:
+        idx = 0 if target_side_num == 1 else 1
+        if account == acc_keys[idx]:
+            return True
+            
+    return False
 
 
 def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
@@ -2425,14 +2472,19 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
     progress["phase"] = "open"
     progress["cycle_close_ts"] = time.time()
     # Check if this is a Direct account (needs server to dispatch open) or EA (handles reopen natively)
+    # IMPORTANT: cycle_limit_* actions always require server-dispatched reopens — the EA never
+    # handles cycle_limit reopens natively via cycle_reopen. So for cycle_limit, always treat
+    # the account as "direct" (clear open_dispatched so _should_issue_command can fire).
+    action = session.get("action", "")
     info = ea_account_info.get(account, {})
-    is_direct = (info.get("direct_mode", False) or 
-                 info.get("fix_account", False) or 
-                 info.get("openapi_connected", False) or 
+    is_direct = (action.startswith("cycle_limit_") or
+                 info.get("direct_mode", False) or
+                 info.get("fix_account", False) or
+                 info.get("openapi_connected", False) or
                  "direct" in info.get("conn_type", ""))
 
     if is_direct:
-        # For Direct accounts, the server must dispatch the open command.
+        # For Direct accounts (and all cycle_limit modes), the server must dispatch the open command.
         # Clear open_dispatched to allow _should_issue_command to fire.
         progress.pop("open_dispatched", None)
     else:
@@ -2489,18 +2541,34 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     if progress.get("phase") != "open":
         return False
 
-    # Guard: reject duplicate fills for the same cycle open phase.
-    # This prevents two concurrent open commands from both being recorded.
-    if progress.get("open_fill_received"):
-        print(f"[CYCLE] DUPLICATE fill rejected for {account} "
-              f"(idx={progress.get('index', 0)}, ticket={data.get('ticket')})")
-        return True  # Return True to prevent normal fill processing
-
     idx = progress.get("index", 0)
     ticket = data.get("ticket")
     fill_price = data.get("fill_price")
     quote_price = data.get("quote_price")
     spread = data.get("spread", 0)
+
+    # Determine batch size from session
+    try:
+        if session.get("action", "").startswith("cycle_limit_"):
+            closed_tickets = progress.get("closed_tickets", [])
+            batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
+        else:
+            batch_size = 1
+    except (ValueError, TypeError):
+        batch_size = 1
+
+    # Guard: reject if this ticket has already been recorded in the batch
+    open_batch_fills = progress.get("open_batch_fills", [])
+    if any(str(bf.get("ticket")) == str(ticket) for bf in open_batch_fills):
+        print(f"[CYCLE] DUPLICATE batch fill rejected for {account} "
+              f"(idx={idx}, ticket={ticket})")
+        return True  # Return True to prevent normal fill processing
+
+    # Guard: if batch already fully complete, reject
+    if progress.get("open_fill_received"):
+        print(f"[CYCLE] DUPLICATE fill rejected for {account} "
+              f"(idx={idx}, ticket={ticket})")
+        return True
 
     new_fill = {
         "account": account,
@@ -2513,41 +2581,87 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         "cmd_ts": cmd_sent_ts,
     }
 
-    # Replace the closed fill with the new fill using the exact ticket stored by _cycle_handle_close
-    closed_ticket = progress.pop("closed_ticket", None)
-    replaced = False
-    if closed_ticket is not None:
+    # Accumulate this fill in the open batch
+    open_batch_fills.append(new_fill)
+    progress["open_batch_fills"] = open_batch_fills
+    fills_so_far = len(open_batch_fills)
+    print(f"[CYCLE] Batch fill {fills_so_far}/{batch_size} received on {account}: ticket={ticket}")
+
+    # Replace closed fills with the new fills using the closed_tickets list (set by watchdog/TP handler)
+    closed_tickets = list(progress.get("closed_tickets", []))
+    # Backwards-compat: handle old single closed_ticket field
+    if not closed_tickets:
+        old_ct = progress.get("closed_ticket")
+        if old_ct is not None:
+            closed_tickets = [old_ct]
+
+    # Match this fill to the next unmatched closed ticket
+    already_matched = [str(nf.get("_matched_closed")) for nf in open_batch_fills[:-1] if nf.get("_matched_closed")]
+    unmatched_closed = [ct for ct in closed_tickets if str(ct) not in already_matched]
+    if unmatched_closed:
+        closed_ticket = unmatched_closed[0]
+        new_fill["_matched_closed"] = closed_ticket
+        replaced = False
         for i, f in enumerate(session.get("fills", [])):
             if f.get("account") == account and str(f.get("ticket")) == str(closed_ticket):
+                # Preserve original timestamp so age filter sees true position age
+                new_fill["ts"] = f.get("ts", new_fill["ts"])
+                new_fill["ts_epoch"] = f.get("ts_epoch", new_fill["ts_epoch"])
                 session["fills"][i] = new_fill
                 replaced = True
-                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} at fills[{i}]")
+                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} at fills[{i}] (preserved ts)")
                 break
-    if not replaced:
-        # Fallback: use active per-account fills by index
-        closed_set = set(str(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == account)
-        active_acct_fills = [f for f in session.get("fills", []) if f.get("account") == account and str(f.get("ticket")) not in closed_set]
-        if idx < len(active_acct_fills):
-            old_ticket = active_acct_fills[idx].get("ticket")
-            for i, f in enumerate(session["fills"]):
-                if f.get("account") == account and str(f.get("ticket")) == str(old_ticket):
-                    session["fills"][i] = new_fill
-                    print(f"[CYCLE] Fallback: replaced fill ticket={old_ticket} with new ticket={ticket}")
+        if not replaced:
+            for f in session.get("fills", []):
+                if f.get("account") == account and str(f.get("ticket")) == str(closed_ticket):
+                    new_fill["ts"] = f.get("ts", new_fill["ts"])
+                    new_fill["ts_epoch"] = f.get("ts_epoch", new_fill["ts_epoch"])
                     break
-        else:
-            # DO NOT append — growing fills list causes excess cycle iterations.
-            # The position exists at the broker; log warning and continue.
-            print(f"[CYCLE] WARNING: No fill to replace for ticket={ticket} "
-                  f"(idx={idx}) — skipping append to prevent position count drift")
+            session.setdefault("fills", []).append(new_fill)
+            print(f"[CYCLE] Fallback: Appended new ticket={ticket} (matched closed={closed_ticket})")
+    else:
+        session.setdefault("fills", []).append(new_fill)
+        print(f"[CYCLE] Fallback: Appended new ticket={ticket} (no closed_ticket to match)")
 
-    # Mark this fill as received so duplicates are rejected
-    progress["open_fill_received"] = True
+    session["cycle_progress"] = progress
+
+    # Check if we have all batch fills — if not, stay in open phase
+    if fills_so_far < batch_size:
+        print(f"[CYCLE] Waiting for {batch_size - fills_so_far} more batch fill(s) on {account}")
+        _save_sessions()
+        return True
+
+    # ---- All batch fills received — advance phase ----
+    progress.pop("open_batch_fills", None)
+    progress.pop("closed_tickets", None)
+    progress.pop("closed_ticket", None)
     progress.pop("open_retries", None)  # Reset retry counter on success
-    # Advance to next position
+    # Advance to next batch
+    progress["open_fill_received"] = True
     progress["phase"] = "close"
-    progress["index"] = idx + 1
-    progress["cycled"] = progress.get("cycled", 0) + 1
-    # Track spread cost
+    progress["index"] = idx + batch_size
+    progress["cycled"] = progress.get("cycled", 0) + batch_size
+    # For cycle_limit_: clear TP / limit-open state for the next iteration
+    if session.get("action", "").startswith("cycle_limit_"):
+        progress.pop("close_tp_set", None)
+        progress.pop("close_tp_set_ts", None)
+        progress.pop("close_tp_price", None)
+        # Remove ALL pending limit-open entries for this account.
+        # IMPORTANT: When a SellLimit/BuyLimit fills at MT5, the broker assigns a NEW
+        # position ticket that differs from the pending-order ticket stored when the limit
+        # was placed. A ticket-match filter would never find the entry and would leave
+        # cycle_limit_open_fills populated — causing the stale guard to see a "pending order"
+        # and block any further dispatches indefinitely.
+        session["cycle_limit_open_fills"] = [
+            f for f in session.get("cycle_limit_open_fills", [])
+            if f.get("account") != account
+        ]
+        # Clear the connector's claimed-ticket set so the next batch's fill watchers
+        # don't incorrectly skip positions that were claimed by this batch's watchers.
+        if mt_direct_manager:
+            acct_obj = mt_direct_manager.accounts.get(account)
+            if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
+                acct_obj._claimed_fill_tickets.clear()
     reopen_price = float(fill_price) if fill_price is not None else None
     cycle_close_price = progress.pop("last_close_price", None)
     if reopen_price is not None and cycle_close_price is not None:
@@ -2557,12 +2671,14 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     session.setdefault("last_trade_ts", {})[account] = time.time()
 
     _log_event(session_id, account, "cycle_reopened",
-               f"ticket={ticket} price={fill_price} — replaced fill #{idx + 1}, "
+               f"ticket={ticket} price={fill_price} — batch complete ({batch_size}), idx now {idx + batch_size}, "
                f"cycled {progress['cycled']} total")
-    print(f"[CYCLE] Reopened on {account}: ticket={ticket} (fill #{idx + 1}), "
+    print(f"[CYCLE] Batch complete on {account}: last_ticket={ticket} (batch={batch_size}), "
           f"cycled={progress['cycled']}")
 
     # Check if all positions have been cycled → auto-switch to monitor
+
+
     closed_set = set(str(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == account)
     acct_fill_count = len([f for f in session.get("fills", []) if f.get("account") == account and str(f.get("ticket")) not in closed_set])
     print(f"[CYCLE-COMPLETION-CHECK] acct={account}: idx={progress['index']} "
@@ -2581,6 +2697,19 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                    f"All {progress['cycled']} positions cycled — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
         print(f"[CYCLE] Complete on {account}: {progress['cycled']} positions cycled, "
               f"avg spread cost={avg_spread:.5f}, auto-switching to MONITOR")
+        # ── Purge stale cycle_progress fields that could interfere with future cycles ──
+        # Keep only summary info (cycled count, spread cost, confirmed_closed_tickets for
+        # dedup) and strip all in-flight state that would block the next cycle start.
+        session["cycle_progress"] = {
+            "cycled": progress.get("cycled", 0),
+            "total_spread_cost": progress.get("total_spread_cost", 0.0),
+            "cycle_total": progress.get("cycle_total", 0),
+            # Preserve confirmed_closed_tickets so any delayed duplicate close
+            # confirmation from the just-completed cycle is still rejected.
+            "confirmed_closed_tickets": progress.get("confirmed_closed_tickets", []),
+        }
+        print(f"[CYCLE] Purged stale cycle_progress in-flight state (open_dispatched, "
+              f"open_fill_received, closed_ticket, etc.) for {account}")
 
         # ── Post-cycle position count verification ──
         # Compare expected vs actual to detect duplicate opens or missed closes
@@ -2927,6 +3056,299 @@ def _check_fee_alerts():
         app.logger.error("Error in universal fee detection: %s", e, exc_info=True)
 
 
+def _trail_limit_orders(sid, session):
+    """Periodically check and adjust limit orders or TPs to trail the market."""
+    action = session.get("action", "")
+    if not action.startswith("open_limit") and not action.startswith("close_limit") and not action.startswith("cycle_limit_"):
+        return
+
+    try:
+        limit_dist = float(session.get("limit_distance", 100))
+    except (ValueError, TypeError):
+        return
+        
+    if limit_dist <= 0:
+        return
+        
+    try:
+        trail_step = float(session.get("trail_step", 10))
+    except (ValueError, TypeError):
+        trail_step = 10.0
+
+    sides = session.get("sides", {})
+    
+    # Check rate limit to prevent spamming modify API
+    now_ts = time.time()
+    last_trail_ts = session.get("_last_trail_ts", 0)
+    if (now_ts - last_trail_ts) < 2.0:
+        return
+
+    modified_any = False
+    
+    if action.startswith("open_limit"):
+        for fill in session.get("open_limit_fills", []):
+            account = fill.get("account")
+            ticket = fill.get("ticket")
+            current_order_price = fill.get("price")
+            if not account or not ticket or current_order_price is None:
+                continue
+                
+            side_info = sides.get(account, {})
+            pair = side_info.get("pair")
+            op_side = side_info.get("action", "buy").lower()
+            if not pair:
+                continue
+                
+            # Current quote
+            q_bid = None
+            q_ask = None
+            if account in ea_account_info:
+                sym_info = ea_account_info[account].get("symbols", {}).get(pair, {})
+                q_bid = sym_info.get("bid")
+                q_ask = sym_info.get("ask")
+            
+            if q_bid is None or q_ask is None:
+                continue
+
+            # Calculate desired price
+            pip_mult = 1000 if "JPY" in pair else 100000
+            dist_val = limit_dist / pip_mult
+            
+            if op_side == "buy":
+                # BuyLimit placed BELOW the Ask
+                desired_price = round(q_ask - dist_val, 5)
+            else:
+                # SellLimit placed ABOVE the Bid
+                desired_price = round(q_bid + dist_val, 5)
+
+            # One-way trailing: only move limit CLOSER to the market, never further.
+            # BuyLimit is below ask — only raise it (move toward ask).
+            # SellLimit is above bid — only lower it (move toward bid).
+            if op_side == "buy" and desired_price <= current_order_price:
+                continue  # would move limit further from market — skip
+            if op_side == "sell" and desired_price >= current_order_price:
+                continue  # would move limit further from market — skip
+
+            # Check drift
+            diff_pts = abs(current_order_price - desired_price) * pip_mult
+            if diff_pts >= trail_step:
+                # Attempt to modify
+                # Find connector
+                acct_obj = None
+                if mt_direct_manager and account in mt_direct_manager.accounts:
+                    acct_obj = mt_direct_manager.accounts[account]
+                elif USE_MT_BRIDGE and mt_direct_manager and account in mt_direct_manager.accounts:
+                    acct_obj = mt_direct_manager.accounts[account]
+                    
+                if acct_obj and hasattr(acct_obj, "modify_limit_price"):
+                    lots = fill.get("lots", 0.01)
+                    success, _ = acct_obj.modify_limit_price(ticket, pair, op_side, lots, desired_price)
+                    if success:
+                        fill["price"] = desired_price
+                        modified_any = True
+                        print(f"[{account}] Trailed OPEN-LIMIT {ticket} to {desired_price} (drift: {diff_pts:.1f} pts)")
+
+    elif action == "close_limit":
+        for fill in session.get("close_limit_fills", []):
+            account = fill.get("account")
+            ticket = fill.get("ticket")
+            current_tp = fill.get("tp")
+            if not account or not ticket or current_tp is None:
+                continue
+                
+            side_info = sides.get(account, {})
+            pair = side_info.get("pair")
+            op_side = side_info.get("action", "buy").lower()
+            if not pair:
+                continue
+                
+            q_bid = None
+            q_ask = None
+            if account in ea_account_info:
+                sym_info = ea_account_info[account].get("symbols", {}).get(pair, {})
+                q_bid = sym_info.get("bid")
+                q_ask = sym_info.get("ask")
+            
+            if q_bid is None or q_ask is None:
+                continue
+
+            pip_mult = 1000 if "JPY" in pair else 100000
+            dist_val = limit_dist / pip_mult
+            
+            # Close Buy -> Sell -> Bid
+            # TakeProfit for Buy is placed ABOVE the Bid
+            if op_side == "buy":
+                desired_tp = round(q_bid + dist_val, 5)
+            else:
+                # Close Sell -> Buy -> Ask
+                # TakeProfit for Sell is placed BELOW the Ask
+                desired_tp = round(q_ask - dist_val, 5)
+
+            # One-way trailing: only move TP CLOSER to the market, never further away.
+            # For a Buy: TP is above bid, so only lower it (move closer to bid).
+            # For a Sell: TP is below ask, so only raise it (move closer to ask).
+            if op_side == "buy" and desired_tp >= current_tp:
+                continue  # would move TP further away — skip
+            if op_side == "sell" and desired_tp <= current_tp:
+                continue  # would move TP further away — skip
+
+            # Check drift
+            diff_pts = abs(current_tp - desired_tp) * pip_mult
+            if diff_pts >= trail_step:
+                # Modify
+                acct_obj = None
+                if mt_direct_manager and account in mt_direct_manager.accounts:
+                    acct_obj = mt_direct_manager.accounts[account]
+                    
+                if acct_obj and hasattr(acct_obj, "modify_position_tp"):
+                    lots = fill.get("lots", 0.01)
+                    # Close is opposite side
+                    close_side = "sell" if op_side == "buy" else "buy"
+                    success, _ = acct_obj.modify_position_tp(ticket, pair, close_side, lots, tp=desired_tp, sl=None)
+                    if success:
+                        fill["tp"] = desired_tp
+                        modified_any = True
+                        print(f"[{account}] Trailed CLOSE-LIMIT TP {ticket} to {desired_tp} (drift: {diff_pts:.1f} pts)")
+
+    elif action.startswith("cycle_limit_"):
+        # CYCLE-LIMIT trailing: two sub-phases
+        progress = session.get("cycle_progress", {})
+        phase = progress.get("phase", "close")
+        cycle_account = session.get("cycle_account", "")
+        if not cycle_account:
+            return
+
+        try:
+            cl_dist = float(session.get("cycle_limit_distance", 10))
+        except (ValueError, TypeError):
+            cl_dist = 10.0
+        try:
+            cl_step = float(session.get("cycle_limit_trail_step", 1))
+        except (ValueError, TypeError):
+            cl_step = 1.0
+
+        side_info = sides.get(cycle_account, {})
+        pair = side_info.get("pair") or session.get("pair", "")
+        op_side = side_info.get("action", "buy").lower()
+        if not pair:
+            return
+
+        q_bid = q_ask = None
+        if cycle_account in ea_account_info:
+            sym_info = ea_account_info[cycle_account].get("symbols", {}).get(pair, {})
+            q_bid = sym_info.get("bid")
+            q_ask = sym_info.get("ask")
+        # Fallback: get_quote_direct
+        if (q_bid is None or q_ask is None) and mt_direct_manager:
+            direct_acct = mt_direct_manager.accounts.get(cycle_account)
+            if direct_acct:
+                try:
+                    sq = direct_acct.get_quote_direct(pair)
+                    if sq:
+                        q_bid = sq.get("bid")
+                        q_ask = sq.get("ask")
+                except Exception:
+                    pass
+        if q_bid is None or q_ask is None:
+            return
+
+        pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
+        dist_val = cl_dist / pip_mult
+
+        acct_obj = None
+        if mt_direct_manager and cycle_account in mt_direct_manager.accounts:
+            acct_obj = mt_direct_manager.accounts[cycle_account]
+
+        if phase == "close" and progress.get("close_tp_set"):
+            # Trail the TP on the current position being closed.
+            # Close Buy → TP above Bid; Close Sell → TP below Ask.
+            if op_side == "buy":
+                desired_tp = round(q_bid + dist_val, 5)
+            else:
+                desired_tp = round(q_ask - dist_val, 5)
+
+            current_tp = progress.get("close_tp_price")
+            if current_tp is not None:
+                # One-way trailing: only move TP closer to the market, never further.
+                # Buy TP is above bid — only lower it; Sell TP is below ask — only raise it.
+                if op_side == "buy" and desired_tp >= current_tp:
+                    pass  # would move TP further away — skip
+                elif op_side == "sell" and desired_tp <= current_tp:
+                    pass  # would move TP further away — skip
+                else:
+                    diff_pts = abs(current_tp - desired_tp) * pip_mult
+                    if diff_pts >= cl_step:
+                        # Find the ticket for the current cycle index
+                        closed_set = set(
+                            str(f.get("ticket")) for f in session.get("close_fills", [])
+                            if f.get("account") == cycle_account
+                        )
+                        cl_fills = sorted(
+                            [f for f in session.get("fills", [])
+                             if f.get("account") == cycle_account
+                             and str(f.get("ticket")) not in closed_set],
+                            key=lambda f: f.get("ts_epoch", 0) or 0
+                        )
+                        idx = progress.get("index", 0)
+                        batch_size = int(session.get("cycle_limit_batch_size", 1))
+                        batch_success = False
+                        for i in range(batch_size):
+                            if idx + i < len(cl_fills):
+                                ticket = cl_fills[idx + i].get("ticket")
+                                lots = cl_fills[idx + i].get("lots", side_info.get("lot_size") or session.get("lot_size", 0.01))
+                                if acct_obj and hasattr(acct_obj, "modify_position_tp") and ticket:
+                                    close_side = "sell" if op_side == "buy" else "buy"
+                                    success, _ = acct_obj.modify_position_tp(ticket, pair, close_side, lots, desired_tp)
+                                    if success:
+                                        batch_success = True
+                                        print(f"[{cycle_account}] Trailed CYCLE-LIMIT TP ticket={ticket} to {desired_tp} (drift: {diff_pts:.1f} pts)")
+                        if batch_success:
+                            progress["close_tp_price"] = desired_tp
+                            session["cycle_progress"] = progress
+                            modified_any = True
+            else:
+                # First trail call after TP was set — record the initial price
+                progress["close_tp_price"] = desired_tp
+                session["cycle_progress"] = progress
+
+        elif phase == "open" and progress.get("open_dispatched"):
+            # Trail the pending limit open order.
+            if op_side == "buy":
+                desired_price = round(q_ask - dist_val, 5)
+            else:
+                desired_price = round(q_bid + dist_val, 5)
+
+            # Find the pending limit open ticket
+            for ol_fill in session.get("cycle_limit_open_fills", []):
+                if ol_fill.get("account") != cycle_account:
+                    continue
+                ticket = ol_fill.get("ticket")
+                current_price = ol_fill.get("price")
+                if current_price is None or ticket is None:
+                    continue
+
+                # One-way trailing: only move the pending open limit CLOSER to the market.
+                # BuyLimit is below ask — only raise it (move up toward ask).
+                # SellLimit is above bid — only lower it (move down toward bid).
+                if op_side == "buy" and desired_price <= current_price:
+                    continue  # would move limit further below ask — skip
+                if op_side == "sell" and desired_price >= current_price:
+                    continue  # would move limit further above bid — skip
+
+                diff_pts = abs(current_price - desired_price) * pip_mult
+                if diff_pts >= cl_step:
+                    lots = ol_fill.get("lots", side_info.get("lot_size") or session.get("lot_size", 0.01))
+                    if acct_obj and hasattr(acct_obj, "modify_limit_price"):
+                        success, _ = acct_obj.modify_limit_price(ticket, pair, op_side, lots, desired_price)
+                        if success:
+                            ol_fill["price"] = desired_price
+                            modified_any = True
+                            print(f"[{cycle_account}] Trailed CYCLE-LIMIT open {ticket} to {desired_price} (drift: {diff_pts:.1f} pts)")
+
+    if modified_any:
+        session["_last_trail_ts"] = now_ts
+
+
 def _run_hedge_monitor_all():
     """Universal hedge monitor: detect externally closed positions and queue
     rollback closes on the paired account. Runs for ALL sessions/accounts
@@ -2942,6 +3364,8 @@ def _run_hedge_monitor_all():
         for sid, session in list(sessions.items()):
             if session.get("status") not in ("active", "partial_close"):
                 continue
+
+            _trail_limit_orders(sid, session)
 
             # ── Skip if parent strategy is NOT running or NOT enabled ──
             _hm_strat_id = session.get("strategy_id")
@@ -2964,9 +3388,12 @@ def _run_hedge_monitor_all():
                           f"(close counts balanced: {closed_counts})")
                     _save_sessions()
 
-            # Skip during close phase — the normal close flow handles this
+            # Skip during close phase — the normal close flow handles this.
+            # Also skip close_limit — positions close passively via TP; hedge
+            # monitor would otherwise treat it as an "externally closed" event
+            # and queue spurious rollbacks on the paired account.
             sess_action = session.get("action", "")
-            if sess_action == "close":
+            if sess_action in ("close", "close_limit"):
                 continue
             # Cycle mode: skip hedge monitor entirely — cycle deliberately closes/reopens
             if sess_action.startswith("cycle_"):
@@ -3032,10 +3459,13 @@ def _run_hedge_monitor_all():
             if sess_action == "monitor":
                 accs = list(sides.keys())
                 if len(accs) >= 2:
-                    # Skip imbalance check if a close_deal is still in-flight
+            # Skip imbalance check if a close_deal is still in-flight
                     close_deal_ts = session.get("close_deal_ts", 0)
                     if close_deal_ts and (now_ts - close_deal_ts) < 10:
                         pass  # Suppress — close_deal pair still settling
+                    elif session.get("cycle_limit_open_fills"):
+                        pass  # Suppress — a cycle_limit pending limit open is in-flight;
+                              # the new position is expected and must NOT be rolled back
                     elif any(session.get("filled", {}).get(a, 0) == 0 for a in accs):
                         pass  # One-sided session — one account has no fills, skip
                           # (e.g. reimport only captured one side, or old session with
@@ -3084,6 +3514,53 @@ def _run_hedge_monitor_all():
                         if net_1 is None or net_2 is None:
                             pass  # One or both sides have stale data — skip
                         elif net_1 != net_2:
+                            # ── GLOBAL HEDGE SAFETY CHECK (per-instrument) ──
+                            # Do not prompt for rollback if the portfolio is perfectly hedged
+                            # globally across all accounts on EVERY individual instrument.
+                            # Checking only the aggregate total is insufficient: e.g. +1 lot
+                            # EURUSD buy and -1 lot GBPUSD sell nets to 0 in aggregate but
+                            # neither instrument is actually hedged.
+                            pair = session.get("pair")
+                            if pair:
+                                # Gather per-instrument net across ALL accounts,
+                                # normalising symbol names to strip broker suffixes
+                                # (e.g. GBPCHF and GBPCHF.b are the same instrument).
+                                global_instrument_nets = {}  # canonical symbol -> net lots (buy-sell)
+                                for aid, ainfo in ea_account_info.items():
+                                    lbi = ainfo.get("lots_by_instrument", {})
+                                    for sym, sym_lots in lbi.items():
+                                        canonical = _normalize_symbol(sym)
+                                        prev = global_instrument_nets.get(canonical, 0.0)
+                                        global_instrument_nets[canonical] = round(
+                                            prev + sym_lots.get("buy", 0.0) - sym_lots.get("sell", 0.0), 6
+                                        )
+
+                                # Only suppress if EVERY instrument with any exposure is flat
+                                active_instruments = {
+                                    sym: net for sym, net in global_instrument_nets.items()
+                                    if any(
+                                        (_ainfo.get("lots_by_instrument", {}).get(raw_sym, {}).get("buy", 0.0) > 0 or
+                                         _ainfo.get("lots_by_instrument", {}).get(raw_sym, {}).get("sell", 0.0) > 0)
+                                        for _ainfo in ea_account_info.values()
+                                        for raw_sym in _ainfo.get("lots_by_instrument", {})
+                                        if _normalize_symbol(raw_sym) == sym
+                                    )
+                                }
+                                all_instruments_flat = all(
+                                    abs(net) < 0.0001 for net in active_instruments.values()
+                                ) if active_instruments else False
+
+                                if all_instruments_flat:
+                                    unflat = {s: n for s, n in active_instruments.items() if abs(n) >= 0.0001}
+                                    print(f"[HEDGE-SYNC] sid={session.get('id', '')[:8]}: SUPPRESSING rollback "
+                                          f"({net_1} vs {net_2}) — all {len(active_instruments)} instrument(s) "
+                                          f"are globally flat across all accounts")
+                                    continue
+                                else:
+                                    unflat = {s: round(n, 4) for s, n in active_instruments.items() if abs(n) >= 0.0001}
+                                    print(f"[HEDGE-SYNC] sid={session.get('id', '')[:8]}: NOT suppressing rollback — "
+                                          f"{len(unflat)} instrument(s) are NOT flat: {unflat}")
+                                    
                             if net_1 > net_2:
                                 max_acc, min_acc = accs[0], accs[1]
                                 excess = net_1 - net_2
@@ -3185,6 +3662,176 @@ def _run_hedge_monitor_all():
                 )
                 expected_open = set(acct_fill_tickets) - acct_close_tickets - pending_rb_tickets
 
+                # ── AUTO-HEAL UNTRACKED TICKETS ──────────────────────────────
+                # If the broker has tickets that belong to this session but are NOT in expected_open,
+                # auto-import them to recover from missed trade_result callbacks or manual intervention.
+                untracked = ea_open_tickets - expected_open
+                if untracked and "position_details" in info:
+                    for t in list(untracked):
+                        for pos in info["position_details"]:
+                            if _normalize_ticket(pos.get("ticket")) == t:
+                                comment = pos.get("comment", "")
+                                sess_comment = session.get("comment", "")
+                                sess_id_short = sid[:8]
+                                
+                                symbol = pos.get("symbol", "").upper().strip()
+                                expected_pair = session.get("sides", {}).get(account, {}).get("pair") or session.get("pair", "")
+                                expected_pair = expected_pair.upper().strip()
+                                pair_matches = (expected_pair in symbol) or (symbol in expected_pair)
+                                
+                                # Match by exact session comment OR session ID in comment, AND ensure symbol matches
+                                # For CYCLE-LIMIT, MT5 strips comments when limit orders execute, so we must
+                                # accept ANY untracked ticket on this pair if we are actively waiting for an open fill.
+                                # Check multiple signals: action string, pending limit fills, or open_dispatched flag
+                                _prog_chk = session.get("cycle_progress", {})
+                                _phase_is_open = _prog_chk.get("phase") == "open"
+                                _has_pending_open = any(
+                                    f.get("account") == account
+                                    for f in session.get("cycle_limit_open_fills", [])
+                                )
+                                _open_dispatched = _prog_chk.get("open_dispatched", False)
+                                _is_cycle_limit_action = session.get("action", "").startswith("cycle_limit_")
+                                is_waiting_limit = pair_matches and (
+                                    # Standard: action is cycle_limit and phase is open for this account
+                                    (_is_cycle_limit_action and _phase_is_open and _cycle_get_account(session, account))
+                                    # Fallback 1: a pending limit is tracked in cycle_limit_open_fills
+                                    or (_has_pending_open and _phase_is_open)
+                                    # Fallback 2: open_dispatched set (limit was sent) but fill not yet received
+                                    or (_open_dispatched and _phase_is_open and session.get("cycle_account") == account)
+                                )
+                                
+                                if pair_matches and (is_waiting_limit or (sess_id_short in comment) or (sess_comment and sess_comment in comment)):
+                                    print(f"[AUTO-HEAL] Found untracked ticket {t} ({symbol}) for session {sess_id_short} on {account} (is_waiting_limit={is_waiting_limit})")
+                                    
+                                    # Fallback to session lot size if not provided
+                                    heal_lots = session.get("sides", {}).get(account, {}).get("lot_size")
+                                    if not heal_lots:
+                                        heal_lots = session.get("lot_size", 0.01)
+                                        
+                                    # Check if this is the pending limit fill we're waiting for.
+                                    # IMPORTANT: also check cycle_progress.phase even if action == "monitor"
+                                    # because a failed TP-set can transiently switch action to "monitor"
+                                    # while a cycle_limit open is still pending. Without this check the
+                                    # auto-heal falls through to the normal fill path and HEDGE-REBAL
+                                    # immediately closes the freshly-opened limit position.
+                                    is_cycle_open = False
+                                    is_any_cycle = session.get("action", "").startswith("cycle_")
+                                    prog = session.get("cycle_progress", {})
+                                    # Also catch the case where action is "monitor" but we have a
+                                    # pending cycle_limit open (cycle_limit_open_fills is populated).
+                                    pending_limit_open = any(
+                                        f.get("account") == account
+                                        for f in session.get("cycle_limit_open_fills", [])
+                                    )
+                                    if is_any_cycle or pending_limit_open:
+                                        if not is_any_cycle:
+                                            is_any_cycle = True  # treat as cycle for heal purposes
+                                        if prog.get("phase") == "open" and _cycle_get_account(session, account):
+                                            is_cycle_open = True
+                                        elif pending_limit_open and prog.get("phase") == "open":
+                                            # cycle_account may not match if action changed — use pending fills as oracle
+                                            is_cycle_open = True
+
+                                    if is_cycle_open:
+                                        print(f"[CYCLE-LIMIT] Auto-healed ticket {t} is the pending limit fill! Advancing phase to 'close'.")
+                                        # Do NOT call _cycle_handle_fill — it calls _cycle_get_account which
+                                        # returns False when action=="monitor" (transient from failed TP close).
+                                        # Advance cycle_progress directly.
+                                        _prog = session.get("cycle_progress", {})
+                                        _closed_ticket = _prog.get("closed_ticket")
+                                        # Replace old fill record with new limit-fill ticket
+                                        _replaced = False
+                                        for _fi, _fentry in enumerate(session.get("fills", [])):
+                                            if _fentry.get("account") == account and str(_fentry.get("ticket")) == str(_closed_ticket or ""):
+                                                session["fills"][_fi] = dict(_fentry, ticket=t, auto_healed=True)
+                                                _replaced = True
+                                                print(f"[CYCLE-LIMIT] Replaced fill closed_ticket={_closed_ticket} with new ticket={t}")
+                                                break
+                                        if not _replaced:
+                                            _orig_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                            _orig_ts_epoch = time.time()
+                                            for _fentry in session.get("fills", []):
+                                                if _fentry.get("account") == account and str(_fentry.get("ticket")) == str(_closed_ticket or ""):
+                                                    _orig_ts = _fentry.get("ts", _orig_ts)
+                                                    _orig_ts_epoch = _fentry.get("ts_epoch", _orig_ts_epoch)
+                                                    break
+                                            session.setdefault("fills", []).append({
+                                                "account": account, "ticket": t, "price": 0.0,
+                                                "lots": float(heal_lots), "ts": _orig_ts,
+                                                "ts_epoch": _orig_ts_epoch, "auto_healed": True,
+                                            })
+                                        # Clear pending limit open for this account
+                                        session["cycle_limit_open_fills"] = [
+                                            _f for _f in session.get("cycle_limit_open_fills", [])
+                                            if _f.get("account") != account
+                                        ]
+                                        # Advance phase close, clear open-phase flags
+                                        _heal_batch = int(session.get("cycle_limit_batch_size", 1))
+                                        _prog["phase"] = "close"
+                                        _prog["cycled"] = _prog.get("cycled", 0) + _heal_batch
+                                        _prog["index"] = _prog.get("index", 0) + _heal_batch
+                                        _prog["open_fill_received"] = True
+                                        _prog.pop("open_dispatched", None)
+                                        _prog.pop("close_tp_set", None)
+                                        _prog.pop("close_tp_set_ts", None)
+                                        _prog.pop("close_tp_confirmed", None)
+                                        session["cycle_progress"] = _prog
+                                        # Restore action if it was erroneously set to monitor
+                                        if session.get("action") == "monitor":
+                                            _cycle_acct = session.get("cycle_account", "")
+                                            _sides = session.get("sides", {})
+                                            _restored_action = None
+                                            for _a, _si in _sides.items():
+                                                if _a == _cycle_acct:
+                                                    _sn = _si.get("side_number", 0)
+                                                    _restored_action = f"cycle_limit_acc{_sn}"
+                                                    break
+                                            if _restored_action:
+                                                session["action"] = _restored_action
+                                                print(f"[CYCLE-LIMIT] Restored action monitor → {_restored_action} (limit fill ticket={t})")
+                                                _log_event(sid, account, "cycle_limit_heal",
+                                                           f"Limit fill ticket={t}, restored action={_restored_action}, phase→close")
+                                        expected_open.add(t)
+                                    elif is_any_cycle:
+                                        # Cycle session, but NOT waiting for a fill (phase == "close").
+                                        # A new broker ticket appeared — this means a limit fill was already
+                                        # processed by _cycle_handle_fill via the normal callback path, but
+                                        # the heartbeat detected the position independently.
+                                        # DO NOT increment session["filled"] — that would push count above
+                                        # total_positions and cause the system to think the account is over-filled.
+                                        existing_tickets = {str(f.get("ticket")) for f in session.get("fills", [])}
+                                        if str(t) not in existing_tickets:
+                                            # Ticket not tracked yet — append without inflating the fill counter
+                                            session.setdefault("fills", []).append({
+                                                "account": account,
+                                                "ticket": t,
+                                                "price": 0.0,
+                                                "lots": float(heal_lots),
+                                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                "ts_epoch": time.time(),
+                                                "auto_healed": True
+                                            })
+                                            print(f"[CYCLE-HEAL] sid={sid[:8]} acct={account}: appended untracked ticket {t} "
+                                                  f"(phase={session.get('cycle_progress', {}).get('phase', '?')}) WITHOUT incrementing filled counter")
+                                        else:
+                                            print(f"[CYCLE-HEAL] sid={sid[:8]} acct={account}: ticket {t} already in fills — skipping")
+                                        expected_open.add(t)
+                                    else:
+                                        session.setdefault("fills", []).append({
+                                            "account": account,
+                                            "ticket": t,
+                                            "price": 0.0,
+                                            "lots": float(heal_lots),
+                                            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "ts_epoch": time.time(),
+                                            "auto_healed": True
+                                        })
+                                        session.setdefault("filled", {})[account] = session.setdefault("filled", {}).get(account, 0) + 1
+                                        expected_open.add(t)
+
+                                    _save_sessions()
+                                break
+
                 missing_tickets = set()
 
                 # Check for permanent import imbalances (e.g. imported 0 vs N)
@@ -3241,9 +3888,10 @@ def _run_hedge_monitor_all():
                                   f"netting_mode — expected_lots={expected_lots} actual_lots={actual_lots} "
                                   f"missing_lots={missing_lots}")
 
-                            # Direct connections (FIX, MT4/MT5 Direct) receive a small 2-tick 
-                            # debounce to survive transient sync gaps during reconnects.
-                            threshold = 1 if info.get("direct_mode") else 2
+                            # Debounce: even when broker reports positions > 0
+                            # (partial reconnect list), require 1 confirmation
+                            # cycle to avoid immediate false rollbacks.
+                            threshold = 1
                             
                             # Require consecutive detections
                             prev_count = session.get(mismatch_key, 0)
@@ -3305,9 +3953,23 @@ def _run_hedge_monitor_all():
                       f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
                       f"missing={len(missing_tickets)}")
 
-                # Direct connections (FIX, MT4/MT5 Direct) receive a small 2-tick 
-                # debounce to survive transient sync gaps during reconnects.
-                threshold = 1 if info.get("direct_mode") else 2
+                # Debounce to survive transient sync gaps during reconnects.
+                # When broker reports 0 positions, this is a full disconnect/reconnect
+                # — wait more cycles before acting (2 for EA, 1 for direct).
+                # When broker reports SOME positions but some tickets are missing,
+                # this can be a partial position list on reconnect (e.g. MT4 returns
+                # 18/35 positions on first poll after reconnect). We still require
+                # 1 confirmation cycle to avoid single-poll glitches firing rollbacks.
+                if len(ea_open_tickets) == 0:
+                    threshold = 1 if info.get("direct_mode") else 2
+                elif _cycle_get_account(session, account):
+                    # Zero debounce for cycling accounts on partial mismatch
+                    # to ensure INSTANT limit reopening when a TP is hit.
+                    threshold = 0
+                else:
+                    # Partial mismatch: require 1 confirmation (~1s) to filter
+                    # broker reconnect partial-list artifacts
+                    threshold = 1
                 
                 # Require consecutive detections to avoid glitches
                 mismatch_key = f"hedge_mismatch_{sid}_{account}"
@@ -3321,6 +3983,24 @@ def _run_hedge_monitor_all():
                 # Clear counter — taking action
                 session.pop(mismatch_key, None)
 
+                # ── CYCLE-LIMIT: TP hit detection (MUST check before cascade guard) ──
+                # When the TP fires on the cycling account only 1-of-N tickets goes
+                # missing. The cascade guard only fires when ALL are missing, so without
+                # this early check the close would fall through to the normal rollback
+                # path and never trigger the phase close→open transition.
+                is_cycling_account = _cycle_get_account(session, account)
+                print(f"[DEBUG-CYCLE] account={account} is_cycling_account={is_cycling_account} action={session.get('action')} missing={missing_tickets}")
+                if is_cycling_account:
+                    # Missing tickets are EXPECTED cycle closes (e.g. TP hit)!
+                    # Pass them to _cycle_handle_close and do NOT trigger rollback.
+                    print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
+                          f"Detected {len(missing_tickets)} missing ticket(s) on CYCLING account. Treating as CYCLE CLOSE.")
+                    for missing_t in missing_tickets:
+                        _cycle_handle_close(session, account, {"ticket": missing_t, "fill_price": None}, sid, None)
+                    _check_session_completion(session)
+                    _save_sessions()
+                    continue  # Skip rollback logic for these tickets!
+
                 # ── SAFETY GUARD: block cascade on suspicious all-missing pattern ──
                 # If ALL expected tickets are missing but the broker still shows >= as
                 # many positions as expected, this is almost certainly a ticket ID
@@ -3333,26 +4013,70 @@ def _run_hedge_monitor_all():
                 if expected_open and len(missing_real) == len(expected_open):
                     if len(ea_open_tickets) >= len(expected_open) or len(ea_open_tickets) == 0:
                         reason = "ticket ID mismatch" if len(ea_open_tickets) > 0 else "bridge sync/reconnect (0 positions)"
-                        app.logger.warning(
-                            "[HEDGE-MON] CASCADE BLOCKED for %s sid=%s: ALL %d tickets missing "
-                            "and broker has %d positions. "
-                            "Likely %s \u2014 NOT cascading. Manual verification required.",
-                            account, sid[:8], len(missing_tickets), len(ea_open_tickets), reason
-                        )
-                        try:
-                            _send_telegram(
-                                f"\u26a0\ufe0f <b>HEDGE CASCADE BLOCKED</b>: {account}\n"
-                                f"ALL {len(missing_tickets)} session tickets missing but broker "
-                                f"has {len(ea_open_tickets)} positions.\n"
-                                f"Likely {reason} \u2014 NOT auto-closing.\n"
-                                f"sid={sid[:8]} \u2014 manual check required.",
-                                account_id=account
+
+                        # ── PER-INSTRUMENT HEDGE CHECK ────────────────────────────────
+                        # Before blocking, verify whether the entire portfolio is flat
+                        # on a per-instrument basis across ALL accounts. An aggregate
+                        # net of 0 is not sufficient: +1 EURUSD buy cancelling -1 GBPUSD
+                        # sell nets to 0 but neither pair is actually hedged.
+                        # Symbol names are normalised to strip broker suffixes so that
+                        # GBPCHF and GBPCHF.b are treated as the same instrument.
+                        _cascade_gi_nets = {}
+                        for _aid, _ainfo in ea_account_info.items():
+                            for _sym, _sym_lots in _ainfo.get("lots_by_instrument", {}).items():
+                                _canonical = _normalize_symbol(_sym)
+                                _prev = _cascade_gi_nets.get(_canonical, 0.0)
+                                _cascade_gi_nets[_canonical] = round(
+                                    _prev + _sym_lots.get("buy", 0.0) - _sym_lots.get("sell", 0.0), 6
+                                )
+                        _cascade_active = {
+                            sym: net for sym, net in _cascade_gi_nets.items()
+                            if any(
+                                (_ainfo.get("lots_by_instrument", {}).get(raw_sym, {}).get("buy", 0.0) > 0 or
+                                 _ainfo.get("lots_by_instrument", {}).get(raw_sym, {}).get("sell", 0.0) > 0)
+                                for _ainfo in ea_account_info.values()
+                                for raw_sym in _ainfo.get("lots_by_instrument", {})
+                                if _normalize_symbol(raw_sym) == sym
                             )
-                        except Exception:
-                            pass
-                        session["status"] = "paused"
-                        _save_sessions()
-                        continue
+                        }
+                        _portfolio_flat = all(abs(n) < 0.0001 for n in _cascade_active.values()) if _cascade_active else False
+                        _unflat_syms = {s: round(n, 4) for s, n in _cascade_active.items() if abs(n) >= 0.0001}
+
+                        if _portfolio_flat:
+                            # Portfolio is globally flat per-instrument — cascade block is valid
+                            app.logger.warning(
+                                "[HEDGE-MON] CASCADE BLOCKED for %s sid=%s: ALL %d tickets missing "
+                                "and broker has %d positions. "
+                                "Likely %s \u2014 NOT cascading. Per-instrument check: all %d active "
+                                "instruments are flat globally.",
+                                account, sid[:8], len(missing_tickets), len(ea_open_tickets),
+                                reason, len(_cascade_active)
+                            )
+                            try:
+                                _send_telegram(
+                                    f"\u26a0\ufe0f <b>HEDGE CASCADE BLOCKED</b>: {account}\n"
+                                    f"ALL {len(missing_tickets)} session tickets missing but broker "
+                                    f"has {len(ea_open_tickets)} positions.\n"
+                                    f"Likely {reason} \u2014 NOT auto-closing.\n"
+                                    f"All {len(_cascade_active)} instrument(s) are globally flat.\n"
+                                    f"sid={sid[:8]} \u2014 manual check required.",
+                                    account_id=account
+                                )
+                            except Exception:
+                                pass
+                            session["status"] = "paused"
+                            _save_sessions()
+                            continue
+                        else:
+                            # Portfolio has unhedged instruments — do NOT suppress
+                            app.logger.warning(
+                                "[HEDGE-MON] CASCADE NOT BLOCKED for %s sid=%s: ALL %d tickets missing "
+                                "but %d instrument(s) are NOT globally flat: %s — allowing cascade.",
+                                account, sid[:8], len(missing_tickets), len(_unflat_syms), _unflat_syms
+                            )
+                            print(f"[HEDGE-MON] Per-instrument check FAILED flat test for {account} "
+                                  f"sid={sid[:8]}: unflat={_unflat_syms} — rollback will proceed")
+
 
                 print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "
                       f"CONFIRMED {len(missing_tickets)} externally closed ticket(s): {missing_tickets}")
@@ -3420,6 +4144,11 @@ def _run_hedge_monitor_all():
 
                 # Queue the paired closes via rollback mechanism with specific tickets
                 user_rejected = session.get("rollback_user_rejected", {})
+                # Build a human-readable reason for the rollback prompt
+                _rebal_reason = (
+                    f"{len(missing_tickets)} position(s) on {account} were closed externally. "
+                    f"Closing {len(tickets_to_close)} matching position(s) on the paired side to rebalance."
+                )
                 for other_acc, ticket in tickets_to_close:
                     if user_rejected.get(other_acc):
                         print(f"[HEDGE-REBAL] Skipping rollback queue for {other_acc} — user previously rejected rollback")
@@ -3428,6 +4157,8 @@ def _run_hedge_monitor_all():
                     rb[other_acc] = rb.get(other_acc, 0) + 1
                     rb_tickets = session.setdefault("rollback_tickets", {})
                     rb_tickets.setdefault(other_acc, []).append(ticket)
+                    # Store reason so rollback prompt can explain WHY to the user
+                    session.setdefault("rollback_reason", {})[other_acc] = _rebal_reason
 
                 _log_event(sid, account, "hedge_rebalance",
                            f"Detected {len(missing_tickets)} externally closed position(s). "
@@ -3727,6 +4458,18 @@ def _should_issue_command(session, account):
     flight_ts = in_flight_commands.get(flight_key, 0)
     exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
     flight_timeout = exec_timeout  # Same timeout for all operations including cycles
+
+    # CYCLE-LIMIT: clear stale in-flight entries left over from the prior open/fill phase.
+    # When action switches from 'open' to 'cycle_limit_*', the in_flight_commands dict
+    # still holds entries from the last fill confirmations. These are stale — they don't
+    # represent active broker orders. Any entry older than 5s is a fill artifact; clear it.
+    if _action_check.startswith("cycle_limit_") and flight_ts > 0:
+        _stale_elapsed = time.time() - flight_ts
+        if _stale_elapsed > 5:
+            print(f"[CYCLE-LIMIT] Clearing stale in-flight for {account} (age={_stale_elapsed:.1f}s) — open fill artifact, not a cycle TP")
+            in_flight_commands.pop(flight_key, None)
+            flight_ts = 0
+
     if flight_ts > 0:
         elapsed = time.time() - flight_ts
         if elapsed < flight_timeout:
@@ -3813,14 +4556,30 @@ def _should_issue_command(session, account):
         if current >= target:
             return False
 
-        # Cross-account hedge sync: don't open next position until ALL sides
-        # have completed their current fill. This prevents one fast side from
-        # racing ahead while the other is still executing.
+        # Cross-account hedge sync: don't open next position until the previous hedge is complete.
+        exec_order = session.get("execution_order", "simultaneous")
+        my_side_num = sides[account].get("side_number", 0)
+
         for other_acc in sides:
             if other_acc != account:
                 other_filled = _get_net_open(session, other_acc)
-                if current > other_filled:
-                    return False
+                if exec_order == "simultaneous":
+                    if current > other_filled:
+                        return False
+                elif exec_order == "side1_first":
+                    if my_side_num == 1:
+                        if current > other_filled:
+                            return False
+                    elif my_side_num == 2:
+                        if current >= other_filled:
+                            return False
+                elif exec_order == "side2_first":
+                    if my_side_num == 2:
+                        if current > other_filled:
+                            return False
+                    elif my_side_num == 1:
+                        if current >= other_filled:
+                            return False
 
 
 
@@ -3830,6 +4589,7 @@ def _should_issue_command(session, account):
         if max_deals > 0:
             acct_net_open = _get_net_open(session, account)
             if acct_net_open >= max_deals:
+                print(f"[OPEN-BLOCK] {account} max_deals={max_deals} net={acct_net_open}")
                 return False
 
         # Check max_accum_lots (per-account net open lots limit)
@@ -3839,6 +4599,7 @@ def _should_issue_command(session, account):
             acct_lot = sides[account].get("lot_size", session.get("lot_size", 0.01))
             acct_lots = acct_net * acct_lot
             if acct_lots + acct_lot > max_accum + 1e-9:
+                print(f"[OPEN-BLOCK] {account} max_accum={max_accum} lots={acct_lots}")
                 return False
 
         # Diff-to-open gating: only open when price diff >= threshold
@@ -3846,9 +4607,11 @@ def _should_issue_command(session, account):
         # Any number including 0 is a valid threshold.
         diff_to_open = session.get("diff_to_open")
         if diff_to_open is None:
+            print(f"[OPEN-BLOCK] {account} diff_to_open is None")
             return False  # Blank = don't trade
         curr_diff_val, _ = _calc_curr_diff(session, "open")
         if curr_diff_val is None or curr_diff_val < diff_to_open:
+            print(f"[OPEN-BLOCK] {account} curr_diff_val={curr_diff_val} < diff_to_open={diff_to_open}")
             return False
 
         # ── Execution Filters (open) ──
@@ -3858,6 +4621,7 @@ def _should_issue_command(session, account):
             for acc in sides:
                 ei = ea_account_info.get(acc, {})
                 if ei.get("ticks_per_5s", 0) > max_ticks:
+                    print(f"[OPEN-BLOCK] {account} max_ticks={max_ticks}")
                     return False
 
         # Price volatility: block if bid jumped too much
@@ -3866,6 +4630,7 @@ def _should_issue_command(session, account):
             for acc in sides:
                 ei = ea_account_info.get(acc, {})
                 if max(ei.get("last_bid_delta", 0), ei.get("last_ask_delta", 0)) > max_jump:
+                    print(f"[OPEN-BLOCK] {account} max_jump={max_jump}")
                     return False
 
         # DIFF skew filter
@@ -3875,8 +4640,10 @@ def _should_issue_command(session, account):
             diff2, _ = _calc_curr_diff(session, "close")
             if diff1 is not None and diff2 is not None:
                 if skew_open == "d1>d2" and diff1 <= diff2:
+                    print(f"[OPEN-BLOCK] {account} skew_open d1>d2 blocked")
                     return False
                 if skew_open == "d2>d1" and diff2 <= diff1:
+                    print(f"[OPEN-BLOCK] {account} skew_open d2>d1 blocked")
                     return False
 
         # ── Per-side spread gating (open) ──
@@ -3944,6 +4711,9 @@ def _should_issue_command(session, account):
             if float(cur_spread) > s_max_spread_int:
                 print(f"[OPEN-SPREAD-GATE] {acc}: BLOCKED — spread {cur_spread} > max {s_max_spread_int}")
                 return False
+        
+        return "open"
+
     elif action == "close":
         match_mode = session.get("match_mode", "ticket")
         if match_mode == "lots":
@@ -3972,24 +4742,37 @@ def _should_issue_command(session, account):
                 return False
 
             # Cross-account close sync: close one hedge pair at a time.
-            # Don't close on this side if it's already ahead of the other side,
-            # BUT only if the other side still has more positions left to close.
-            # If the other side has finished ALL its closes (e.g. it had fewer
-            # fills), allow this side to continue independently — otherwise a
-            # fill-count asymmetry causes a permanent deadlock where this account
-            # is blocked forever waiting for the other side to catch up when it
-            # already finished.
+            exec_order = session.get("execution_order", "simultaneous")
+            my_side_num = sides[account].get("side_number", 0)
+
             for other_acc in sides:
                 if other_acc != account:
                     other_closed = session["closed"].get(other_acc, 0)
-                    if current > other_closed:
-                        # Only block if the other side is still actively closing
-                        other_filled = session["filled"].get(other_acc, 0)
-                        other_close_cap = session.get("close_count")
-                        other_effective_target = min(other_close_cap, other_filled) if other_close_cap is not None else other_filled
-                        if other_closed < other_effective_target:
-                            # Other side is behind and still has work to do — wait for it
-                            return False
+                    
+                    # Only block if the other side is still actively closing
+                    other_filled = session["filled"].get(other_acc, 0)
+                    other_close_cap = session.get("close_count")
+                    other_effective_target = min(other_close_cap, other_filled) if other_close_cap is not None else other_filled
+                    
+                    if other_closed < other_effective_target:
+                        # Other side is behind and still has work to do — wait for it
+                        if exec_order == "simultaneous":
+                            if current > other_closed:
+                                return False
+                        elif exec_order == "side1_first":
+                            if my_side_num == 1:
+                                if current > other_closed:
+                                    return False
+                            elif my_side_num == 2:
+                                if current >= other_closed:
+                                    return False
+                        elif exec_order == "side2_first":
+                            if my_side_num == 2:
+                                if current > other_closed:
+                                    return False
+                            elif my_side_num == 1:
+                                if current >= other_closed:
+                                    return False
                         # Other side is already done — run freely
 
         # Diff-to-close gating: only close when DIFF2 >= threshold.
@@ -4092,7 +4875,87 @@ def _should_issue_command(session, account):
                     return False
                 if skew_close == "d2>d1" and diff2 <= diff1:
                     return False
-    elif action.startswith("cycle_"):
+
+    elif action.startswith("open_limit"):
+        # OPEN-LIMIT: place one limit order per unfilled slot on the target account
+        target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
+        my_side_num = sides[account].get("side_number", 0)
+        
+        # If target_side_num is specified, the other side acts as a market hedge
+        is_limit_side = (target_side_num == 0) or (my_side_num == target_side_num)
+        
+        target = session["total_positions"]
+        current = _get_net_open(session, account)
+        
+        if is_limit_side:
+            # The limit side counts pending orders to prevent spamming!
+            pending_limits = len([f for f in session.get("open_limit_fills", []) if f.get("account") == account])
+            current_total = current + pending_limits
+            if current_total >= target:
+                return False
+        else:
+            # The hedging side MUST wait for the limit side to fill!
+            if current >= target:
+                return False
+            other_acc = [a for a in sides if a != account][0]
+            other_filled = _get_net_open(session, other_acc)
+            if current >= other_filled:
+                return False
+
+        # Cross-account sync: don't open next position until other sides are at the same level
+        # (This applies when both sides are acting as limit orders, i.e., target_side_num == 0)
+        if target_side_num == 0:
+            for other_acc in sides:
+                if other_acc != account:
+                    other_filled = _get_net_open(session, other_acc)
+                    if current > other_filled:
+                        return False
+
+    elif action.startswith("close_limit"):
+        # CLOSE-LIMIT: only fire for positions that don't already have a TP set.
+        target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
+        my_side_num = sides[account].get("side_number", 0)
+        is_limit_side = (target_side_num == 0) or (my_side_num == target_side_num)
+        
+        if not is_limit_side:
+            # Hedging side for CLOSE-LIMIT: Wait for the limit side to close!
+            other_acc = [a for a in sides if a != account][0]
+            my_closed = session.get("closed", {}).get(account, 0)
+            other_closed = session.get("closed", {}).get(other_acc, 0)
+            if my_closed >= other_closed:
+                return False
+            # If the limit side closed a position, trigger a market close on our side!
+            return True
+
+        acct_filled = session["filled"].get(account, 0)
+        if acct_filled <= 0:
+            return False
+        close_limit_done = set(str(t.get("ticket")) if isinstance(t, dict) else str(t) for t in session.get("close_limit_fills", []))
+        fills = session.get("fills", [])
+        close_fills_tickets = {str(f["ticket"]) for f in session.get("close_fills", []) if f.get("account") == account}
+        limit_days = session.get("limit_days") or 0
+        limit_batch = int(session.get("limit_batch_size") or 1)
+        now_epoch = time.time()
+        pending_count = 0
+        for fill in fills:
+            if fill.get("account") != account:
+                continue
+            ticket = str(fill.get("ticket", ""))
+            if ticket in close_fills_tickets:
+                continue  # already closed
+            if ticket in close_limit_done:
+                continue  # TP already set
+            if limit_days > 0:
+                ts_epoch = fill.get("ts_epoch", 0)
+                if ts_epoch:
+                    days_held = (now_epoch - ts_epoch) / (24 * 3600)
+                    if days_held < limit_days:
+                        continue  # too young
+            pending_count += 1
+        if pending_count <= 0:
+            return False  # No eligible positions need TPs set
+
+    elif action.startswith("cycle_") and not action.startswith("cycle_limit_"):
         # CYCLE mode: close and reopen positions on ONE side, one at a time.
         # Derive cycling account from side_number, not dict key order
         target_side_num = 1 if action == "cycle_acc1" else 2
@@ -4324,9 +5187,11 @@ def _should_issue_command(session, account):
                 # a fill or error callback (e.g. server restart, dropped response),
                 # auto-clear it so the cycle can retry. The 30s window matches
                 # the cycle_close_ts timeout used in the poll-loop recovery.
+                # Also clear if cycle_close_ts is 0/missing — this means open_dispatched
+                # was persisted across a restart with no valid timestamp, so it's stale.
                 close_ts = progress.get("cycle_close_ts", 0)
-                if close_ts > 0 and (time.time() - close_ts) > 30:
-                    print(f"[CYCLE-GUARD] open_dispatched stale (>{30}s) — clearing for retry")
+                if close_ts == 0 or (time.time() - close_ts) > 30:
+                    print(f"[CYCLE-GUARD] open_dispatched stale (close_ts={close_ts}) — clearing for retry")
                     progress.pop("open_dispatched", None)
                     session["cycle_progress"] = progress
                     _save_sessions()
@@ -4336,48 +5201,256 @@ def _should_issue_command(session, account):
             session["cycle_progress"] = progress
             return True  # Server manages reopen until EA supports atomic cycle_reopen
         return False
+
+    elif action.startswith("cycle_limit_"):
+        # CYCLE-LIMIT: same flow as cycle_ but uses limit orders for both close and reopen.
+        # Close phase → set a TP at min distance (trailing). Open phase → place a limit open.
+        target_side_num = 1 if action == "cycle_limit_acc1" else 2
+        cycle_account = ""
+        for acc_key, side_info in sides.items():
+            if side_info.get("side_number") == target_side_num:
+                cycle_account = acc_key
+                break
+        if not cycle_account:
+            return False
+        if account != cycle_account:
+            return False  # Only the cycling account gets commands
+
+        # Auto-initialize cycle_progress if missing
+        if not session.get("cycle_progress"):
+            _cl_closed = set(
+                str(cf.get("ticket")) for cf in session.get("close_fills", [])
+                if cf.get("account") == cycle_account
+            )
+            _cl_fills = [
+                f for f in session.get("fills", [])
+                if f.get("account") == cycle_account
+                and str(f.get("ticket")) not in _cl_closed
+            ]
+            cycle_total = len(_cl_fills)
+            session["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
+            session["cycle_account"] = cycle_account
+            print(f"[CYCLE-LIMIT-DBG] Auto-initialized cycle_progress for {cycle_account}, total={cycle_total}")
+
+        progress = session.get("cycle_progress", {})
+        phase = progress.get("phase", "close")
+        idx = progress.get("index", 0)
+
+        # Build sorted (oldest-first) active fills
+        closed_tickets_set = set(
+            str(f.get("ticket")) for f in session.get("close_fills", [])
+            if f.get("account") == cycle_account
+        )
+        acct_fills = [
+            f for f in session.get("fills", [])
+            if f.get("account") == cycle_account
+            and str(f.get("ticket")) not in closed_tickets_set
+        ]
+        def _cl_fill_sort_key(f):
+            ts_str = f.get("ts", "")
+            if ts_str:
+                is_direct = mt_direct_manager and cycle_account in mt_direct_manager.accounts
+                epoch = _parse_broker_timestamp(ts_str, is_direct=is_direct)
+                if epoch is not None:
+                    return epoch
+            return f.get("ts_epoch", 0) or 0
+        acct_fills.sort(key=_cl_fill_sort_key)
+        total_to_cycle = len(acct_fills)
+
+        # --- Age filter (cycle_limit_days, required) ---
+        cycle_limit_days = session.get("cycle_limit_days")
+        print(f"[CYCLE-LIMIT-DBG] acct={account}: cycle_limit_days={repr(cycle_limit_days)} idx={idx} fills={total_to_cycle} phase={phase}")
+        if cycle_limit_days is None or cycle_limit_days == "":
+            print(f"[CYCLE-LIMIT-DBG] acct={account}: cycle_limit_days not set — blocked")
+            return False
+        try:
+            cycle_limit_days = float(cycle_limit_days)
+        except (ValueError, TypeError):
+            return False
+        if cycle_limit_days < 0:
+            return False
+
+        found_old_enough = True
+        if phase != "open":
+            if cycle_limit_days > 0:
+                search_idx = idx
+                found_old_enough = False
+                while search_idx < len(acct_fills):
+                    fill_record = acct_fills[search_idx]
+                    fill_ts_str = fill_record.get("ts", "")
+                    fill_epoch = None
+                    if fill_ts_str:
+                        is_direct = mt_direct_manager and account in mt_direct_manager.accounts
+                        fill_epoch = _parse_broker_timestamp(fill_ts_str, is_direct=is_direct)
+                    if fill_epoch is None:
+                        fill_epoch = fill_record.get("ts_epoch", 0)
+                    if fill_epoch:
+                        age_days = _count_rollover_days(fill_epoch)
+                        if age_days < cycle_limit_days:
+                            print(f"[CYCLE-LIMIT-DBG] acct={account}: position {search_idx} too new (age={age_days}d < {cycle_limit_days}d) — skipping")
+                            search_idx += 1
+                        else:
+                            print(f"[CYCLE-LIMIT-DBG] acct={account}: position {search_idx} old enough (age={age_days}d >= {cycle_limit_days}d)")
+                            found_old_enough = True
+                            break
+                    else:
+                        found_old_enough = True
+                        break
+                idx = search_idx
+                progress["index"] = idx
+                session["cycle_progress"] = progress
+            else:
+                progress["index"] = idx
+                session["cycle_progress"] = progress
+
+        # --- Completion check (close phase only) ---
+        if phase != "open":
+            no_more_to_cycle = cycle_limit_days > 0 and not found_old_enough
+            # Keep cycle_total in sync with the actual active fill count so a stale value
+            # never triggers a false "All done". The primary completion signal is idx >= total_to_cycle.
+            progress["cycle_total"] = total_to_cycle
+            # Also correct cycled if it somehow exceeded idx (double-increment guard)
+            if progress.get("cycled", 0) > idx:
+                progress["cycled"] = idx
+            target_cycles = total_to_cycle  # use live count, not stale stored value
+            if idx >= total_to_cycle or no_more_to_cycle:
+                cycled_count = progress.get("cycled", 0)
+                print(f"[CYCLE-LIMIT-DBG] acct={account}: All done (cycled={cycled_count}, idx={idx}, fills={total_to_cycle})")
+                if session.get("action", "").startswith("cycle_limit_"):
+                    session["action"] = "monitor"
+                    _save_sessions()
+                    avg_spread = 0
+                    total_sc = progress.get("total_spread_cost", 0)
+                    if cycled_count > 0:
+                        avg_spread = total_sc / cycled_count
+                    _log_event(session["id"], account, "cycle_limit_complete",
+                               f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
+                    print(f"[CYCLE-LIMIT] Complete: {cycled_count} cycled, avg_cost={avg_spread:.5f}, → MONITOR")
+                return False
+
+        if phase == "close":
+            # Guard: if TP already set for this position, wait for the TP fill
+            if progress.get("close_tp_set"):
+                # If the broker already confirmed this TP, check if the position is still open.
+                # We can't rely on the Hedge Monitor (it may process the missing ticket under a
+                # different session). Instead, poll the broker-visible open positions directly.
+                if progress.get("close_tp_confirmed"):
+                    batch_size = int(session.get("cycle_limit_batch_size", 1))
+                    target_tickets = []
+                    for i in range(batch_size):
+                        if idx + i < len(acct_fills):
+                            target_tickets.append(acct_fills[idx + i].get("ticket"))
+
+                    # Look up ea_account_info for this account to see live open tickets
+                    ea_info = ea_account_info.get(account, {})
+                    ea_open_tickets_raw = ea_info.get("open_tickets")
+
+                    if ea_open_tickets_raw is not None:
+                        ea_open_tickets = set(_normalize_ticket(t) for t in ea_open_tickets_raw)
+                        
+                        # Check if ANY of the target tickets are still open
+                        tickets_still_open = any(_normalize_ticket(t) in ea_open_tickets for t in target_tickets if t is not None)
+
+                        if not tickets_still_open and target_tickets:
+                            # ALL TPs were hit! Transition close → open
+                            print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase→open.")
+                            progress["phase"] = "open"
+                            progress["cycle_close_ts"] = time.time()
+                            progress.pop("close_tp_set", None)
+                            progress.pop("close_tp_set_ts", None)
+                            progress.pop("close_tp_confirmed", None)
+                            progress.pop("open_dispatched", None)
+                            progress.pop("open_fill_received", None)
+                            progress["closed_tickets"] = target_tickets
+                            session["cycle_limit_open_fills"] = [
+                                f for f in session.get("cycle_limit_open_fills", [])
+                                if f.get("account") != account
+                            ]
+                            # Clear the connector's claimed-ticket set so the next batch's fill watchers
+                            # don't incorrectly skip positions that were claimed by this batch's watchers.
+                            if mt_direct_manager:
+                                acct_obj = mt_direct_manager.accounts.get(account)
+                                if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
+                                    acct_obj._claimed_fill_tickets.clear()
+                            # Record these as close fills so idx advances on next cycle
+                            for target_ticket in target_tickets:
+                                session.setdefault("close_fills", []).append({
+                                    "account": account,
+                                    "ticket": target_ticket,
+                                    "price": progress.get("close_tp_price"),
+                                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "ts_epoch": time.time(),
+                                    "external": True,
+                                })
+                            session["cycle_progress"] = progress
+                            _save_sessions()
+                            # Phase is now "open" — update local variable and fall through to open-phase dispatch
+                            phase = "open"
+                        else:
+                            return False  # TP confirmed on broker; waiting for market to hit it
+                    else:
+                        return False  # open_tickets not yet available from broker; wait
+
+                else:
+                    # Safety: auto-clear ONLY if broker never confirmed (may have been rejected)
+                    tp_set_ts = progress.get("close_tp_set_ts", 0)
+                    elapsed = time.time() - tp_set_ts if tp_set_ts > 0 else 0
+                    print(f"[CYCLE-DEBUG-TIME] acct={account} tp_set_ts={tp_set_ts} elapsed={elapsed}")
+                    if tp_set_ts > 0 and elapsed > 60:
+                        print(f"[CYCLE-LIMIT-GUARD] TP unconfirmed + stale (>60s) — clearing for retry on {account}")
+                        progress.pop("close_tp_set", None)
+                        progress.pop("close_tp_set_ts", None)
+                        progress.pop("close_tp_confirmed", None)
+                        session["cycle_progress"] = progress
+                        _save_sessions()
+                    else:
+                        return False  # TP dispatched but not yet confirmed; wait
+            if progress.get("phase") == "close":
+                # Still in close phase — signal that TP should be placed.
+                # IMPORTANT: do NOT mutate close_tp_set here. If we do, the MT5
+                # connector's _process_commands (which also calls _should_issue_command)
+                # will see close_tp_set=True but close_tp_confirmed=False and return
+                # False before it can call _send_close_command / modify_position_tp.
+                # close_tp_set is set by _send_close_command after the TP succeeds.
+                print(f"[CYCLE-LIMIT] Returning cycle_limit_close for {account} (idx={idx})")
+                return "cycle_limit_close"
+
+        elif phase == "open":
+            # Guard: only dispatch ONE limit open per cycle step
+            if progress.get("open_dispatched"):
+                # Also clear if cycle_close_ts is 0/missing — this means open_dispatched
+                # was persisted across a restart with no valid timestamp, so it's stale.
+                close_ts = progress.get("cycle_close_ts", 0)
+                if close_ts == 0 or (time.time() - close_ts) > 60:
+                    # CRITICAL: before clearing, check if a pending limit order still exists
+                    # at the broker (in cycle_limit_open_fills). If yes, do NOT retry —
+                    # retrying would create a duplicate open and over-fill the account.
+                    pending_opens = [
+                        f for f in session.get("cycle_limit_open_fills", [])
+                        if f.get("account") == account
+                    ]
+                    if pending_opens:
+                        # There is already a pending limit at the broker — just wait.
+                        # Reset the stale timer so we don't keep checking every poll.
+                        progress["cycle_close_ts"] = time.time()
+                        session["cycle_progress"] = progress
+                        _save_sessions()
+                        return False
+                    print(f"[CYCLE-LIMIT-GUARD] open_dispatched stale (close_ts={close_ts}) — clearing for retry on {account}")
+                    progress.pop("open_dispatched", None)
+                    session["cycle_progress"] = progress
+                    _save_sessions()
+                else:
+                    return False
+            progress["open_dispatched"] = True
+            progress["cycle_close_ts"] = time.time()  # Reset stale guard window
+            session["cycle_progress"] = progress
+            print(f"[CYCLE-LIMIT] Returning cycle_limit_open for {account}")
+            return "cycle_limit_open"
+
+        return False
     else:
         return False
-
-    # Check execution order
-    exec_order = session.get("execution_order", "simultaneous")
-    if exec_order == "simultaneous":
-        return True
-
-    # Find side numbers
-    my_side = sides[account].get("side_number", 0)
-    other_side_num = 1 if my_side == 2 else 2
-
-    # Find the other account
-    other_account = None
-    for acc, info in sides.items():
-        if info.get("side_number") == other_side_num:
-            other_account = acc
-            break
-
-    if other_account is None:
-        return True  # Only one side configured
-
-    if action == "open":
-        target = session["total_positions"]
-        if exec_order == "side1_first":
-            if my_side == 2:
-                return session["filled"].get(other_account, 0) >= target
-            return True
-        elif exec_order == "side2_first":
-            if my_side == 1:
-                return session["filled"].get(other_account, 0) >= target
-            return True
-    elif action == "close":
-        close_count = session.get("close_count", 0) or 0
-        if exec_order == "side1_first":
-            if my_side == 2:
-                return session["closed"].get(other_account, 0) >= close_count
-            return True
-        elif exec_order == "side2_first":
-            if my_side == 1:
-                return session["closed"].get(other_account, 0) >= close_count
-            return True
 
     return True
 
@@ -4755,6 +5828,8 @@ def update_session(session_id):
                           "execution_order", "max_accum_lots", "max_accum_deals",
                           "side1_max_spread", "side2_max_spread",
                           "close_count", "action", "cycle_days",
+                          "limit_distance", "limit_batch_size", "limit_days", "trail_step",
+                          "cycle_limit_days", "cycle_limit_distance", "cycle_limit_trail_step", "cycle_limit_batch_size",
                           "max_ticks_per_5s", "max_price_jump",
                           "require_diff_skew_open", "require_diff_skew_close",
                           "avoid_news")
@@ -4993,7 +6068,9 @@ def set_session_mode(session_id):
     """Set session mode to open, close, monitor, cycle_acc1, or cycle_acc2."""
     data = request.get_json(force=True) or {}
     mode = data.get("mode", "").lower()
-    valid_modes = ("open", "close", "monitor", "cycle_acc1", "cycle_acc2")
+    valid_modes = ("open", "close", "monitor", "cycle_acc1", "cycle_acc2",
+                   "open_limit_acc1", "open_limit_acc2", "close_limit_acc1", "close_limit_acc2",
+                   "cycle_limit_acc1", "cycle_limit_acc2")
     if mode not in valid_modes:
         return jsonify({"error": f"Invalid mode. Must be one of: {', '.join(valid_modes)}"}), 400
     with lock:
@@ -5007,7 +6084,7 @@ def set_session_mode(session_id):
             # This works correctly even after partial closes via buttons,
             # since _should_issue_command uses min(close_count, filled) as the target.
             s["close_count"] = None
-        elif mode.startswith("cycle_"):
+        elif mode.startswith("cycle_") and not mode.startswith("cycle_limit_"):
             # Initialize cycle tracking — clear cycle_days so cycling
             # waits for the user to enter a value before starting
             s["cycle_days"] = ""
@@ -5058,6 +6135,60 @@ def set_session_mode(session_id):
                 s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
                 _log_event(session_id, cycle_account, "cycle_started",
                            f"Cycling {cycle_total} positions on {cycle_account}")
+        elif mode.startswith("cycle_limit_"):
+            # CYCLE-LIMIT init — set defaults; user must enter cycle_limit_days before it fires
+            target_side_num = 1 if mode == "cycle_limit_acc1" else 2
+            cycle_account = ""
+            for acc_key, side_info in s.get("sides", {}).items():
+                if side_info.get("side_number") == target_side_num:
+                    cycle_account = acc_key
+                    break
+            if cycle_account:
+                s["cycle_account"] = cycle_account
+                s.setdefault("cycle_limit_days", "")          # must be filled by user
+                s.setdefault("cycle_limit_distance", 10)       # pts from quote
+                s.setdefault("cycle_limit_trail_step", 1)      # pts min drift before trailing
+                s.setdefault("cycle_limit_batch_size", 1)      # number of positions to cycle concurrently
+                s["cycle_limit_open_fills"] = []               # clear any stale pending opens
+                closed_tickets_set = set(
+                    str(f.get("ticket")) for f in s.get("close_fills", [])
+                    if f.get("account") == cycle_account
+                )
+                active_fills = [
+                    f for f in s.get("fills", [])
+                    if f.get("account") == cycle_account
+                    and str(f.get("ticket")) not in closed_tickets_set
+                ]
+                cycle_total = len(active_fills)
+                existing_prog = s.get("cycle_progress", {})
+                # Preserve progress if cycle is already underway (e.g. resuming after TP failure
+                # transiently switched action to monitor). Only reset if starting genuinely fresh.
+                # Also preserve if phase=="close" even at idx=0/cycled=0 (TP in-flight on first pos).
+                has_progress = (existing_prog.get("cycled", 0) > 0
+                                or existing_prog.get("index", 0) > 0
+                                or existing_prog.get("phase") == "close"
+                                or existing_prog.get("close_tp_set"))
+                if has_progress:
+                    # Resume — keep phase/index/cycled, just refresh cycle_total
+                    existing_prog["cycle_total"] = cycle_total
+                    # CRITICAL: If cycled has been over-counted (e.g. double-incremented by auto-heal
+                    # + handle_fill), clamp it to idx. Otherwise cycled>=cycle_total fires immediately.
+                    if existing_prog.get("cycled", 0) > existing_prog.get("index", 0):
+                        existing_prog["cycled"] = existing_prog.get("index", 0)
+                    # CRITICAL: Always clear TP confirmation state on manual resume.
+                    # This forces the dashboard to re-apply the TP. If the TP is already there,
+                    # the connector treats 'No changes' as success. If it's missing (e.g. wiped),
+                    # it correctly replaces it, preventing a permanent deadlock.
+                    existing_prog.pop("close_tp_set", None)
+                    existing_prog.pop("close_tp_set_ts", None)
+                    existing_prog.pop("close_tp_confirmed", None)
+                    
+                    s["cycle_progress"] = existing_prog
+                    print(f"[CYCLE-LIMIT] set_mode: resuming existing progress cycled={existing_prog.get('cycled',0)} phase={existing_prog.get('phase','?')} idx={existing_prog.get('index',0)}")
+                else:
+                    s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
+                _log_event(session_id, cycle_account, "cycle_limit_started",
+                           f"CYCLE-LIMIT started for {cycle_total} positions on {cycle_account}")
         # Activate session so commands can be issued
         if s["status"] in ("draft", "paused"):
             s["status"] = "active"
@@ -5268,7 +6399,7 @@ def poll_command():
                 for _sid, _sess in sessions.items():
                     if _sess.get("imported") and account in _sess.get("sides", {}):
                         sess_action = _sess.get("action", "")
-                        if sess_action.startswith("cycle_") or sess_action == "close":
+                        if sess_action.startswith("cycle_") or sess_action in ("close", "close_limit"):
                             break  # Don't sync during cycling or closing
                         old_filled = _sess.get("filled", {}).get(account, 0)
                         if ea_pos != old_filled:
@@ -5345,6 +6476,71 @@ def poll_command():
                 return jsonify(cmd)
 
             action = session.get("action", "open")
+
+            # Handle cycle_limit_close: set TP on the specific position via direct connector
+            if should == "cycle_limit_close":
+                # For MT direct accounts: dispatch via mt_direct_connector (it calls modify_position_tp)
+                # For bridge/EA accounts: send a modify_tp command
+                cycle_account = session.get("cycle_account", "")
+                progress = session.get("cycle_progress", {})
+                idx = progress.get("index", 0)
+                if mt_direct_manager and cycle_account in mt_direct_manager.accounts:
+                    # Direct connector handles this — it will be picked up by _process_commands
+                    # We already set close_tp_set flag in _should_issue_command.
+                    # The direct connector's _process_commands loop will call _send_close_command
+                    # with is_limit=True to modify the TP.
+                    in_flight_commands[(sid, cycle_account)] = time.time()
+                else:
+                    # EA (bridge) path: send modify_tp command
+                    closed_set_c = set(str(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == cycle_account)
+                    cl_fills_ea = sorted(
+                        [f for f in session.get("fills", []) if f.get("account") == cycle_account and str(f.get("ticket")) not in closed_set_c],
+                        key=lambda f: f.get("ts_epoch", 0) or 0
+                    )
+                    if idx < len(cl_fills_ea):
+                        ea_ticket = cl_fills_ea[idx].get("ticket", 0)
+                        ea_pair = side_info.get("pair") or session["pair"]
+                        ea_side = side_info.get("action", "buy")
+                        cl_dist = float(session.get("cycle_limit_distance") or 10)
+                        cmd = {
+                            "session_id": sid,
+                            "action": "modify_tp",
+                            "pair": ea_pair,
+                            "lots": side_lots,
+                            "side": ea_side,
+                            "max_spread": 9999,
+                            "comment": side_info.get("comment") or session["comment"],
+                            "ticket": ea_ticket,
+                            "limit_distance": cl_dist,
+                        }
+                        in_flight_commands[(sid, cycle_account)] = time.time()
+                        return jsonify(cmd)
+                continue
+
+            # Handle cycle_limit_open: place a limit open order after the TP was filled
+            if should == "cycle_limit_open":
+                cycle_account = session.get("cycle_account", "")
+                if mt_direct_manager and cycle_account in mt_direct_manager.accounts:
+                    # Direct connector handles this — picked up by _process_commands
+                    in_flight_commands[(sid, cycle_account)] = time.time()
+                else:
+                    # EA (bridge) path: send limit_open command
+                    ea_pair = side_info.get("pair") or session["pair"]
+                    ea_side = side_info.get("action", "buy")
+                    cl_dist = float(session.get("cycle_limit_distance") or 10)
+                    cmd = {
+                        "session_id": sid,
+                        "action": "open_limit",
+                        "pair": ea_pair,
+                        "lots": side_lots,
+                        "side": ea_side,
+                        "max_spread": 9999,
+                        "comment": side_info.get("comment") or session["comment"],
+                        "limit_distance": cl_dist,
+                    }
+                    in_flight_commands[(sid, cycle_account)] = time.time()
+                    return jsonify(cmd)
+                continue
 
             # Handle cycle_close: close the specific position AND immediately reopen
             if should == "cycle_close":
@@ -5752,6 +6948,42 @@ def trade_result():
                     _log_event(session_id, account, "trade_filled",
                                f"ticket={ticket} spread={spread} price={fill_price} lots={fill_lot_size} filled={session['filled'][account]}/{session['total_positions']}")
                 _check_session_completion(session)
+
+            elif status == "limit_placed":
+                # Handle pending OPEN-LIMIT orders
+                existing_tickets = {str(f.get("ticket")) for f in session.get("open_limit_fills", []) if f.get("account") == account}
+                if str(ticket) in existing_tickets:
+                    print(f"[TRADE_RESULT] Suppressed duplicate limit report for ticket={ticket} on account={account}")
+                    return jsonify({"ok": True, "suppressed_duplicate": True})
+
+                fill_price = data.get("fill_price")
+                fill_lot_size = float(data.get("lots", 0) or session.get("sides", {}).get(account, {}).get("lot_size") or session.get("lot_size", 0))
+                
+                if session.get("action", "").startswith("cycle_limit_"):
+                    session.setdefault("cycle_limit_open_fills", []).append({
+                        "account": account,
+                        "ticket": ticket,
+                        "price": float(fill_price) if fill_price else None,
+                        "lots": fill_lot_size,
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "ts_epoch": time.time(),
+                    })
+                    # Do not increment global filled count for cycle_limit
+                else:
+                    session.setdefault("open_limit_fills", []).append({
+                        "account": account,
+                        "ticket": ticket,
+                        "price": float(fill_price) if fill_price else None,
+                        "lots": fill_lot_size,
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "ts_epoch": time.time(),
+                    })
+                    # Don't increment "filled" counter until the broker actually fills it!
+                    # Wait, for limit gating we need to count placed orders as "filled" to prevent infinite placing
+                    session.setdefault("filled", {})[account] = session.setdefault("filled", {}).get(account, 0) + 1
+                _log_event(session_id, account, "limit_placed",
+                           f"ticket={ticket} price={fill_price} lots={fill_lot_size} placed={session['filled'][account]}/{session['total_positions']}")
+                _save_sessions()
 
             elif status == "rollback_closed":
                 if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
@@ -6594,6 +7826,8 @@ def update_account(account_name):
                 acct["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
             if "notes" in data:
                 acct["notes"] = str(data["notes"])
+            if "is_hidden" in data:
+                acct["is_hidden"] = bool(data["is_hidden"])
             if "fee_threshold" in data:
                 try:
                     acct["fee_threshold"] = float(data["fee_threshold"])
@@ -7629,6 +8863,10 @@ def _process_position_import(req):
     # Do not fallback to pos1/pos2 if they are netting, as they represent aggregate
     # positions. We keep the default lot_size (0.01) so the aggregate is split into
     # the smallest safe increments.
+    app.logger.info("[IMPORT] Raw lots: pos1[0]=%s pos2[0]=%s → lot_size=%.4f",
+                    pos1[0].get('lots') if pos1 else 'N/A',
+                    pos2[0].get('lots') if pos2 else 'N/A',
+                    lot_size)
 
     # Split netting aggregate positions into virtual fills
     if _acct1_netting:
@@ -7725,6 +8963,7 @@ def _process_position_import(req):
                 "spread": None,
                 "ts": p.get("open_time", now),
                 "ts_epoch": p.get("open_epoch", time.time()),
+                "lots": float(p.get("lots") or lot_size),
                 "cmd_ts": None,
                 "imported": True,
                 "pair_index": i,
@@ -7739,6 +8978,7 @@ def _process_position_import(req):
                 "spread": None,
                 "ts": p.get("open_time", now),
                 "ts_epoch": p.get("open_epoch", time.time()),
+                "lots": float(p.get("lots") or lot_size),
                 "cmd_ts": None,
                 "imported": True,
                 "pair_index": i,
@@ -8547,6 +9787,7 @@ def api_pending_rollbacks():
             if state is None:  # awaiting answer
                 session = sessions.get(sid, {})
                 rb_tickets = session.get("rollback_tickets", {}).get(account, [])
+                reason = session.get("rollback_reason", {}).get(account, "")
                 pending.append({
                     "sid": sid,
                     "account": account,
@@ -8554,6 +9795,7 @@ def api_pending_rollbacks():
                     "tickets": rb_tickets[:5],  # preview first 5
                     "pair": session.get("pair", ""),
                     "sid_short": sid[:8],
+                    "reason": reason,  # Why the rollback was triggered
                 })
     return jsonify({"pending": pending})
 
@@ -8872,15 +10114,18 @@ body {
 .tab-panel.active { display: block; }
 
 /* Accounts table */
-.accounts-table { width: 100%; border-collapse: collapse; }
+.accounts-table { width: auto; min-width: 100%; border-collapse: collapse; table-layout: auto; white-space: nowrap; }
 .accounts-table th {
   text-align: left; padding: 4px 8px; font-size: 0.75rem;
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text2); border-bottom: 2px solid var(--border);
+  position: relative; user-select: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .accounts-table td {
-  padding: 5px 8px; font-size: 0.85rem;
+  padding: var(--acct-row-pad, 5px) 8px; font-size: 0.85rem;
   border-bottom: 1px solid var(--border); vertical-align: middle;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .accounts-table tr:hover td { background: var(--surface2); }
 .conn-dot {
@@ -8889,6 +10134,14 @@ body {
 }
 .conn-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .conn-dot.offline { background: var(--red); }
+/* Column resize handle */
+.col-resize-handle {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
+  cursor: col-resize; z-index: 2;
+}
+.col-resize-handle:hover, .col-resize-handle.dragging {
+  background: var(--accent); opacity: 0.6;
+}
 
 /* Diff display in session table */
 .diff-cell { font-size: 0.78rem; }
@@ -9104,6 +10357,17 @@ body {
           <button class="col-toggle-btn" onclick="toggleAcctColMenu()" title="Show/hide columns">👁 Columns</button>
           <div class="col-toggle-menu" id="acctColToggleMenu"></div>
         </div>
+        <label style="display:flex;align-items:center;gap:5px;font-size:0.78rem;color:var(--text2);user-select:none;" title="Adjust row height / line spacing">
+          Density
+          <input type="range" id="acctRowDensitySlider" min="1" max="14" step="1" value="5"
+            style="width:70px;accent-color:var(--accent);cursor:pointer;"
+            oninput="applyAcctRowDensity(this.value)">
+        </label>
+        <button class="col-toggle-btn" onclick="autofitAcctCols()" title="Auto-fit column widths to content" style="font-size:0.72rem;">⇔ Autofit</button>
+        <label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;color:var(--text2);cursor:pointer;user-select:none;" title="Hide accounts marked as hidden">
+          <input type="checkbox" id="hideHiddenAccountsToggle" checked onchange="toggleHideHiddenAccounts(this.checked)">
+          Hide hidden
+        </label>
         <label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;color:var(--text2);cursor:pointer;user-select:none;" title="Group accounts by name prefix">
           <input type="checkbox" id="groupViewToggle" onchange="toggleGroupView(this.checked)">
           Group view
@@ -9125,6 +10389,7 @@ body {
       <table class="accounts-table" id="accountsTable">
         <thead>
           <tr>
+            <th data-acol="-1" style="width:30px;" title="Hide account">👁</th>
             <th data-acol="0">Name</th>
             <th data-acol="1">Group</th>
             <th data-acol="2">Connection</th>
@@ -9132,27 +10397,28 @@ body {
             <th data-acol="4">Equity</th>
             <th data-acol="5" title="Optimal suggested equity distribution based on leverage and stopout levels">Opt Eq</th>
             <th data-acol="6" title="Suggested fund transfer to reach optimal equity (Optimal Equity - Current Equity)">Shift</th>
-            <th data-acol="7" title="Override intended lots for this hedge group">Intended Lots</th>
+            <th data-acol="7" title="Override intended lots for this hedge group">TGT Lots</th>
             <th data-acol="8">PnL</th>
             <th data-acol="9">Leverage</th>
-            <th data-acol="10">Positions</th>
+            <th data-acol="10">Pos.</th>
             <th data-acol="11">Lots</th>
             <th data-acol="12">Margin Use</th>
-            <th data-acol="13" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
-            <th data-acol="14" title="Margin alert threshold (%)">Marg.Alrt%</th>
-            <th data-acol="15">Swap</th>
-            <th data-acol="16" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
-            <th data-acol="17" title="Oldest position age (rollover days)">Age</th>
-            <th data-acol="18">Last Poll</th>
-            <th data-acol="19" title="Auto connect account at start">Auto Conn</th>
-            <th data-acol="20" title="Alert Email(s) Override">Email Alert</th>
-            <th data-acol="21" title="Alert Telegram ID(s) Override">Telegram Alert</th>
-            <th data-acol="22" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
-            <th data-acol="23"></th>
+            <th data-acol="13" title="Net Open Positions (Notional) / Free Margin Cash">NOP/FM</th>
+            <th data-acol="14" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
+            <th data-acol="15" title="Margin alert threshold (%)">Marg.Alrt%</th>
+            <th data-acol="16">Swap</th>
+            <th data-acol="17" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
+            <th data-acol="18" title="Oldest position age (rollover days)">Age</th>
+            <th data-acol="19">Last Poll</th>
+            <th data-acol="20" title="Auto connect account at start">Auto Conn</th>
+            <th data-acol="21" title="Alert Email(s) Override">Email Alert</th>
+            <th data-acol="22" title="Alert Telegram ID(s) Override">Telegram Alert</th>
+            <th data-acol="23" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
+            <th data-acol="24"></th>
           </tr>
         </thead>
         <tbody id="accountsBody">
-          <tr><td colspan="23" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
+          <tr><td colspan="24" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
         </tbody>
       </table>
     </div>
@@ -10884,20 +12150,23 @@ function toggleGroupView(enabled) {
   if (window._lastRenderAccountsArgs) {
     renderAccounts.apply(null, window._lastRenderAccountsArgs);
     applyAcctColVisibility();
+    // Re-attach drag handles and restore saved widths (table._resizeInit flag is reset by re-render)
+    document.getElementById('accountsTable')._resizeInit = false;
+    initAcctColResize();
   }
 }
 
 // ─── Account column toggle ───────────────────────────────────────────
-let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["20", "21"]');
+let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["21", "22"]');
 const ACCT_COLUMNS = [
-  {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
+  {idx:'-1', name:'Hide'}, {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
   {idx:'3', name:'Balance'}, {idx:'4', name:'Equity'},
-  {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'}, {idx:'7', name:'Intended Lots'},
-  {idx:'8', name:'PnL'}, {idx:'9', name:'Leverage'}, {idx:'10', name:'Positions'}, {idx:'11', name:'Lots'},
-  {idx:'12', name:'Margin Use'}, {idx:'13', name:'Pips to MC'}, {idx:'14', name:'Marg.Alrt%'},
-  {idx:'15', name:'Swap'}, {idx:'16', name:'Δ Swap'}, {idx:'17', name:'Age'}, {idx:'18', name:'Last Poll'},
-  {idx:'19', name:'Auto Conn'}, {idx:'20', name:'Email Alert'}, {idx:'21', name:'Telegram Alert'},
-  {idx:'22', name:'Stats'}, {idx:'23', name:'Actions'},
+  {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'}, {idx:'7', name:'TGT Lots'},
+  {idx:'8', name:'PnL'}, {idx:'9', name:'Leverage'}, {idx:'10', name:'Pos.'}, {idx:'11', name:'Lots'},
+  {idx:'12', name:'Margin Use'}, {idx:'13', name:'NOP/FM'}, {idx:'14', name:'Pips to MC'}, {idx:'15', name:'Marg.Alrt%'},
+  {idx:'16', name:'Swap'}, {idx:'17', name:'Δ Swap'}, {idx:'18', name:'Age'}, {idx:'19', name:'Last Poll'},
+  {idx:'20', name:'Auto Conn'}, {idx:'21', name:'Email Alert'}, {idx:'22', name:'Telegram Alert'},
+  {idx:'23', name:'Stats'}, {idx:'24', name:'Actions'},
 ];
 function initAcctColToggleMenu() {
   const menu = document.getElementById('acctColToggleMenu');
@@ -10948,12 +12217,197 @@ function applyAcctColVisibility() {
     style.textContent = '';
     return;
   }
-  // nth-child is 1-based, data-acol is 0-based
+  // nth-child is 1-based, data-acol is 0-based. Note: we added a "Hide" column (-1) at the start, so offset is +2.
   const rules = hiddenAcctCols.map(c => {
-    const n = parseInt(c) + 1;
+    const n = parseInt(c) + 2;
     return `#accountsTable th:nth-child(${n}), #accountsTable td:nth-child(${n}) { display: none; }`;
   }).join('\n');
   style.textContent = rules;
+}
+
+// ─── Row density (line spacing) ───────────────────────────────────────────────
+(function() {
+  const saved = localStorage.getItem('acctRowDensity');
+  const v = saved != null ? saved : '5';
+  document.documentElement.style.setProperty('--acct-row-pad', v + 'px');
+  const slider = document.getElementById('acctRowDensitySlider');
+  if (slider) slider.value = v;
+})();
+function applyAcctRowDensity(v) {
+  document.documentElement.style.setProperty('--acct-row-pad', v + 'px');
+  localStorage.setItem('acctRowDensity', v);
+}
+
+// ─── Accounts table autofit (content-only) ──────────────────────────────────
+function autofitAcctCols() {
+  const table = document.getElementById('accountsTable');
+  if (!table) return;
+
+  // Clear saved manual widths so autofit takes full effect
+  localStorage.removeItem('acctColWidths');
+
+  // Reset any previously locked widths on th/td
+  table.querySelectorAll('th, td').forEach(c => {
+    c.style.width = ''; c.style.minWidth = ''; c.style.maxWidth = '';
+  });
+
+  // Temporarily go auto layout so cells measure at natural content size
+  table.style.tableLayout = 'auto';
+  table.style.width = 'min-content';
+  table.style.minWidth = '0';
+
+  // Measure MAX cell content width from BODY rows only — headers are EXCLUDED
+  // so abbreviated column labels ("Connection", "Equity") don't inflate widths.
+  const ths = Array.from(table.querySelectorAll('thead th'));
+  const colCount = ths.length;
+  const colWidths = new Array(colCount).fill(0);
+
+  table.querySelectorAll('tbody tr').forEach(row => {
+    Array.from(row.cells).forEach((td, i) => {
+      if (i < colCount) {
+        const w = td.getBoundingClientRect().width;
+        if (w > colWidths[i]) colWidths[i] = w;
+      }
+    });
+  });
+
+  // Per-column hard caps (px) — prevent wide header labels from being inflated by autofit.
+  // Key = data-acol value.
+  const COL_MAX = { '2': 60 }; // Connection col: dot + "MT4" is ~50px; cap at 60
+
+  let totalMin = 0;
+  const savedWidths = {};
+  ths.forEach((th, i) => {
+    const acol = th.getAttribute('data-acol');
+    if (acol && hiddenAcctCols.includes(acol)) return;
+
+    let w = Math.max(colWidths[i] + 6, 20);
+    if (acol && COL_MAX[acol]) w = Math.min(w, COL_MAX[acol]);
+    totalMin += w;
+
+    if (i === 1) { // Name column — flexible, acts as table width absorber
+      th.style.width = '';
+      th.style.minWidth = Math.max(colWidths[i] + 4, 60) + 'px';
+      th.style.maxWidth = '';
+      return;
+    }
+    th.style.width = w + 'px';
+    th.style.minWidth = w + 'px';
+    th.style.maxWidth = w + 'px';
+    if (acol) savedWidths[acol] = w;
+  });
+
+  // Persist autofit result so column resizer doesn't fight it
+  localStorage.setItem('acctColWidths', JSON.stringify(savedWidths));
+
+  table.style.tableLayout = 'fixed';
+  table.style.width = '100%';
+  table.style.minWidth = `max(100%, ${totalMin}px)`;
+}
+
+// ─── Account table column drag-resize ─────────────────────────────────────
+const ACCT_COL_WIDTHS_KEY = 'acctColWidths';
+
+function _saveAcctColWidths() {
+  const table = document.getElementById('accountsTable');
+  if (!table) return;
+  const saved = {};
+  table.querySelectorAll('thead th[data-acol]').forEach(th => {
+    const acol = th.getAttribute('data-acol');
+    const w = th.getBoundingClientRect().width;
+    if (w > 0) saved[acol] = Math.round(w);
+  });
+  localStorage.setItem(ACCT_COL_WIDTHS_KEY, JSON.stringify(saved));
+}
+
+function _applyAcctColWidths() {
+  const table = document.getElementById('accountsTable');
+  if (!table) return;
+  const saved = JSON.parse(localStorage.getItem(ACCT_COL_WIDTHS_KEY) || 'null');
+  if (!saved) return;
+  let totalW = 0;
+  let anyApplied = false;
+  table.querySelectorAll('thead th[data-acol]').forEach(th => {
+    const acol = th.getAttribute('data-acol');
+    if (saved[acol]) {
+      const w = saved[acol];
+      th.style.width = w + 'px'; th.style.minWidth = w + 'px'; th.style.maxWidth = w + 'px';
+      totalW += w;
+      anyApplied = true;
+    } else {
+      totalW += Math.round(th.getBoundingClientRect().width) || 0;
+    }
+  });
+  if (anyApplied) {
+    table.style.tableLayout = 'fixed';
+    table.style.width = Math.max(100, totalW) + 'px';
+    table.style.minWidth = '0';
+  }
+}
+
+function initAcctColResize() {
+  const table = document.getElementById('accountsTable');
+  if (!table || table._resizeInit) return;
+  table._resizeInit = true;
+
+  // Restore saved widths on init
+  _applyAcctColWidths();
+
+  table.querySelectorAll('thead th').forEach(th => {
+    // Skip the Hide checkbox column
+    if (th.getAttribute('data-acol') === '-1') return;
+    // Remove old handles to avoid duplicates after re-renders
+    th.querySelectorAll('.col-resize-handle').forEach(h => h.remove());
+
+    const handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    th.appendChild(handle);
+
+    let startX, startW, tableStartW;
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      handle.classList.add('dragging');
+      startX = e.clientX;
+      startW = th.getBoundingClientRect().width;
+      // Capture explicit table pixel width NOW — we'll shrink/grow it in sync
+      // with the column. This is the ONLY way table-layout:fixed will actually
+      // clip cell content below its natural text width.
+      tableStartW = Math.round(table.getBoundingClientRect().width);
+
+      // Freeze every column at its current pixel width so other columns don't move
+      table.querySelectorAll('thead th').forEach(oth => {
+        const cw = Math.round(oth.getBoundingClientRect().width);
+        if (cw > 0) {
+          oth.style.width = cw + 'px';
+          oth.style.minWidth = cw + 'px';
+          oth.style.maxWidth = cw + 'px';
+        }
+      });
+      // Explicit pixel width + fixed layout = browser WILL clip cell content
+      table.style.tableLayout = 'fixed';
+      table.style.width = tableStartW + 'px';
+      table.style.minWidth = '0';
+
+      function onMove(ev) {
+        const delta = ev.clientX - startX;
+        const newW = Math.max(8, startW + delta);
+        th.style.width = newW + 'px';
+        th.style.minWidth = newW + 'px';
+        th.style.maxWidth = newW + 'px';
+        // Keep table width = sum of columns: shrinking a col shrinks the table
+        // so other columns are NEVER stretched to compensate
+        table.style.width = Math.max(100, tableStartW + (newW - startW)) + 'px';
+      }
+      function onUp() {
+        handle.classList.remove('dragging');
+        _saveAcctColWidths();
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
 }
 
 // ─── Column width persistence ───────────────────────────────────────────
@@ -11176,7 +12630,7 @@ function renderOpenedDeals() {
   // For now: display deals from sessions that have fills
   const dealPairs = [];
   // Only show sessions whose positions are still open (not closed/completed)
-  stratSessions.filter(s => ['open','monitor','close','cycle_acc1','cycle_acc2'].includes(s.action) || s.status === 'active').forEach(s => {
+  stratSessions.filter(s => ['open','monitor','close','cycle_acc1','cycle_acc2','cycle_limit_acc1','cycle_limit_acc2'].includes(s.action) || s.status === 'active').forEach(s => {
     const accs = Object.keys(s.sides || {});
     if (accs.length < 2) return;
     const fills = s.fills || [];
@@ -12415,22 +13869,55 @@ function renderSide(session, sideNum) {
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${target} closed</span>${errLabel}`;
       } else if (action.startsWith('cycle_')) {
         // Derive cycling account using side_number, not Object.keys() order
-        const cycleSideNum = action === 'cycle_acc1' ? 1 : 2;
+        const cycleSideNum = (action === 'cycle_acc1' || action === 'cycle_limit_acc1') ? 1 : 2;
         if (info.side_number === cycleSideNum) {
           const progress = session.cycle_progress || {};
           const groupLabel = info.group ? ` | ${info.group}` : '';
           return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--orange)">CYCLING${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${progress.cycled||0} cycled (${progress.phase||'-'})</span>${errLabel}`;
         }
         // Non-cycling side: show net open positions
-        const filled = (session.filled && session.filled[acc]) || 0;
-        const closed = (session.closed && session.closed[acc]) || 0;
-        count = Math.max(0, filled - closed);
+        let filled = (session.filled && session.filled[acc]) || 0;
+        let closed = (session.closed && session.closed[acc]) || 0;
+        
+        // Subtract positions that are currently closed but waiting to reopen (pending limit orders)
+        const pendingLimitOpens = (session.cycle_limit_open_fills || []).filter(f => f.account === acc).length;
+        let pendingMarketOpen = 0;
+        const isCyclingAcc = (action.includes('acc1') && info.side_number === 1) || (action.includes('acc2') && info.side_number === 2) || action.includes('both');
+        if (session.cycle_progress && session.cycle_progress.phase === 'open' && isCyclingAcc) {
+            pendingMarketOpen = 1;
+        }
+        const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
+
+        if (session.imported) {
+            const isCycling = action.startsWith('cycle_');
+            count = isCycling ? Math.max(0, filled - totalPendingReopens) : filled;
+        } else {
+            count = Math.max(0, filled - closed - totalPendingReopens);
+        }
+        
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
+
       } else {
-        const filled = (session.filled && session.filled[acc]) || 0;
-        const closed = (session.closed && session.closed[acc]) || 0;
-        count = Math.max(0, filled - closed);
+        let filled = (session.filled && session.filled[acc]) || 0;
+        let closed = (session.closed && session.closed[acc]) || 0;
+        
+        // Subtract positions that are currently closed but waiting to reopen (pending limit orders)
+        const pendingLimitOpens = (session.cycle_limit_open_fills || []).filter(f => f.account === acc).length;
+        let pendingMarketOpen = 0;
+        const isCyclingAcc = (action.includes('acc1') && info.side_number === 1) || (action.includes('acc2') && info.side_number === 2) || action.includes('both');
+        if (session.cycle_progress && session.cycle_progress.phase === 'open' && isCyclingAcc) {
+            pendingMarketOpen = 1;
+        }
+        const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
+
+        if (session.imported) {
+            const isCycling = action.startsWith('cycle_');
+            count = isCycling ? Math.max(0, filled - totalPendingReopens) : filled;
+        } else {
+            count = Math.max(0, filled - closed - totalPendingReopens);
+        }
+        
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
       }
@@ -12499,16 +13986,45 @@ function renderActions(session) {
   html += `<option value="monitor"${mode==='monitor'?' selected':''}>MONITOR</option>`;
   html += `<option value="open"${mode==='open'?' selected':''}>OPEN</option>`;
   html += `<option value="close"${mode==='close'?' selected':''}>CLOSE</option>`;
+  html += `<option value="open_limit_acc1"${mode==='open_limit_acc1'?' selected':''}>OPEN-LIMIT ${acc1Label}</option>`;
+  html += `<option value="open_limit_acc2"${mode==='open_limit_acc2'?' selected':''}>OPEN-LIMIT ${acc2Label}</option>`;
+  html += `<option value="close_limit_acc1"${mode==='close_limit_acc1'?' selected':''}>CLOSE-LIMIT ${acc1Label}</option>`;
+  html += `<option value="close_limit_acc2"${mode==='close_limit_acc2'?' selected':''}>CLOSE-LIMIT ${acc2Label}</option>`;
   html += `<option value="cycle_acc1"${mode==='cycle_acc1'?' selected':''}>CYCLE ${acc1Label}</option>`;
   html += `<option value="cycle_acc2"${mode==='cycle_acc2'?' selected':''}>CYCLE ${acc2Label}</option>`;
+  html += `<option value="cycle_limit_acc1"${mode==='cycle_limit_acc1'?' selected':''}>CYCLE-LIMIT ${acc1Label}</option>`;
+  html += `<option value="cycle_limit_acc2"${mode==='cycle_limit_acc2'?' selected':''}>CYCLE-LIMIT ${acc2Label}</option>`;
   html += `</select> `;
   // Cycle date input — only show when in cycle mode
-  if (mode.startsWith('cycle_')) {
+  if (mode.startsWith('cycle_') && !mode.startsWith('cycle_limit_')) {
     const cycleDays = session.cycle_days ?? '';
     const progress = session.cycle_progress || {};
-    html += `<input type="number" min="0" step="0.5" placeholder="Days" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${cycleDays}" onchange="saveCycleDays('${session.id}', this.value)" title="Cycle positions older than X days"> `;
+    html += `<input type="number" min="0" step="0.5" placeholder="Days" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${cycleDays}" onchange="saveSessionField('${session.id}', 'cycle_days', this.value)" title="Cycle positions older than X days"> `;
     html += `<span style="font-size:0.68rem;color:var(--text2)" title="Cycle progress">cycled:${progress.cycled||0} idx:${progress.index||0} ${progress.phase||'-'}</span> `;
+  } else if (mode.startsWith('cycle_limit_')) {
+    const limDays = session.cycle_limit_days ?? '';
+    const limDist = session.cycle_limit_distance ?? 10;
+    const trailStep = session.cycle_limit_trail_step ?? 1;
+    const batchSize = session.cycle_limit_batch_size ?? 1;
+    const progress = session.cycle_progress || {};
+    html += `<input type="number" min="0" step="0.5" placeholder="Days" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${limDays}" onchange="saveSessionField('${session.id}', 'cycle_limit_days', this.value)" title="Filter positions by age >= Days"> `;
+    html += `<input type="number" min="0" step="1" placeholder="Dist(pts)" style="font-size:0.68rem;width:60px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${limDist}" onchange="saveSessionField('${session.id}', 'cycle_limit_distance', this.value)" title="Limit Distance (pts)"> `;
+    html += `<input type="number" min="1" step="1" placeholder="Step(pts)" style="font-size:0.68rem;width:60px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${trailStep}" onchange="saveSessionField('${session.id}', 'cycle_limit_trail_step', this.value)" title="Trailing Step (pts)"> `;
+    html += `<input type="number" min="1" step="1" placeholder="Batch" style="font-size:0.68rem;width:50px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${batchSize}" onchange="saveSessionField('${session.id}', 'cycle_limit_batch_size', this.value)" title="Batch Size (positions per cycle step)"> `;
+    html += `<span style="font-size:0.68rem;color:var(--text2)" title="Cycle progress">cycled:${progress.cycled||0} idx:${progress.index||0} ${progress.phase||'-'}</span> `;
+  } else if (mode.startsWith('open_limit') || mode.startsWith('close_limit')) {
+    const limDist = session.limit_distance ?? 100;
+    const trailStep = session.trail_step ?? 10;
+    const limBatch = session.limit_batch_size ?? 1;
+    const limDays = session.limit_days ?? '';
+    html += `<input type="number" min="0" step="1" placeholder="Dist(pts)" style="font-size:0.68rem;width:60px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${limDist}" onchange="saveSessionField('${session.id}', 'limit_distance', this.value)" title="Limit Distance (pts)"> `;
+    html += `<input type="number" min="1" step="1" placeholder="Step(pts)" style="font-size:0.68rem;width:60px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${trailStep}" onchange="saveSessionField('${session.id}', 'trail_step', this.value)" title="Trailing Step (pts) - Minimum drift before modifying order"> `;
+    html += `<input type="number" min="1" step="1" placeholder="Batch" style="font-size:0.68rem;width:50px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${limBatch}" onchange="saveSessionField('${session.id}', 'limit_batch_size', this.value)" title="Batch Size"> `;
+    if (mode.startsWith('close_limit')) {
+      html += `<input type="number" min="0" step="1" placeholder="Days" style="font-size:0.68rem;width:50px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${limDays}" onchange="saveSessionField('${session.id}', 'limit_days', this.value)" title="Filter positions by age >= Days"> `;
+    }
   }
+
   if (s === 'draft' || s === 'paused') {
     html += `<button class="btn btn-success btn-sm" onclick="startSession('${session.id}')" title="Start">▶</button> `;
     html += `<button class="btn btn-primary btn-sm" onclick="editSession('${session.id}')" title="Edit">✏</button> `;
@@ -12566,7 +14082,7 @@ async function unblockSession(id) {
 
 function confirmSetMode(id, selectEl, prevMode) {
   const newMode = selectEl.value;
-  const labels = {monitor:'MONITOR', open:'OPEN', close:'CLOSE', cycle_acc1:'CYCLE ACC1', cycle_acc2:'CYCLE ACC2'};
+  const labels = {monitor:'MONITOR', open:'OPEN', close:'CLOSE', cycle_acc1:'CYCLE ACC1', cycle_acc2:'CYCLE ACC2', cycle_limit_acc1:'CYCLE-LIMIT ACC1', cycle_limit_acc2:'CYCLE-LIMIT ACC2'};
   showConfirmModal('Switch mode to ' + (labels[newMode] || newMode.toUpperCase()) + '?', () => {
     setSessionMode(id, newMode);
   }, 'Confirm');
@@ -12591,15 +14107,17 @@ async function setSessionMode(id, mode) {
   } catch(e) { alert('Set mode failed: ' + e); }
 }
 
-async function saveCycleDays(id, val) {
+async function saveSessionField(id, field, val) {
   try {
-    const cycleDays = (val !== '' && val !== null && val !== undefined) ? parseFloat(val) : '';
+    const numVal = (val !== '' && val !== null && val !== undefined) ? parseFloat(val) : '';
+    const payload = {};
+    payload[field] = numVal;
     await fetch('/api/sessions/' + id, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ cycle_days: cycleDays })
+      body: JSON.stringify(payload)
     });
-  } catch(e) { alert('Save cycle days failed: ' + e); }
+  } catch(e) { alert('Save field failed: ' + e); }
 }
 async function resetCycle(id) {
   showConfirmModal('Reset this session? This will clear all counters and switch to OPEN mode.', async () => {
@@ -13729,7 +15247,8 @@ async function _checkPendingRollbacks() {
     const ticketPreview = rb.tickets && rb.tickets.length
       ? `\nFirst tickets: ${rb.tickets.join(', ')}${rb.count > rb.tickets.length ? ` ... (+${rb.count - rb.tickets.length} more)` : ''}`
       : '';
-    const msg = `⚠️ ROLLBACK CONFIRMATION REQUIRED\n\nAccount: ${rb.account}\nSession: ${rb.sid_short}\nPair: ${rb.pair || 'N/A'}\nPositions to close: ${rb.count}${ticketPreview}\n\nApprove this rollback?`;
+    const reasonLine = rb.reason ? `\n\nReason: ${rb.reason}` : '';
+    const msg = `⚠️ ROLLBACK CONFIRMATION REQUIRED\n\nAccount: ${rb.account}\nSession: ${rb.sid_short}\nPair: ${rb.pair || 'N/A'}\nPositions to close: ${rb.count}${ticketPreview}${reasonLine}\n\nApprove this rollback?`;
     const approved = confirm(msg);
     await fetch('/api/confirm_rollback', {
       method: 'POST',
@@ -13953,6 +15472,9 @@ async function refreshData() {
     if (accountsTab && accountsTab.classList.contains('active')) {
       renderAccounts(ea_heartbeats_cache, manual_accounts_cache, fix_accounts_cache, mt_direct_accounts_cache, window._latestCycleReminders, swap_delta_cache);
       applyAcctColVisibility();
+      // Re-attach drag handles after every data refresh
+      const _at = document.getElementById('accountsTable');
+      if (_at) { _at._resizeInit = false; initAcctColResize(); }
     }
     renderCycleReminders(window._latestCycleReminders);
     // Refresh reporting tab if active
@@ -14019,7 +15541,49 @@ function _intendedLotsCell(id, groupLabel, isGroupRow = false) {
   return `<td><input type="number" class="inl" style="width:60px;text-align:center;${override === '' ? 'color:var(--text2);' : ''}" value="${override}" placeholder="${ph}" onchange="saveAccountIntendedLots('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="Override intended lots for ${id}"></td>`;
 }
 
+let _hideHiddenAccounts = true;
+function toggleHideHiddenAccounts(val) {
+  _hideHiddenAccounts = val;
+  if (window._lastRenderAccountsArgs) renderAccounts.apply(null, window._lastRenderAccountsArgs);
+}
+async function toggleAccountHidden(id, val) {
+  try {
+    await fetch('/api/accounts/' + encodeURIComponent(id), {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({is_hidden: val})
+    });
+    if (window.manual_accounts_cache) {
+      if (!window.manual_accounts_cache[id]) window.manual_accounts_cache[id] = {};
+      window.manual_accounts_cache[id].is_hidden = val;
+    }
+    if (window._lastRenderAccountsArgs) renderAccounts.apply(null, window._lastRenderAccountsArgs);
+  } catch(e) { console.error('Failed to toggle hidden:', e); }
+}
+
+// Styled NOP/FM cell
+function _nopFmCell(ratioStr) {
+  if (ratioStr === '-' || ratioStr == null) return '<td style="font-weight:600;color:var(--text2);text-align:center;">-</td>';
+  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);"><span style="color:#ef4444;font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="Margin call territory!">MAX</span></td>';
+  
+  const val = parseFloat(ratioStr);
+  if (isNaN(val)) return `<td style="font-weight:600;color:var(--text2);text-align:center;">${ratioStr}</td>`;
+  
+  let barColor, textColor = '#fff', weight = '600';
+  if      (val < 100) { barColor = '#3b82f6'; } // blue
+  else if (val < 200) { barColor = '#22c55e'; } // green
+  else if (val < 250) { barColor = '#eab308'; textColor = '#1a1a1a'; } // yellow
+  else if (val < 300) { barColor = '#f97316'; textColor = '#1a1a1a'; } // orange
+  else                { barColor = '#ef4444'; textColor = '#1a1a1a'; weight = '700'; } // red
+  
+  return `<td style="padding:0;">
+    <div style="background:${barColor};color:${textColor};border-radius:3px;margin:2px 4px;padding:2px 4px;text-align:center;font-weight:${weight};font-size:0.75rem;white-space:nowrap;">
+      ${val.toFixed(0)}x
+    </div>
+  </td>`;
+}
+
 function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta) {
+  window._hideHiddenAccounts = document.getElementById('hideHiddenAccountsToggle') ? document.getElementById('hideHiddenAccountsToggle').checked : true;
   // Stash args for re-render from toggleGroupView
   window._lastRenderAccountsArgs = [heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta];
   const tbody = document.getElementById('accountsBody');
@@ -14083,6 +15647,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const saveFunc = isFix ? 'saveFixMarginAlert' : 'saveMarginAlert';
     return `<td><input type="number" class="inl" style="width:50px;text-align:center;${hasCustom ? '' : 'color:var(--text2);'}" value="${displayVal}" placeholder="${placeholder}" onchange="${saveFunc}('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()" title="${hasCustom ? 'Custom: ' + acctT + '%' : 'Using global: ' + globalT + '%'}"></td>`;
   }
+
   // Pips to Margin Call cell — ADR-scaled bar overlay
   function _pipsToMcCell(info) {
     const ptmc = (info != null && info.pips_to_mc != null) ? parseFloat(info.pips_to_mc) : null;
@@ -14115,7 +15680,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const solPct  = (info && info.stop_out_frac != null) ? (info.stop_out_frac*100).toFixed(0)+'% SO' : '50% SO';
     const tooltip = `~${ptmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips (${adrMult.toFixed(2)} ADRs, ADR=${adr}pip, ${solPct}${sym ? ', ' + sym : ''})`;
 
-    return `<td style="padding:0;min-width:80px;" title="${tooltip}">
+    return `<td style="padding:0;" title="${tooltip}">
       <div style="position:relative;overflow:hidden;border-radius:3px;margin:2px 4px;">
         <div style="position:absolute;inset:0;background:${barColor};opacity:0.22;"></div>
         <div style="position:absolute;top:0;left:0;height:100%;width:${fillPct.toFixed(1)}%;background:${barColor};opacity:0.55;border-radius:3px 0 0 3px;"></div>
@@ -14127,6 +15692,8 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   // FIX accounts first — show with special styling
   if (fixAccounts) {
     Object.entries(fixAccounts).forEach(([id, info]) => {
+      const isHidden = manualAccounts ? (manualAccounts[id]?.is_hidden === true) : false;
+      if (window._hideHiddenAccounts && isHidden) return;
       shownAccounts.add(id);
       const tConn = info.trade_connected;
       const qConn = info.quote_connected;
@@ -14135,6 +15702,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const qDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${qConn?'var(--green)':'var(--red)'};margin-right:4px;"></span>Q`;
       const fixColor = allConn ? 'var(--green)' : 'var(--red)';
       const implLabel = (info.implementation === 'ctrader') ? 'cTrader FIX' : (info.implementation === 'openapi') ? 'cT OpenAPI' : (info.implementation === 'dukascopy') ? 'DK FIX' : (info.implementation === 'swissquote') ? 'SQ FIX' : 'FIX';
+      const connText = `${implLabel} ${tConn?'(T)':'(no T)'} ${qConn?'(Q)':'(no Q)'}`;
       const connDot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${fixColor};box-shadow:0 0 6px ${fixColor};margin-right:6px;"></span>${implLabel} &nbsp;${tDot}&nbsp;${qDot}`;
       const eaInfo = heartbeats ? heartbeats[id] : null;
       // Balance & equity: prefer FIX collateral data, fall back to EA data
@@ -14146,6 +15714,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const lev = info.leverage ? ('1:' + info.leverage) : '-';
       const rawMargin1 = info.margin != null ? info.margin : (eaInfo && eaInfo.margin != null ? eaInfo.margin : null);
       const mu1 = (rawEq > 0 && rawMargin1 != null) ? ((rawMargin1 / rawEq) * 100).toFixed(1) + '%' : '-';
+      const fm1 = rawMargin1 != null ? (rawEq - rawMargin1) : 0;
+      const notional1 = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normMu1 = notional1 > 0 ? (fm1 > 0 ? (notional1 / fm1).toFixed(0) + 'x' : 'MAX') : '-';
       const pnl1 = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
       const pnl1Style = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
       const swap1 = info.total_swap != null ? parseFloat(info.total_swap).toFixed(2) : '-';
@@ -14159,9 +15730,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const shiftColor = dist.suggested_transfer != null ? (dist.suggested_transfer >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
 
       rows.push(`<tr>
+        <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${id}', this.checked)" title="Hide this account"></td>
         <td><strong>${id}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveFixGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
-        <td>${connDot}</td>
+        <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqVal}</td>
@@ -14172,6 +15744,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${pos1}</td>
         ${_lotsCell(id, lots1, lots1Style)}
         <td>${mu1}</td>
+        ${_nopFmCell(normMu1)}
         ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, true)}
         <td>${swap1}</td>
@@ -14196,11 +15769,14 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   // MT Direct accounts
   if (mtDirectAccounts) {
     Object.entries(mtDirectAccounts).forEach(([id, info]) => {
+      const isHidden = manualAccounts ? (manualAccounts[id]?.is_hidden === true) : false;
+      if (window._hideHiddenAccounts && isHidden) return;
       shownAccounts.add(id);
       const isConn = info.connected;
       const mtColor = isConn ? 'var(--green)' : 'var(--red)';
       const typeLabel = (info.type === 'mt5_direct' || info.type === 'mt5') ? 'MT5' : 'MT4';
-      const errTip = (!isConn && info.last_error) ? ` <span style="font-size:0.65rem;color:var(--red)" title="${info.last_error}">⚠ ${info.last_error.substring(0,40)}${info.last_error.length>40?'…':''}</span>` : '';
+      const connText = `${typeLabel}${info.last_error ? ' - ' + info.last_error : ''}`.replace(/"/g, '&quot;');
+      const errTip = (!isConn && info.last_error) ? ` <span style="font-size:0.65rem;color:var(--red)">⚠ ${info.last_error.substring(0,40)}${info.last_error.length>40?'…':''}</span>` : '';
       const connDot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${mtColor};box-shadow:0 0 6px ${mtColor};margin-right:6px;"></span>${typeLabel}${errTip}`;
       const eaInfo = heartbeats ? heartbeats[id] : null;
       const rawBal = info.balance != null ? info.balance : (eaInfo && eaInfo.balance != null ? eaInfo.balance : null);
@@ -14209,7 +15785,11 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const eq = rawEq != null ? parseFloat(rawEq).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
       const lev = info.leverage ? ('1:' + info.leverage) : '-';
       const rawMarginMt = info.margin != null ? info.margin : (eaInfo && eaInfo.margin != null ? eaInfo.margin : null);
-      const muMt = (rawEq > 0 && rawMarginMt != null) ? ((rawMarginMt / rawEq) * 100).toFixed(1) + '%' : '-';
+      const muMtVal = (rawEq > 0 && rawMarginMt != null) ? (rawMarginMt / rawEq) : null;
+      const muMt = muMtVal != null ? (muMtVal * 100).toFixed(1) + '%' : '-';
+      const fmMt = rawMarginMt != null ? (rawEq - rawMarginMt) : 0;
+      const notionalMt = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normMuMt = notionalMt > 0 ? (fmMt > 0 ? (notionalMt / fmMt).toFixed(0) + 'x' : 'MAX') : '-';
       const displayName = info.label || id;
       const pnlMt = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
       const pnlMtStyle = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -14224,9 +15804,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const shiftMtColor = distMt.suggested_transfer != null ? (distMt.suggested_transfer >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
 
       rows.push(`<tr>
+        <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${id}', this.checked)" title="Hide this account"></td>
         <td><strong>${displayName}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
-        <td>${connDot}</td>
+        <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqMt}</td>
@@ -14237,6 +15818,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${posMt}</td>
         ${_lotsCell(id, lotsMt, lotsMtStyle)}
         <td>${muMt}</td>
+        ${_nopFmCell(normMuMt)}
         ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, false)}
         <td>${swapMt}</td>
@@ -14261,11 +15843,14 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   // Manual accounts — merge with EA heartbeat data if available
   if (manualAccounts) {
     Object.entries(manualAccounts).forEach(([name, info]) => {
+      const isHidden = info.is_hidden === true;
+      if (window._hideHiddenAccounts && isHidden) return;
       if (shownAccounts.has(name)) return; // Already rendered by FIX or MT Direct
       shownAccounts.add(name);
       const eaInfo = heartbeats ? heartbeats[name] : null;
-      let connDot, bal, eq, lp;
+      let connDot, connText, bal, eq, lp;
       if (eaInfo) {
+        connText = eaInfo.online ? 'EA Online' : 'EA Offline';
         connDot = eaInfo.online
           ? '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);margin-right:6px;"></span>EA Online'
           : '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red);margin-right:6px;"></span>EA Offline';
@@ -14275,6 +15860,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       } else {
         const connType = info.conn_type || 'manual';
         const connLabel = connType === 'fix' ? 'FIX API' : connType === 'poll' ? 'EA Poll' : 'Manual';
+        connText = connLabel;
         connDot = '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);margin-right:6px;"></span>' + connLabel;
         bal = info.balance != null ? parseFloat(info.balance).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
         eq = info.equity != null ? parseFloat(info.equity).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
@@ -14283,16 +15869,22 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const lev = eaInfo && eaInfo.leverage ? ('1:' + eaInfo.leverage) : '-';
       const rawMarginM = eaInfo && eaInfo.margin != null ? eaInfo.margin : (info.margin != null ? info.margin : null);
       const rawEqM = eaInfo && eaInfo.equity != null ? parseFloat(eaInfo.equity) : (info.equity != null ? parseFloat(info.equity) : 0);
-      const muM = (rawEqM > 0 && rawMarginM != null) ? ((rawMarginM / rawEqM) * 100).toFixed(1) + '%' : '-';
+      const muMVal = (rawEqM > 0 && rawMarginM != null) ? (rawMarginM / rawEqM) : null;
+      const muM = muMVal != null ? (muMVal * 100).toFixed(1) + '%' : '-';
+      const aLevM = eaInfo && eaInfo.leverage ? eaInfo.leverage : (info.leverage ? info.leverage : null);
+      const fmM = rawMarginM != null ? (rawEqM - rawMarginM) : 0;
+      const notionalM = (eaInfo && eaInfo.total_lots != null) ? Math.abs(parseFloat(eaInfo.total_lots)) * 100000 : (info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0);
+      const normMuM = notionalM > 0 ? (fmM > 0 ? (notionalM / fmM).toFixed(0) + 'x' : 'MAX') : '-';
       const distM = fundDists[name] || {};
       const optEqM = distM.optimal_equity != null ? distM.optimal_equity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
       const shiftM = distM.suggested_transfer != null ? distM.suggested_transfer.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
       const shiftMColor = distM.suggested_transfer != null ? (distM.suggested_transfer >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
 
       rows.push(`<tr>
+        <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${name}', this.checked)" title="Hide this account"></td>
         <td><strong>${name}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${name}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
-        <td>${connDot}</td>
+        <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqM}</td>
@@ -14303,6 +15895,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muM}</td>
+        ${_nopFmCell(normMuM)}
         ${_pipsToMcCell(eaInfo || info)}
         ${_marginAlertCell(name, false)}
         <td>-</td>
@@ -14321,6 +15914,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   // EA-polled accounts that weren't manually added (auto-discovered)
   if (heartbeats) {
     Object.entries(heartbeats).forEach(([acc, info]) => {
+      const mConfig = manualAccounts ? (manualAccounts[acc] || {}) : {};
+      const isHidden = mConfig.is_hidden === true;
+      if (window._hideHiddenAccounts && isHidden) return;
       if (shownAccounts.has(acc)) return;
       const connDot = info.online
         ? '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);margin-right:6px;"></span>EA Online'
@@ -14331,8 +15927,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const lev = info.leverage ? ('1:' + info.leverage) : '-';
       const rawMarginE = info.margin != null ? parseFloat(info.margin) : null;
       const rawEqE = info.equity != null ? parseFloat(info.equity) : 0;
-      const muE = (rawEqE > 0 && rawMarginE != null) ? ((rawMarginE / rawEqE) * 100).toFixed(1) + '%' : '-';
-      const mConfig = manualAccounts ? (manualAccounts[acc] || {}) : {};
+      const muEVal = (rawEqE > 0 && rawMarginE != null) ? (rawMarginE / rawEqE) : null;
+      const muE = muEVal != null ? (muEVal * 100).toFixed(1) + '%' : '-';
+      const aLevE = info.leverage ? info.leverage : null;
+      const fmE = rawMarginE != null ? (rawEqE - rawMarginE) : 0;
+      const notionalE = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normMuE = notionalE > 0 ? (fmE > 0 ? (notionalE / fmE).toFixed(0) + 'x' : 'MAX') : '-';
 
       const distE = fundDists[acc] || {};
       const optEqE = distE.optimal_equity != null ? distE.optimal_equity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
@@ -14340,6 +15940,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const shiftEColor = distE.suggested_transfer != null ? (distE.suggested_transfer >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
 
       rows.push(`<tr>
+        <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${acc}', this.checked)" title="Hide this account"></td>
         <td><strong>${acc}</strong></td>
         <td><input class="inl" style="width:80px;" value="${mConfig.group_label || ''}" onchange="saveGroupLabel('${acc}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td>${connDot}</td>
@@ -14353,6 +15954,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muE}</td>
+        ${_nopFmCell(normMuE)}
         ${_pipsToMcCell(info)}
         ${_marginAlertCell(acc, false)}
         <td>-</td>
@@ -14374,6 +15976,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     let totBal = 0, totEq = 0, totPnl = 0, totLots = 0, totSwap = 0;
     let totPosLots = 0, totNegLots = 0;
     let totOptEq = 0, totShift = 0;
+    let totMargin = 0, totNotional = 0;
     let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false;
     let hasOptEq = false, hasShift = false;
     const _seen = new Set();
@@ -14393,6 +15996,13 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       if (!isNaN(rl)) { totLots += rl; hasLots = true; if (rl >= 0) totPosLots += rl; else totNegLots += rl; }
       const rs = info.total_swap != null ? parseFloat(info.total_swap) : NaN;
       if (!isNaN(rs)) { totSwap += rs; hasSwap = true; }
+      
+      const rMargin = info.margin != null ? parseFloat(info.margin) : (hb && hb.margin != null ? parseFloat(hb.margin) : NaN);
+      if (!isNaN(rMargin)) {
+        totMargin += rMargin;
+        const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb && hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
+        totNotional += Math.abs(aLots) * 100000;
+      }
 
       const dist = fundDists[id] || {};
       if (dist.optimal_equity != null) { totOptEq += dist.optimal_equity; hasOptEq = true; }
@@ -14409,12 +16019,15 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const pnlStyle = hasPnl ? (totPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
     const fmtLots = hasLots ? totLots.toFixed(2) : '-';
     const lotsStyle = hasLots ? (totLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
-    const lotsBreakdown = hasLots ? `<br><a href="#" onclick="showLotsBreakdown();return false;" style="font-size:0.7rem;font-weight:400;color:#e2e8f0;text-decoration:underline;cursor:pointer;">(${totPosLots.toFixed(2)} / ${totNegLots.toFixed(2)})</a>` : ``;
+    const lotsBreakdown = hasLots ? `<div style="font-size:0.65rem;font-weight:400;color:#e2e8f0;letter-spacing:-0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;"><a href="#" onclick="showLotsBreakdown();return false;" style="color:inherit;text-decoration:underline;cursor:pointer;">(${totPosLots.toFixed(2)}/${totNegLots.toFixed(2)})</a></div>` : ``;
     const fmtSwap = hasSwap ? totSwap.toFixed(2) : '-';
 
     const fmtOptEq = hasOptEq ? totOptEq.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
     const fmtShift = hasShift ? totShift.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
     const shiftStyle = hasShift ? (totShift >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+    
+    const totFm = totEq - totMargin;
+    const fmtNormMu = totNotional > 0 ? (totFm > 0 ? (totNotional / totFm).toFixed(0) + 'x' : 'MAX') : '-';
 
     // Sum swap deltas
     let totSwapDelta = 0; let hasSwapDelta = false;
@@ -14434,6 +16047,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     });
 
     rows.push(`<tr style="border-top:2px solid var(--accent);font-weight:700;background:var(--surface2);">
+      <td></td>
       <td>TOTALS</td>
       <td></td><td></td>
       <td>${fmtBal}</td>
@@ -14443,8 +16057,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       <td></td>
       <td style="${pnlStyle}">${fmtPnl}</td>
       <td></td><td></td>
-      <td style="${lotsStyle}">${fmtLots}${lotsBreakdown}</td>
-      <td></td><td></td><td></td>
+      <td style="${lotsStyle};overflow:hidden;">${fmtLots}${lotsBreakdown}</td>
+      <td></td>
+      ${_nopFmCell(fmtNormMu)}
+      <td></td><td></td>
       <td>${fmtSwap}</td>
       ${totalsSwapDeltaCell}
       <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
@@ -14464,6 +16080,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   const seen = new Set();
   function _collectAcct(id, info, source) {
     if (seen.has(id)) return;
+    const isHidden = manualAccounts ? (manualAccounts[id]?.is_hidden === true) : false;
+    if (window._hideHiddenAccounts !== false && isHidden) return;
     seen.add(id);
     allAccts[id] = { info, source };
   }
@@ -14501,6 +16119,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   let gSwapDelta = 0, gHasSwapDelta = false;
   let gMaxAge = null;
   let gMaxMu = null;
+  let gNotional = 0;
+  let gMargin = 0;
   let gMinPtmc = null;   // lowest pips-to-MC across all groups (worst risk)
   let gOptEq = 0, gShift = 0;
   let gHasOptEq = false, gHasShift = false;
@@ -14513,6 +16133,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false, hasPos = false;
     let maxMu = null;  // highest margin use %
     let maxMuLev = null;  // leverage of the account with highest margin use
+    let sumNotional = 0;
+    let sumMargin = 0;
     let maxAge = null;
     let minPtmc = null;  // lowest pips-to-MC in this group
     let sumSwapDelta = 0, hasSwapDelta = false;
@@ -14568,6 +16190,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           const acctLev = info.leverage || (hb && hb.leverage) || null;
           maxMuLev = acctLev ? ('1:' + acctLev) : null;
         }
+        const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb && hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
+        sumNotional += Math.abs(aLots) * 100000;
+        sumMargin += rawMargin;
       }
       // Δ Swap
       const sd = swapDelta[m.id];
@@ -14605,6 +16230,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     if (hasLots) { gLots += sumLots; gHasLots = true; gPosLots += sumPosLots; gNegLots += sumNegLots; }
     if (hasSwap) { gSwap += sumSwap; gHasSwap = true; }
     if (hasSwapDelta) { gSwapDelta += sumSwapDelta; gHasSwapDelta = true; }
+    if (hasSwapDelta) { gSwapDelta += sumSwapDelta; gHasSwapDelta = true; }
+    if (sumNotional > 0) gNotional += sumNotional;
+    if (sumMargin > 0) gMargin += sumMargin;
     if (maxMu !== null && (gMaxMu === null || maxMu > gMaxMu)) gMaxMu = maxMu;
     if (minPtmc !== null && (gMinPtmc === null || minPtmc < gMinPtmc)) gMinPtmc = minPtmc;
     if (maxAge !== null && (gMaxAge === null || maxAge > gMaxAge)) gMaxAge = maxAge;
@@ -14621,6 +16249,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     const lotsColor = hasLots ? (sumLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
     const lotsBreak = hasLots ? `<br><span style="font-size:0.7rem;font-weight:400;color:var(--text2);">(${sumPosLots.toFixed(2)} / ${sumNegLots.toFixed(2)})</span>` : '';
     const fMu = maxMu !== null ? maxMu.toFixed(1) + '%' : '-';
+    const sumFm = sumEq - sumMargin;
+    const fNormMu = sumNotional > 0 ? (sumFm > 0 ? (sumNotional / sumFm).toFixed(0) + 'x' : 'MAX') : '-';
     const fSwap = hasSwap ? sumSwap.toFixed(2) : '-';
     const fSwapDelta = hasSwapDelta ? ((sumSwapDelta > 0 ? '+' : '') + sumSwapDelta.toFixed(2)) : '-';
     const sdColor = hasSwapDelta ? (sumSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -14663,7 +16293,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     // Clickable LOTS cell for group — passes all member account IDs
     const groupMemberIdsStr = memberIds.map(id => encodeURIComponent(id)).join(',');
     const groupLotsCell = (hasLots && fLots !== '-')
-      ? `<td style="${lotsColor}"><a href="#" onclick="showGroupLotsBreakdown('${prefix}', '${groupMemberIdsStr}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument breakdown for this group">${fLots}</a>${lotsBreak}</td>`
+      ? `<td style="${lotsColor}"><a href="#" onclick="showGroupLotsBreakdown('${prefix}', '${groupMemberIdsStr}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument breakdown for this group">${fLots}</a><div style="font-size:0.65rem;letter-spacing:-0.5px;margin-top:-2px;">${lotsBreak.replace('<br>','')}</div></td>`
       : `<td style="${lotsColor}">${fLots}${lotsBreak}</td>`;
 
     const groupSwapDeltaCell = (hasSwapDelta && fSwapDelta !== '-')
@@ -14671,6 +16301,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       : `<td style="${sdColor};font-size:0.78rem">${fSwapDelta}</td>`;
 
     rows.push(`<tr style="background:var(--surface2);border-bottom:1px solid var(--border);">
+      <td></td>
       <td><strong title="${memberList}">${prefix}</strong> <span style="font-size:0.68rem;color:var(--text2);">(${memberCount})</span></td>
       <td></td><td>${connLabel}</td>
       <td>${fBal}</td>
@@ -14683,6 +16314,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td>${fPos}</td>
       ${groupLotsCell}
       <td>${fMu}</td>
+      ${_nopFmCell(fNormMu)}
       ${(function(){
         if (minPtmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
         if (minPtmc <= 0) return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;">\u26a0 MC!</span></td>';
@@ -14706,7 +16338,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   const gPnlStyle = gHasPnl ? (gPnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
   const fGLots = gHasLots ? gLots.toFixed(2) : '-';
   const gLotsStyle = gHasLots ? (gLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
-  const gLotsBreak = gHasLots ? `<br><a href="#" onclick="showLotsBreakdown();return false;" style="font-size:0.7rem;font-weight:400;color:#e2e8f0;text-decoration:underline;cursor:pointer;">(${gPosLots.toFixed(2)} / ${gNegLots.toFixed(2)})</a>` : '';
+  const gLotsBreak = gHasLots ? `<div style="font-size:0.65rem;font-weight:400;color:#e2e8f0;letter-spacing:-0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;"><a href="#" onclick="showLotsBreakdown();return false;" style="color:inherit;text-decoration:underline;cursor:pointer;">(${gPosLots.toFixed(2)}/${gNegLots.toFixed(2)})</a></div>` : '';
+  const gFm = gEq - gMargin;
+  const fGNormMu = gNotional > 0 ? (gFm > 0 ? (gNotional / gFm).toFixed(0) + 'x' : 'MAX') : '-';
   const fGSwap = gHasSwap ? gSwap.toFixed(2) : '-';
   const fGSwapDelta = gHasSwapDelta ? ((gSwapDelta > 0 ? '+' : '') + gSwapDelta.toFixed(2)) : '-';
   const gSdStyle = gHasSwapDelta ? (gSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -14720,6 +16354,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     : `<td style="${gSdStyle};font-size:0.78rem">${fGSwapDelta}</td>`;
 
   rows.push(`<tr style="border-top:2px solid var(--accent);font-weight:700;background:var(--surface2);">
+    <td></td>
     <td>TOTALS</td>
     <td></td><td></td>
     <td>${fGBal}</td>
@@ -14729,8 +16364,10 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td></td>
     <td style="${gPnlStyle}">${fGPnl}</td>
     <td></td><td></td>
-    <td style="${gLotsStyle}">${fGLots}${gLotsBreak}</td>
-    <td></td><td></td><td></td>
+    <td style="${gLotsStyle};overflow:hidden;">${fGLots}${gLotsBreak}</td>
+    <td></td>
+    ${_nopFmCell(fGNormMu)}
+    <td></td><td></td>
     <td>${fGSwap}</td>
     ${totalsSwapDeltaCell}
     <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
@@ -16570,6 +18207,12 @@ if __name__ == '__main__':
                                 _save_sessions()
                                 return  # early-exit the report_result callback
                         # Normal (non-cycle) fill path
+                        # ── Deduplication Guard (same as EA bridge path) ──
+                        existing_tickets = {str(f.get("ticket")) for f in session.get("fills", []) if f.get("account") == account}
+                        if str(ticket) in existing_tickets:
+                            print(f"[MT-DIRECT] Suppressed duplicate fill report for ticket={ticket} on account={account}")
+                            _check_session_completion(session)
+                            return
                         session["filled"][account] = session["filled"].get(account, 0) + 1
                         session.setdefault("last_trade_ts", {})[account] = time.time()
                         fill_price = data.get("fill_price")
@@ -16600,6 +18243,43 @@ if __name__ == '__main__':
                                    f"[MT-DIRECT] ticket={ticket} price={fill_price} lots={fill_lot_size} "
                                    f"filled={session['filled'][account]}/{session['total_positions']}")
                     _check_session_completion(session)
+
+                elif status == "limit_placed":
+                    # Handle pending OPEN-LIMIT orders for MT Direct
+                    existing_tickets = {str(f.get("ticket")) for f in session.get("open_limit_fills", []) if f.get("account") == account}
+                    if str(ticket) in existing_tickets:
+                        print(f"[TRADE_RESULT] Suppressed duplicate limit report for ticket={ticket} on account={account}")
+                        return
+
+                    fill_price = data.get("fill_price")
+                    side_info = session.get("sides", {}).get(account, {})
+                    fill_lot_size = float(data.get("lots", 0) or side_info.get("lot_size") or session.get("lot_size", 0))
+                    
+                    if session.get("action", "").startswith("cycle_limit_"):
+                        session.setdefault("cycle_limit_open_fills", []).append({
+                            "account": account,
+                            "ticket": ticket,
+                            "price": float(fill_price) if fill_price else None,
+                            "lots": fill_lot_size,
+                            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ts_epoch": time.time(),
+                        })
+                        # Do not increment global filled count for cycle_limit
+                    else:
+                        session.setdefault("open_limit_fills", []).append({
+                            "account": account,
+                            "ticket": ticket,
+                            "price": float(fill_price) if fill_price else None,
+                            "lots": fill_lot_size,
+                            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ts_epoch": time.time(),
+                        })
+                        # Wait, for limit gating we need to count placed orders as "filled" to prevent infinite placing
+                        session.setdefault("filled", {})[account] = session.setdefault("filled", {}).get(account, 0) + 1
+                    _log_event(session_id, account, "limit_placed",
+                               f"[MT-DIRECT] ticket={ticket} price={fill_price} lots={fill_lot_size} placed={session['filled'][account]}/{session['total_positions']}")
+                    _save_sessions()
+
 
                 elif status in ("rollback_closed", "closed"):
                     if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
@@ -16748,6 +18428,7 @@ if __name__ == '__main__':
                 _save_sessions()
 
         _mt_direct_dashboard_data["report_trade_result"] = _mt_direct_report_result
+        _mt_direct_dashboard_data["save_sessions"] = _save_sessions
         mt_direct_manager.start()
         app.logger.info("MT Direct Account Manager started")
 
