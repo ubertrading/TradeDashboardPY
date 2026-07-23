@@ -155,7 +155,9 @@ def _parse_open_time(ot):
         return None
 
     import re
-    s = re.sub(r'\.\d+', '', s)
+    # Strip fractional seconds like .123456 at the end of the time string
+    # Ensure it only matches dots followed by digits at the end of the string, or right before a Z/AM/PM
+    s = re.sub(r'\.\d+(?=\s*$|\s*[a-zA-Z]+$)', '', s)
 
     # Try multiple date formats
     _FORMATS = [

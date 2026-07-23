@@ -312,7 +312,9 @@ def _parse_broker_timestamp(ts_str, is_direct=True):
         pass
         
     s = re.sub(r'[+-]\d{2}:\d{2}$', '', cleaned)
-    s = re.sub(r'\.\d+', '', s)
+    # Strip fractional seconds like .123456 at the end of the time string
+    # Ensure it only matches dots followed by digits at the end of the string, or right before a Z/AM/PM
+    s = re.sub(r'\.\d+(?=\s*$|\s*[a-zA-Z]+$)', '', s)
     _FORMATS = ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p",
                 "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M",
                 "%Y/%m/%d %H:%M:%S")
@@ -5268,6 +5270,13 @@ def _should_issue_command(session, account):
             return 0
         acct_fills.sort(key=_cl_fill_sort_key)
         total_to_cycle = len(acct_fills)
+        # One-shot diagnostic: log sort order when at the start of a new cycle run
+        if idx == 0 and phase == "close" and acct_fills:
+            import datetime as _dt
+            _order_info = [(f.get("ticket"), f.get("ts_epoch", 0),
+                            _dt.datetime.utcfromtimestamp(f.get("ts_epoch") or 0).strftime("%Y-%m-%d %H:%M") if f.get("ts_epoch") else "N/A")
+                           for f in acct_fills[:5]]
+            print(f"[CYCLE-LIMIT-ORDER] acct={account}: sorted fill order (oldest-first): {_order_info}")
 
         # --- Age filter (cycle_limit_days, required) ---
         cycle_limit_days = session.get("cycle_limit_days")
