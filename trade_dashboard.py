@@ -5042,15 +5042,22 @@ def _should_issue_command(session, account):
             if f.get("account") == cycle_account
             and str(f.get("ticket")) not in closed_tickets_set
         ]
-        # Sort oldest-first so cycle processes the oldest positions first
+        # Sort oldest-first so cycle processes the oldest positions first.
+        # Secondary key: ticket number (monotonically increasing in MT4/MT5) guarantees
+        # correct order even when all ts_epoch values collapse to the same second
+        # (e.g. when import OpenTime parsing fails and all get time.time() as fallback).
         def _fill_sort_key(f):
             ts_str = f.get("ts", "")
+            ep = 0
             if ts_str:
                 is_direct = mt_direct_manager and cycle_account in mt_direct_manager.accounts
                 epoch = _parse_broker_timestamp(ts_str, is_direct=is_direct)
                 if epoch is not None:
-                    return epoch
-            return f.get("ts_epoch", 0) or 0
+                    ep = epoch
+            if ep == 0:
+                ep = f.get("ts_epoch", 0) or 0
+            ticket = int(f.get("ticket") or 0)
+            return (ep, ticket)
         acct_fills.sort(key=_fill_sort_key)
         # Use the filtered fill count as the total — it already excludes manually closed positions
         total_to_cycle = len(acct_fills)
@@ -5294,18 +5301,22 @@ def _should_issue_command(session, account):
             and str(f.get("ticket")) not in closed_tickets_set
         ]
         def _cl_fill_sort_key(f):
-            # Prefer ts_epoch (reliably set at import/fill time as broker open epoch)
+            # Primary: ts_epoch (reliably set at import/fill time as broker open epoch)
             ep = f.get("ts_epoch", 0) or 0
-            if ep > 0:
-                return ep
-            # Fallback: parse ts string
-            ts_str = f.get("ts", "")
-            if ts_str:
-                is_direct = mt_direct_manager and cycle_account in mt_direct_manager.accounts
-                epoch = _parse_broker_timestamp(ts_str, is_direct=is_direct)
-                if epoch is not None:
-                    return epoch
-            return 0
+            if ep == 0:
+                # Fallback: parse ts string
+                ts_str = f.get("ts", "")
+                if ts_str:
+                    is_direct = mt_direct_manager and cycle_account in mt_direct_manager.accounts
+                    epoch = _parse_broker_timestamp(ts_str, is_direct=is_direct)
+                    if epoch is not None:
+                        ep = epoch
+            # Secondary: ticket number (monotonically increasing in MT4/MT5).
+            # When timestamps are identical (e.g. all positions imported at same second
+            # because OpenTime parsing failed and time.time() was used as fallback),
+            # ticket number is the only reliable chronological tiebreaker.
+            ticket = int(f.get("ticket") or 0)
+            return (ep, ticket)
         acct_fills.sort(key=_cl_fill_sort_key)
         total_to_cycle = len(acct_fills)
         # One-shot diagnostic: log sort order when at the start of a new cycle run
