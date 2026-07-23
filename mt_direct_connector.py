@@ -4270,20 +4270,22 @@ class MTDirectManager:
                 def _fill_sort_key(f):
                     # Prefer ts_epoch (reliably set at import/fill time as broker open epoch)
                     ep = f.get("ts_epoch", 0) or 0
-                    if ep > 0:
-                        return ep
-                    # Fallback: parse ts string
-                    ts_str = f.get("ts", "")
-                    if ts_str:
-                        import re
-                        s = str(ts_str).strip().replace("T", " ").rstrip("Z")
-                        s = re.sub(r'\.\d+', '', s)
-                        for fmt in ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M"):
-                            try:
-                                return time.mktime(time.strptime(s, fmt))
-                            except (ValueError, TypeError):
-                                continue
-                    return 0
+                    if ep == 0:
+                        # Fallback: parse ts string
+                        ts_str = f.get("ts", "")
+                        if ts_str:
+                            import re
+                            s = str(ts_str).strip().replace("T", " ").rstrip("Z")
+                            s = re.sub(r'\.\d+', '', s)
+                            for fmt in ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M"):
+                                try:
+                                    ep = time.mktime(time.strptime(s, fmt))
+                                    break
+                                except (ValueError, TypeError):
+                                    continue
+                    # Tie-breaker: ticket number
+                    ticket = int(f.get("ticket") or 0)
+                    return (ep, ticket)
                 acct_fills.sort(key=_fill_sort_key)
                 if idx < len(acct_fills):
                     side_info = session.get("sides", {}).get(account_id, {})
