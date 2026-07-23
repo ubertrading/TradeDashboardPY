@@ -3214,6 +3214,7 @@ def _trail_limit_orders(sid, session):
         # CYCLE-LIMIT trailing: two sub-phases
         progress = session.get("cycle_progress", {})
         phase = progress.get("phase", "close")
+        progress["phase"] = phase
         cycle_account = session.get("cycle_account", "")
         if not cycle_account:
             return
@@ -4988,6 +4989,7 @@ def _should_issue_command(session, account):
 
         progress = session.get("cycle_progress", {})
         phase = progress.get("phase", "close")
+        progress["phase"] = phase
         idx = progress.get("index", 0)
 
         # Get fills for the cycling account, excluding already-closed tickets
@@ -5232,9 +5234,14 @@ def _should_issue_command(session, account):
             session["cycle_account"] = cycle_account
             print(f"[CYCLE-LIMIT-DBG] Auto-initialized cycle_progress for {cycle_account}, total={cycle_total}")
 
-        progress = session.get("cycle_progress", {})
+        # Use setdefault so progress is always the SAME dict stored in session,
+        # never an ephemeral fallback {}.  This ensures mutations below are visible
+        # to any subsequent session.get("cycle_progress", {}).get("phase") reads.
+        progress = session.setdefault("cycle_progress", {})
         phase = progress.get("phase", "close")
+        progress["phase"] = phase  # Persist default so line-5417 check always sees it
         idx = progress.get("index", 0)
+        progress["index"] = idx
 
         # Build sorted (oldest-first) active fills
         closed_tickets_set = set(
