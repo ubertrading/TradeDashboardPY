@@ -2606,12 +2606,11 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         replaced = False
         for i, f in enumerate(session.get("fills", [])):
             if f.get("account") == account and str(f.get("ticket")) == str(closed_ticket):
-                # Preserve original timestamp so age filter sees true position age
-                new_fill["ts"] = f.get("ts", new_fill["ts"])
-                new_fill["ts_epoch"] = f.get("ts_epoch", new_fill["ts_epoch"])
+                # Do NOT preserve the original timestamp. Cycled positions are new positions
+                # and should fall to the back of the queue (0 days old) to avoid infinite recycling.
                 session["fills"][i] = new_fill
                 replaced = True
-                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} at fills[{i}] (preserved ts)")
+                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} at fills[{i}] (fresh ts)")
                 break
         if not replaced:
             for f in session.get("fills", []):
@@ -3290,7 +3289,7 @@ def _trail_limit_orders(sid, session):
                             [f for f in session.get("fills", [])
                              if f.get("account") == cycle_account
                              and str(f.get("ticket")) not in closed_set],
-                            key=lambda f: f.get("ts_epoch", 0) or 0
+                            key=lambda f: (f.get("ts_epoch", 0) or 0, int(f.get("ticket") or 0))
                         )
                         idx = progress.get("index", 0)
                         batch_size = int(session.get("cycle_limit_batch_size", 1))
@@ -5382,14 +5381,9 @@ def _should_issue_command(session, account):
         # --- Completion check (close phase only) ---
         if phase != "open":
             no_more_to_cycle = cycle_limit_days > 0 and not found_old_enough
-            # Keep cycle_total in sync with the actual active fill count so a stale value
-            # never triggers a false "All done". The primary completion signal is idx >= total_to_cycle.
-            progress["cycle_total"] = total_to_cycle
-            # Also correct cycled if it somehow exceeded idx (double-increment guard)
-            if progress.get("cycled", 0) > idx:
-                progress["cycled"] = idx
-            target_cycles = total_to_cycle  # use live count, not stale stored value
-            if idx >= total_to_cycle or no_more_to_cycle:
+            # In cycle limit, target_cycles is locked in at the start of the cycle
+            target_cycles = progress.get("cycle_total", len(acct_fills))
+            if progress.get("cycled", 0) >= target_cycles or idx >= len(acct_fills) or no_more_to_cycle:
                 cycled_count = progress.get("cycled", 0)
                 print(f"[CYCLE-LIMIT-DBG] acct={account}: All done (cycled={cycled_count}, idx={idx}, fills={total_to_cycle})")
                 if session.get("action", "").startswith("cycle_limit_"):
