@@ -5294,7 +5294,10 @@ def _should_issue_command(session, account):
         found_old_enough = True
         if phase != "open":
             if cycle_limit_days > 0:
-                search_idx = idx
+                # BUG FIX: Always search from index 0 in the sorted list.
+                # After each batch, the closed fills are removed from acct_fills.
+                # If we start from progress["index"], we skip the remaining uncycled positions.
+                search_idx = 0
                 found_old_enough = False
                 while search_idx < len(acct_fills):
                     fill_record = acct_fills[search_idx]
@@ -5321,6 +5324,9 @@ def _should_issue_command(session, account):
                 progress["index"] = idx
                 session["cycle_progress"] = progress
             else:
+                # When cycle_limit_days is 0, the oldest position is always at index 0
+                # because we already sorted the active array by oldest-first.
+                idx = 0
                 progress["index"] = idx
                 session["cycle_progress"] = progress
 
