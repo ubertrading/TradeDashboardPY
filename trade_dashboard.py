@@ -3315,6 +3315,44 @@ def _trail_limit_orders(sid, session):
                 session["cycle_progress"] = progress
 
         elif phase == "open" and progress.get("open_dispatched"):
+            # ── Missed-fill heal ──────────────────────────────────────────────────
+            # If any tickets in cycle_limit_open_fills are now open positions
+            # (not pending orders), their fill callback was missed. Call
+            # _cycle_handle_fill on each to unblock the state machine.
+            ea_open_tickets_raw = ea_account_info.get(cycle_account, {}).get("open_tickets") or []
+            ea_open_set = set(str(_normalize_ticket(t)) for t in ea_open_tickets_raw)
+            pending_open_fills = [
+                f for f in session.get("cycle_limit_open_fills", [])
+                if f.get("account") == cycle_account
+            ]
+            if pending_open_fills:
+                # Also get pending broker orders to distinguish pending vs filled
+                pending_broker_tickets = set()
+                if acct_obj and hasattr(acct_obj, "_get_pending_orders"):
+                    try:
+                        for po in acct_obj._get_pending_orders():
+                            if po.get("Ticket"):
+                                pending_broker_tickets.add(str(po["Ticket"]))
+                    except Exception:
+                        pass
+
+                for ol_fill in list(pending_open_fills):
+                    t = str(ol_fill.get("ticket", ""))
+                    if not t:
+                        continue
+                    ticket_in_open = t in ea_open_set
+                    ticket_still_pending = t in pending_broker_tickets
+                    if ticket_in_open and not ticket_still_pending:
+                        # Limit filled — heal the missed fill callback
+                        print(f"[CYCLE-LIMIT] Missed-fill heal: ticket {t} is now open on {cycle_account}. Calling _cycle_handle_fill.")
+                        heal_data = {
+                            "ticket": ol_fill.get("ticket"),
+                            "fill_price": ol_fill.get("price"),
+                            "quote_price": ol_fill.get("price"),
+                            "spread": 0,
+                        }
+                        _cycle_handle_fill(session, cycle_account, heal_data, ol_fill.get("ts_epoch", time.time()), sid)
+
             # Trail the pending limit open order.
             if op_side == "buy":
                 desired_price = round(q_ask - dist_val, 5)
