@@ -156,8 +156,18 @@ def _parse_open_time(ot):
 
     import re
     # Strip fractional seconds like .123456 at the end of the time string
-    # Ensure it only matches dots followed by digits at the end of the string, or right before a Z/AM/PM
     s = re.sub(r'\.\d+(?=\s*$|\s*[a-zA-Z]+$)', '', s)
+
+    # MT5 APIs sometimes return TimeCreate as an integer (Unix timestamp in broker time)
+    if s.isdigit() and len(s) >= 9:
+        try:
+            broker_epoch = int(s)
+            dt = _dt.utcfromtimestamp(broker_epoch)
+            dt_ny = dt - timedelta(hours=7)
+            dt_ny = dt_ny.replace(tzinfo=NY_TZ)
+            return int(dt_ny.timestamp())
+        except Exception:
+            pass
 
     # Try multiple date formats
     _FORMATS = [
@@ -1009,6 +1019,7 @@ class MT4DirectAccount:
                             'Lots': float(getattr(o, 'Lots', 0)) / self.lot_divisor,
                             'Comment': str(getattr(o, 'Comment', '')),
                             'OpenPrice': float(getattr(o, 'OpenPrice', 0)),
+                            'OpenTimeRaw': getattr(o, 'OpenTime', None),
                             'OpenTime': str(getattr(o, 'OpenTime', '')),
                             'Profit': float(getattr(o, 'Profit', 0)),
                             'Swap': float(getattr(o, 'Swap', 0)),
@@ -1039,7 +1050,7 @@ class MT4DirectAccount:
                     if not ((match_blank and not comment.strip()) or any(cp in comment for cp in parts)):
                         continue
                 side = "buy" if o['Type'].lower() in ('buy', '0', 'op_buy') else "sell"
-                oe = _parse_open_time(o['OpenTime']) if o.get('OpenTime') else None
+                oe = _parse_open_time(o.get('OpenTimeRaw') or o.get('OpenTime')) if (o.get('OpenTimeRaw') or o.get('OpenTime')) else None
                 positions.append({
                     "ticket": o['Ticket'],
                     "symbol": symbol,
@@ -2452,6 +2463,7 @@ class MT5DirectAccount:
                                     'Lots': float(getattr(o, 'Lots', getattr(o, 'Volume', 0))) / self.lot_divisor,
                                     'Comment': str(getattr(o, 'Comment', '')),
                                     'OpenPrice': float(getattr(o, 'OpenPrice', getattr(o, 'PriceOpen', 0))),
+                                    'OpenTimeRaw': getattr(o, 'OpenTime', getattr(o, 'TimeCreate', None)),
                                     'OpenTime': str(getattr(o, 'OpenTime', getattr(o, 'TimeCreate', ''))),
                                     'Profit': float(getattr(o, 'Profit', 0)),
                                     'Swap': float(getattr(o, 'Swap', 0)),
@@ -2527,7 +2539,7 @@ class MT5DirectAccount:
                         continue
                 otype = o['Type'].lower()
                 side = "buy" if otype in ('buy', '0', 'position_type_buy') else "sell"
-                oe = _parse_open_time(o['OpenTime']) if o.get('OpenTime') else None
+                oe = _parse_open_time(o.get('OpenTimeRaw') or o.get('OpenTime')) if o.get('OpenTimeRaw') or o.get('OpenTime') else None
                 positions.append({
                     "ticket": o['Ticket'],
                     "symbol": symbol,
