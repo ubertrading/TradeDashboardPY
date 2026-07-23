@@ -4132,21 +4132,38 @@ class MTDirectManager:
                         limit_type = "BuyLimit" if trade_side == "buy" else "SellLimit"
                         closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
                         batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
+                        
+                        prog = session.get("cycle_progress", {})
+                        already_placed = prog.get("limit_placed_this_batch", 0)
+                        to_place = batch_size - already_placed
+                        
+                        if to_place <= 0:
+                            logger.info("[%s] cycle_limit_open: target %d already placed in this batch, skipping", account_id, batch_size)
+                            had_cycle = True
+                            continue
+                            
                         any_placed = False
-                        for i in range(batch_size):
+                        placed_now = 0
+                        for i in range(to_place):
                             logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
-                                        account_id, i + 1, batch_size, limit_type, limit_price)
+                                        account_id, already_placed + i + 1, batch_size, limit_type, limit_price)
                             order_result = direct_acct.send_limit_order(
                                 pair, trade_side, lot_size, limit_price, limit_type,
                                 session_id=session_id, comment=comment
                             )
                             if isinstance(order_result, tuple) and not order_result[0]:
                                 logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed",
-                                               account_id, i + 1, batch_size)
+                                               account_id, already_placed + i + 1, batch_size)
                             else:
                                 any_placed = True
+                                placed_now += 1
+                                
+                        if placed_now > 0:
+                            prog["limit_placed_this_batch"] = already_placed + placed_now
+                            session["cycle_progress"] = prog
+                            
                         if not any_placed:
-                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight", account_id, batch_size)
+                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight", account_id, to_place)
                             self.dd["in_flight_commands"].pop((session_id, account_id), None)
                         else:
                             had_cycle = True

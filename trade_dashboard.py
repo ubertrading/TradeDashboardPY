@@ -2637,6 +2637,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     progress.pop("closed_tickets", None)
     progress.pop("closed_ticket", None)
     progress.pop("open_retries", None)  # Reset retry counter on success
+    progress.pop("limit_placed_this_batch", None)  # Clear the connector's internal retry-tracking counter
     # Advance to next batch
     progress["open_fill_received"] = True
     progress["phase"] = "close"
@@ -5431,6 +5432,7 @@ def _should_issue_command(session, account):
                             progress.pop("close_tp_confirmed", None)
                             progress.pop("open_dispatched", None)
                             progress.pop("open_fill_received", None)
+                            progress.pop("limit_placed_this_batch", None)
                             progress["closed_tickets"] = target_tickets
                             session["cycle_limit_open_fills"] = [
                                 f for f in session.get("cycle_limit_open_fills", [])
