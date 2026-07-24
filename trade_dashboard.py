@@ -16173,7 +16173,8 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     let totBal = 0, totEq = 0, totPnl = 0, totLots = 0, totSwap = 0;
     let totPosLots = 0, totNegLots = 0;
     let totOptEq = 0, totShift = 0;
-    let totMargin = 0, totNotional = 0;
+    let totMargin = 0;
+    let maxNormMu = null; // Track worst NOP/FM
     let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false;
     let hasOptEq = false, hasShift = false;
     const _seen = new Set();
@@ -16198,7 +16199,17 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       if (!isNaN(rMargin)) {
         totMargin += rMargin;
         const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb && hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
-        totNotional += Math.abs(aLots) * 100000;
+        const aNotional = Math.abs(aLots) * 100000;
+        const aEq = !isNaN(re) ? re : 0;
+        const aFm = aEq - rMargin;
+        if (aNotional > 0) {
+          if (aFm <= 0) {
+            maxNormMu = 'MAX';
+          } else if (maxNormMu !== 'MAX') {
+            const muRatio = aNotional / aFm;
+            if (maxNormMu === null || muRatio > maxNormMu) maxNormMu = muRatio;
+          }
+        }
       }
 
       const dist = fundDists[id] || {};
@@ -16224,7 +16235,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const shiftStyle = hasShift ? (totShift >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
     
     const totFm = totEq - totMargin;
-    const fmtNormMu = totNotional > 0 ? (totFm > 0 ? (totNotional / totFm).toFixed(0) + 'x' : 'MAX') : '-';
+    const fmtNormMu = maxNormMu === 'MAX' ? 'MAX' : (maxNormMu !== null ? maxNormMu.toFixed(0) + 'x' : '-');
 
     // Sum swap deltas
     let totSwapDelta = 0; let hasSwapDelta = false;
@@ -16318,6 +16329,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   let gMaxAge = null;
   let gMaxMu = null;
   let gNotional = 0;
+  let gMaxNormMu = null; // Track global highest NOP/FM
   let gMargin = 0;
   let gMinPtmc = null;   // lowest pips-to-MC across all groups (worst risk)
   let gOptEq = 0, gShift = 0;
@@ -16332,6 +16344,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let maxMu = null;  // highest margin use %
     let maxMuLev = null;  // leverage of the account with highest margin use
     let sumNotional = 0;
+    let maxNormMu = null; // Track group highest NOP/FM
     let sumMargin = 0;
     let maxAge = null;
     let minPtmc = null;  // lowest pips-to-MC in this group
@@ -16389,8 +16402,26 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           maxMuLev = acctLev ? ('1:' + acctLev) : null;
         }
         const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb && hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
-        sumNotional += Math.abs(aLots) * 100000;
+        const aNotional = Math.abs(aLots) * 100000;
+        sumNotional += aNotional;
         sumMargin += rawMargin;
+        
+        // Track NOP/FM (max per group and max globally)
+        const aFm = rawEqMu - rawMargin;
+        if (aNotional > 0) {
+          if (aFm <= 0) {
+            maxNormMu = 'MAX';
+            gMaxNormMu = 'MAX';
+          } else {
+            const muRatio = aNotional / aFm;
+            if (maxNormMu !== 'MAX') {
+              if (maxNormMu === null || muRatio > maxNormMu) maxNormMu = muRatio;
+            }
+            if (gMaxNormMu !== 'MAX') {
+              if (gMaxNormMu === null || muRatio > gMaxNormMu) gMaxNormMu = muRatio;
+            }
+          }
+        }
       }
       // Δ Swap
       const sd = swapDelta[m.id];
@@ -16448,7 +16479,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     const lotsBreak = hasLots ? `<br><span style="font-size:0.7rem;font-weight:400;color:var(--text2);">(${sumPosLots.toFixed(2)} / ${sumNegLots.toFixed(2)})</span>` : '';
     const fMu = maxMu !== null ? maxMu.toFixed(1) + '%' : '-';
     const sumFm = sumEq - sumMargin;
-    const fNormMu = sumNotional > 0 ? (sumFm > 0 ? (sumNotional / sumFm).toFixed(0) + 'x' : 'MAX') : '-';
+    const fNormMu = maxNormMu === 'MAX' ? 'MAX' : (maxNormMu !== null ? maxNormMu.toFixed(0) + 'x' : '-');
     const fSwap = hasSwap ? sumSwap.toFixed(2) : '-';
     const fSwapDelta = hasSwapDelta ? ((sumSwapDelta > 0 ? '+' : '') + sumSwapDelta.toFixed(2)) : '-';
     const sdColor = hasSwapDelta ? (sumSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -16538,7 +16569,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   const gLotsStyle = gHasLots ? (gLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
   const gLotsBreak = gHasLots ? `<div style="font-size:0.65rem;font-weight:400;color:#e2e8f0;letter-spacing:-0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;"><a href="#" onclick="showLotsBreakdown();return false;" style="color:inherit;text-decoration:underline;cursor:pointer;">(${gPosLots.toFixed(2)}/${gNegLots.toFixed(2)})</a></div>` : '';
   const gFm = gEq - gMargin;
-  const fGNormMu = gNotional > 0 ? (gFm > 0 ? (gNotional / gFm).toFixed(0) + 'x' : 'MAX') : '-';
+  const fGNormMu = gMaxNormMu === 'MAX' ? 'MAX' : (gMaxNormMu !== null ? gMaxNormMu.toFixed(0) + 'x' : '-');
   const fGSwap = gHasSwap ? gSwap.toFixed(2) : '-';
   const fGSwapDelta = gHasSwapDelta ? ((gSwapDelta > 0 ? '+' : '') + gSwapDelta.toFixed(2)) : '-';
   const gSdStyle = gHasSwapDelta ? (gSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
