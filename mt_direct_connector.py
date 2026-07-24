@@ -3972,6 +3972,14 @@ class MTDirectManager:
             # wait for the next loop iteration (by which time session["closed"] will
             # reflect the first close and _should_issue_command will correctly block it).
             _sessions_with_close_dispatched = set()
+            # Track sessions that already queued an OPEN in this batch cycle.
+            # For "open" action, both accounts can pass _should_issue_command simultaneously
+            # because _get_net_open reads the same fill count before either broker call has
+            # returned. This causes "2 on side-1, 1 on side-2" races. Once one account's
+            # open is queued in this loop pass, block all other accounts in the same session
+            # from also queuing an open — they must wait for the next loop iteration by which
+            # time the fill count will reflect the first open's result.
+            _sessions_with_open_dispatched = set()
 
             for session_id, session in self.dd["sessions"].items():
                 if session.get("status") not in ("active", "partial_close"):
@@ -4169,19 +4177,48 @@ class MTDirectManager:
                             
                         any_placed = False
                         placed_now = 0
-                        for i in range(to_place):
-                            logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
-                                        account_id, already_placed + i + 1, batch_size, limit_type, limit_price)
-                            order_result = direct_acct.send_limit_order(
-                                pair, trade_side, lot_size, limit_price, limit_type,
-                                session_id=session_id, comment=comment
-                            )
-                            if isinstance(order_result, tuple) and not order_result[0]:
-                                logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed",
-                                               account_id, already_placed + i + 1, batch_size)
-                            else:
-                                any_placed = True
-                                placed_now += 1
+                        if "MT5" in account_id.upper():
+                            import threading
+                            threads = []
+                            results = [False] * to_place
+                            def _place_init_limit(i, lim_pr):
+                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
+                                            account_id, already_placed + i + 1, batch_size, limit_type, lim_pr)
+                                order_result = direct_acct.send_limit_order(
+                                    pair, trade_side, lot_size, lim_pr, limit_type,
+                                    session_id=session_id, comment=comment
+                                )
+                                if isinstance(order_result, tuple) and not order_result[0]:
+                                    logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed",
+                                                   account_id, already_placed + i + 1, batch_size)
+                                else:
+                                    results[i] = True
+                            for i in range(to_place):
+                                fresh_quote = direct_acct.get_quote_direct(pair) or quote
+                                base_price = (fresh_quote.get("ask", 0) if trade_side == "buy" else fresh_quote.get("bid", 0)) if fresh_quote else 0
+                                lim_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
+                                lim_price = round(lim_price, digits)
+                                t = threading.Thread(target=_place_init_limit, args=(i, lim_price))
+                                threads.append(t)
+                                t.start()
+                            for t in threads:
+                                t.join()
+                            placed_now = sum(results)
+                            any_placed = placed_now > 0
+                        else:
+                            for i in range(to_place):
+                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
+                                            account_id, already_placed + i + 1, batch_size, limit_type, limit_price)
+                                order_result = direct_acct.send_limit_order(
+                                    pair, trade_side, lot_size, limit_price, limit_type,
+                                    session_id=session_id, comment=comment
+                                )
+                                if isinstance(order_result, tuple) and not order_result[0]:
+                                    logger.warning("[%s] cycle_limit_open [%d/%d]: limit order failed",
+                                                   account_id, already_placed + i + 1, batch_size)
+                                else:
+                                    any_placed = True
+                                    placed_now += 1
                                 
                         if placed_now > 0:
                             prog["limit_placed_this_batch"] = already_placed + placed_now
@@ -4293,22 +4330,13 @@ class MTDirectManager:
                 # progress["index"] was set based on sorted acct_fills, so we must
                 # use the same sort here to close the correct position.
                 def _fill_sort_key(f):
-                    # Prefer ts_epoch (reliably set at import/fill time as broker open epoch)
+                    # Sort by (ts_epoch, ticket) — must match _should_issue_command's sort
+                    # exactly so that progress["index"] refers to the same fill in both places.
+                    # Do NOT parse the ts string here — ts_epoch is set at import/fill time
+                    # and is reliable. Using time.mktime() for string fallback would apply
+                    # local machine timezone instead of the broker's EET offset, causing
+                    # the two sorted lists to diverge.
                     ep = f.get("ts_epoch", 0) or 0
-                    if ep == 0:
-                        # Fallback: parse ts string
-                        ts_str = f.get("ts", "")
-                        if ts_str:
-                            import re
-                            s = str(ts_str).strip().replace("T", " ").rstrip("Z")
-                            s = re.sub(r'\.\d+', '', s)
-                            for fmt in ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M"):
-                                try:
-                                    ep = time.mktime(time.strptime(s, fmt))
-                                    break
-                                except (ValueError, TypeError):
-                                    continue
-                    # Tie-breaker: ticket number
                     ticket = int(f.get("ticket") or 0)
                     return (ep, ticket)
                 acct_fills.sort(key=_fill_sort_key)
@@ -4319,13 +4347,17 @@ class MTDirectManager:
 
                     if is_limit:
                         # CYCLE-LIMIT: modify TakeProfit to passive limit price for all batch tickets
+                        # Calculate the TP price ONCE so all tickets in the batch close simultaneously
                         quote = direct_acct.get_quote_direct(pair)
                         base_price = (quote.get("bid", 0) if original_side == "buy" else quote.get("ask", 0)) if quote else 0
                         pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
                         limit_price = base_price + (limit_dist / pip_mult) if original_side == "buy" else base_price - (limit_dist / pip_mult)
+                        limit_price = round(limit_price, 3 if "JPY" in pair.upper() else 5)
 
                         any_tp_ok = False
+                        all_tp_ok = True
                         all_gone = True  # True if every ticket in batch is gone (already closed)
+                        
                         for i in range(batch_size):
                             if idx + i >= len(acct_fills):
                                 break
@@ -4368,6 +4400,7 @@ class MTDirectManager:
                                 logger.warning("[%s] CYCLE-LIMIT: TP modify failed for ticket %s (result=%s)",
                                                account_id, ticket, tp_result)
                                 all_gone = False
+                                all_tp_ok = False
 
                         if all_gone and not any_tp_ok:
                             # All tickets in this batch are already gone — advance to open phase
@@ -4394,14 +4427,18 @@ class MTDirectManager:
                                     })
                                 session["cycle_progress"] = prog
                             self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
-                        elif any_tp_ok:
-                            # At least one TP set successfully — mark as broker-confirmed
+                        elif any_tp_ok and all_tp_ok:
+                            # At least one TP set successfully and NO failures — mark as broker-confirmed
                             with self.dd["lock"]:
                                 prog = session.get("cycle_progress", {})
                                 prog["close_tp_set"] = True
                                 prog["close_tp_set_ts"] = time.time()
                                 prog["close_tp_confirmed"] = True
                                 prog["close_tp_price"] = limit_price
+                                
+                                batch_tickets = [acct_fills[idx + i].get("ticket") for i in range(batch_size) if idx + i < len(acct_fills)]
+                                prog["closed_tickets"] = batch_tickets
+                                
                                 session["cycle_progress"] = prog
                             self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
                             save_fn = self.dd.get("save_sessions")

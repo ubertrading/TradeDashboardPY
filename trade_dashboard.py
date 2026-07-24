@@ -1293,7 +1293,7 @@ _SYMBOL_SUFFIX_RE = _re.compile(
     r"""(?x)
     (?:
         [._]        # separator: dot or underscore
-        [a-zA-Z0-9]+ # followed by any alphanumeric tail (.b, .ecn, _raw, etc.)
+        [a-zA-Z0-9]* # followed by zero or more alphanumeric chars (.b, .ecn, _raw, . etc.)
     |   [+\-]$      # OR a trailing + or - (GBPCHF+ / GBPCHF-)
     )$"""
 )
@@ -2624,6 +2624,8 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         session.setdefault("fills", []).append(new_fill)
         print(f"[CYCLE] Fallback: Appended new ticket={ticket} (no closed_ticket to match)")
 
+    # Track newly created position tickets so they aren't cycled again in the current session
+    progress.setdefault("new_cycle_tickets", []).append(str(ticket))
     session["cycle_progress"] = progress
 
     # Check if we have all batch fills — if not, stay in open phase
@@ -2641,7 +2643,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     # Advance to next batch
     progress["open_fill_received"] = True
     progress["phase"] = "close"
-    progress["index"] = idx + batch_size
+    progress["index"] = idx
     progress["cycled"] = progress.get("cycled", 0) + batch_size
     # For cycle_limit_: clear TP / limit-open state for the next iteration
     if session.get("action", "").startswith("cycle_limit_"):
@@ -3294,18 +3296,30 @@ def _trail_limit_orders(sid, session):
                         )
                         idx = progress.get("index", 0)
                         batch_size = int(session.get("cycle_limit_batch_size", 1))
-                        batch_success = False
+                        import threading
+                        threads = []
+                        results = [False] * batch_size
+                        
+                        def _mod_tp(i, tkt, lts, cls_side, des_tp):
+                            success, _ = acct_obj.modify_position_tp(tkt, pair, cls_side, lts, des_tp)
+                            if success:
+                                results[i] = True
+                                print(f"[{cycle_account}] Trailed CYCLE-LIMIT TP ticket={tkt} to {des_tp} (drift: {diff_pts:.1f} pts)")
+
                         for i in range(batch_size):
                             if idx + i < len(cl_fills):
                                 ticket = cl_fills[idx + i].get("ticket")
                                 lots = cl_fills[idx + i].get("lots", side_info.get("lot_size") or session.get("lot_size", 0.01))
                                 if acct_obj and hasattr(acct_obj, "modify_position_tp") and ticket:
                                     close_side = "sell" if op_side == "buy" else "buy"
-                                    success, _ = acct_obj.modify_position_tp(ticket, pair, close_side, lots, desired_tp)
-                                    if success:
-                                        batch_success = True
-                                        print(f"[{cycle_account}] Trailed CYCLE-LIMIT TP ticket={ticket} to {desired_tp} (drift: {diff_pts:.1f} pts)")
-                        if batch_success:
+                                    t = threading.Thread(target=_mod_tp, args=(i, ticket, lots, close_side, desired_tp))
+                                    threads.append(t)
+                                    t.start()
+                        
+                        for t in threads:
+                            t.join()
+                            
+                        if any(results):
                             progress["close_tp_price"] = desired_tp
                             session["cycle_progress"] = progress
                             modified_any = True
@@ -3360,6 +3374,17 @@ def _trail_limit_orders(sid, session):
                 desired_price = round(q_bid + dist_val, 5)
 
             # Find the pending limit open ticket
+            import threading
+            threads = []
+            results = []
+            
+            def _mod_limit(ol_fill, tkt, lts, des_pr, d_pts):
+                success, _ = acct_obj.modify_limit_price(tkt, pair, op_side, lts, des_pr)
+                if success:
+                    ol_fill["price"] = des_pr
+                    results.append(True)
+                    print(f"[{cycle_account}] Trailed CYCLE-LIMIT open {tkt} to {des_pr} (drift: {d_pts:.1f} pts)")
+
             for ol_fill in session.get("cycle_limit_open_fills", []):
                 if ol_fill.get("account") != cycle_account:
                     continue
@@ -3380,11 +3405,15 @@ def _trail_limit_orders(sid, session):
                 if diff_pts >= cl_step:
                     lots = ol_fill.get("lots", side_info.get("lot_size") or session.get("lot_size", 0.01))
                     if acct_obj and hasattr(acct_obj, "modify_limit_price"):
-                        success, _ = acct_obj.modify_limit_price(ticket, pair, op_side, lots, desired_price)
-                        if success:
-                            ol_fill["price"] = desired_price
-                            modified_any = True
-                            print(f"[{cycle_account}] Trailed CYCLE-LIMIT open {ticket} to {desired_price} (drift: {diff_pts:.1f} pts)")
+                        t = threading.Thread(target=_mod_limit, args=(ol_fill, ticket, lots, desired_price, diff_pts))
+                        threads.append(t)
+                        t.start()
+                        
+            for t in threads:
+                t.join()
+                
+            if results:
+                modified_any = True
 
     if modified_any:
         session["_last_trail_ts"] = now_ts
@@ -3444,6 +3473,13 @@ def _run_hedge_monitor_all():
             # may briefly lag behind close_fills — causing false "missing ticket" detections.
             cycle_done_ts = session.get("cycle_complete_ts", 0)
             if cycle_done_ts > 0 and (now_ts - cycle_done_ts) < 30:
+                continue
+            # Post-cycle-FAIL cooldown: when a cycle fails mid-open (e.g. CYCLE-FAIL),
+            # the session reverts to monitor while positions closed by TP are still gone.
+            # Without this cooldown, the hedge monitor fires immediately and treats those
+            # legitimately-closed positions as external closes, triggering spurious rollbacks.
+            cycle_fail_ts = session.get("cycle_fail_ts", 0)
+            if cycle_fail_ts > 0 and (now_ts - cycle_fail_ts) < 30:
                 continue
 
             # STARTUP COOLDOWN: Skip hedge monitor for the first 30s after session start
@@ -3876,15 +3912,35 @@ def _run_hedge_monitor_all():
 
                 missing_tickets = set()
 
-                # Check for permanent import imbalances (e.g. imported 0 vs N)
+                # Check for permanent import imbalances (e.g. imported 0 vs N).
+                # IMPORTANT: only generate MISSING_IMPORT sentinel tickets when the
+                # BROKER itself confirms those positions are gone (broker open count <
+                # session fill count).  A deliberate partial import (e.g. user imports
+                # 45 of 50 positions on one side) must NOT cascade a rollback on the
+                # paired side — the broker still shows 45 open positions, which is
+                # exactly what we expect for that import.
                 if sess_action != "open" and session.get("imported"):
                     total_pos = session.get("total_positions", 0)
                     if len(acct_fill_tickets) < total_pos:
                         shortfall = total_pos - len(acct_fill_tickets)
-                        for i in range(shortfall):
-                            fake_t = f"MISSING_IMPORT_{account}_{i}"
-                            if fake_t not in acct_close_tickets and fake_t not in pending_rb_tickets:
-                                missing_tickets.add(fake_t)
+                        # How many positions does the broker actually report for this account?
+                        broker_open_count = len(ea_open_tickets) if ea_open_tickets is not None else None
+                        # Only fire if broker also has fewer positions than we filled.
+                        # If broker_open_count >= len(acct_fill_tickets) the shortfall
+                        # is a deliberate partial import, not an external close.
+                        broker_confirms_missing = (
+                            broker_open_count is not None
+                            and broker_open_count < len(acct_fill_tickets)
+                        )
+                        if broker_confirms_missing:
+                            for i in range(shortfall):
+                                fake_t = f"MISSING_IMPORT_{account}_{i}"
+                                if fake_t not in acct_close_tickets and fake_t not in pending_rb_tickets:
+                                    missing_tickets.add(fake_t)
+                        else:
+                            print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: import shortfall "
+                                  f"({len(acct_fill_tickets)}/{total_pos}) but broker shows "
+                                  f"{broker_open_count} open positions — treating as partial import, NOT triggering rollback")
 
                 # ── NETTING MODE BYPASS ──────────────────────────────────────
                 # Brokers like Dukascopy use netting mode: all fills for one
@@ -5038,10 +5094,13 @@ def _should_issue_command(session, account):
             str(f.get("ticket")) for f in session.get("close_fills", [])
             if f.get("account") == cycle_account
         )
+        new_cycle_tks = set(str(t) for t in progress.get("new_cycle_tickets", []))
+        
         acct_fills = [
             f for f in session.get("fills", [])
             if f.get("account") == cycle_account
             and str(f.get("ticket")) not in closed_tickets_set
+            and str(f.get("ticket")) not in new_cycle_tks
         ]
         # Sort oldest-first so cycle processes the oldest positions first.
         # Secondary key: ticket number (monotonically increasing in MT4/MT5) guarantees
@@ -5408,61 +5467,78 @@ def _should_issue_command(session, account):
                 # different session). Instead, poll the broker-visible open positions directly.
                 if progress.get("close_tp_confirmed"):
                     batch_size = int(session.get("cycle_limit_batch_size", 1))
-                    target_tickets = []
-                    for i in range(batch_size):
-                        if idx + i < len(acct_fills):
-                            target_tickets.append(acct_fills[idx + i].get("ticket"))
-
-                    # Look up ea_account_info for this account to see live open tickets
-                    ea_info = ea_account_info.get(account, {})
-                    ea_open_tickets_raw = ea_info.get("open_tickets")
-
-                    if ea_open_tickets_raw is not None:
-                        ea_open_tickets = set(_normalize_ticket(t) for t in ea_open_tickets_raw)
-                        
-                        # Check if ANY of the target tickets are still open
-                        tickets_still_open = any(_normalize_ticket(t) in ea_open_tickets for t in target_tickets if t is not None)
-
-                        if not tickets_still_open and target_tickets:
-                            # ALL TPs were hit! Transition close → open
-                            print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase→open.")
-                            progress["phase"] = "open"
-                            progress["cycle_close_ts"] = time.time()
-                            progress.pop("close_tp_set", None)
-                            progress.pop("close_tp_set_ts", None)
-                            progress.pop("close_tp_confirmed", None)
-                            progress.pop("open_dispatched", None)
-                            progress.pop("open_fill_received", None)
-                            progress.pop("limit_placed_this_batch", None)
-                            progress["closed_tickets"] = target_tickets
-                            session["cycle_limit_open_fills"] = [
-                                f for f in session.get("cycle_limit_open_fills", [])
-                                if f.get("account") != account
-                            ]
-                            # Clear the connector's claimed-ticket set so the next batch's fill watchers
-                            # don't incorrectly skip positions that were claimed by this batch's watchers.
-                            if mt_direct_manager:
-                                acct_obj = mt_direct_manager.accounts.get(account)
-                                if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
-                                    acct_obj._claimed_fill_tickets.clear()
-                            # Record these as close fills so idx advances on next cycle
-                            for target_ticket in target_tickets:
-                                session.setdefault("close_fills", []).append({
-                                    "account": account,
-                                    "ticket": target_ticket,
-                                    "price": progress.get("close_tp_price"),
-                                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "ts_epoch": time.time(),
-                                    "external": True,
-                                })
-                            session["cycle_progress"] = progress
-                            _save_sessions()
-                            # Phase is now "open" — update local variable and fall through to open-phase dispatch
-                            phase = "open"
-                        else:
-                            return False  # TP confirmed on broker; waiting for market to hit it
+                    
+                    # Use the stored closed_tickets list (set when TPs were placed).
+                    # This is the authoritative list of tickets that actually have TPs on them.
+                    # Deriving from acct_fills[idx:] is wrong because those tickets have already
+                    # been removed from acct_fills by the close_fills filter.
+                    stored_closed = progress.get("closed_tickets")
+                    if not stored_closed:
+                        # Stale state: close_tp_confirmed is set but we lost the ticket list
+                        # (e.g. from a prior code version). Clear the stale flag so the cycle
+                        # re-dispatches the TP for this batch.
+                        print(f"[CYCLE-LIMIT-GUARD] close_tp_confirmed set but no closed_tickets stored — clearing stale flag to retry TP dispatch on {account}")
+                        progress.pop("close_tp_set", None)
+                        progress.pop("close_tp_set_ts", None)
+                        progress.pop("close_tp_confirmed", None)
+                        session["cycle_progress"] = progress
+                        _save_sessions()
+                        # Fall through — phase is still "close" → dispatch TP below
                     else:
-                        return False  # open_tickets not yet available from broker; wait
+                        target_tickets = stored_closed
+
+                        # Look up ea_account_info for this account to see live open tickets
+                        ea_info = ea_account_info.get(account, {})
+                        ea_open_tickets_raw = ea_info.get("open_tickets")
+
+                        if ea_open_tickets_raw is not None:
+                            ea_open_tickets = set(_normalize_ticket(t) for t in ea_open_tickets_raw)
+                            
+                            # Check if ANY of the target tickets are still open
+                            tickets_still_open = any(_normalize_ticket(t) in ea_open_tickets for t in target_tickets if t is not None)
+
+                            if not tickets_still_open and target_tickets:
+                                # ALL TPs were hit! Transition close → open
+                                print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase\u2192open.")
+                                progress["phase"] = "open"
+                                progress["cycle_close_ts"] = time.time()
+                                progress.pop("close_tp_set", None)
+                                progress.pop("close_tp_set_ts", None)
+                                progress.pop("close_tp_confirmed", None)
+                                progress.pop("open_dispatched", None)
+                                progress.pop("open_fill_received", None)
+                                progress.pop("limit_placed_this_batch", None)
+                                progress["closed_tickets"] = target_tickets
+                                session["cycle_limit_open_fills"] = [
+                                    f for f in session.get("cycle_limit_open_fills", [])
+                                    if f.get("account") != account
+                                ]
+                                # Clear the connector's claimed-ticket set so the next batch's fill watchers
+                                # don't incorrectly skip positions that were claimed by this batch's watchers.
+                                if mt_direct_manager:
+                                    acct_obj = mt_direct_manager.accounts.get(account)
+                                    if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
+                                        acct_obj._claimed_fill_tickets.clear()
+                                # Record these as close fills so idx advances on next cycle
+                                for target_ticket in target_tickets:
+                                    session.setdefault("close_fills", []).append({
+                                        "account": account,
+                                        "ticket": target_ticket,
+                                        "price": progress.get("close_tp_price"),
+                                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "ts_epoch": time.time(),
+                                        "external": True,
+                                    })
+                                    # Keep session["closed"] in sync so filled-closed display is accurate
+                                    session.setdefault("closed", {})[account] = session["closed"].get(account, 0) + 1
+                                session["cycle_progress"] = progress
+                                _save_sessions()
+                                # Phase is now "open" — update local variable and fall through to open-phase dispatch
+                                phase = "open"
+                            else:
+                                return False  # TP confirmed on broker; waiting for market to hit it
+                        else:
+                            return False  # open_tickets not yet available from broker; wait
 
                 else:
                     # Safety: auto-clear ONLY if broker never confirmed (may have been rejected)
@@ -6629,6 +6705,7 @@ def poll_command():
                         if retries >= max_retries:
                             session["action"] = "monitor"
                             session["cycle_progress"] = {}
+                            session["cycle_fail_ts"] = time.time()
                             _save_sessions()
                             msg = (f"Cycle reopen TIMEOUT after {retries} attempts on "
                                    f"{account} — reverting to MONITOR")
@@ -7203,41 +7280,61 @@ def trade_result():
                 if action.startswith("cycle_"):
                     progress = session.get("cycle_progress", {})
                     if progress.get("phase") == "open":
-                        retries = progress.get("open_retries", 0) + 1
-                        max_retries = 3
-                        if retries >= max_retries:
-                            session["action"] = "monitor"
-                            session["cycle_progress"] = {}
-                            
-                            # Auto-rollback on cycle fail
-                            my_filled = session.get("filled", {}).get(account, 0)
-                            for other_acc in session.get("sides", {}):
-                                if other_acc == account:
-                                    continue
-                                other_filled = session.get("filled", {}).get(other_acc, 0)
-                                if other_filled > my_filled:
-                                    diff = other_filled - my_filled
-                                    rb = session.setdefault("rollback_needed", {})
-                                    rb[other_acc] = rb.get(other_acc, 0) + diff
-                                    _log_event(session_id, other_acc, "rollback_triggered",
-                                               f"Cycle error on {account} - scheduling {diff} rollback close(s) on {other_acc}")
-
-                            _save_sessions()
-                            msg = (f"Cycle reopen FAILED after {retries} attempts on "
-                                   f"{account} (error: {detail}) — reverting to MONITOR")
-                            print(f"[CYCLE-FAIL] {msg}")
-                            _log_event(session_id, account, "cycle_failed", msg)
+                        # For cycle_limit_open: individual order failures mid-batch are
+                        # EXPECTED (broker can reject one price while market ticks).
+                        # The batch loop handles these internally by trying the next slot.
+                        # We must NOT count them as retry attempts or abort the cycle —
+                        # doing so causes spurious CYCLE-FAIL when some orders succeed.
+                        # A mid-batch failure is defined as: limit mode + at least one
+                        # order already placed but batch is not yet complete.
+                        is_limit_batch = session.get("action", "").startswith("cycle_limit_")
+                        already_placed = progress.get("limit_placed_this_batch", 0)
+                        batch_sz = int(session.get("cycle_limit_batch_size", 1))
+                        batch_mid_flight = is_limit_batch and 0 < already_placed < batch_sz
+                        if batch_mid_flight:
+                            # Mid-batch: single order failed but others succeeded/pending.
+                            # Suppress ALL retry/fail logic — the batch loop handles it.
+                            print(f"[CYCLE-RETRY] Mid-batch error on {account} "
+                                  f"({already_placed}/{batch_sz} placed, "
+                                  f"error: {detail}) -- suppressing retry counter")
                         else:
-                            # Retry: clear dispatch flag so next loop re-sends open
+                            retries = progress.get("open_retries", 0) + 1
                             progress["open_retries"] = retries
-                            progress.pop("open_dispatched", None)
-                            session["cycle_progress"] = progress
-                            _save_sessions()
-                            msg = (f"Cycle reopen timeout on {account} "
-                                   f"(attempt {retries}/{max_retries}, "
-                                   f"error: {detail}) — will retry")
-                            print(f"[CYCLE-RETRY] {msg}")
-                            _log_event(session_id, account, "cycle_retry", msg)
+                            
+                            max_retries = 15 if is_limit_batch else 3
+                            if retries >= max_retries:
+                                session["action"] = "monitor"
+                                session["cycle_progress"] = {}
+                                
+                                # Auto-rollback on cycle fail
+                                my_filled = session.get("filled", {}).get(account, 0)
+                                for other_acc in session.get("sides", {}):
+                                    if other_acc == account:
+                                        continue
+                                    other_filled = session.get("filled", {}).get(other_acc, 0)
+                                    if other_filled > my_filled:
+                                        diff = other_filled - my_filled
+                                        rb = session.setdefault("rollback_needed", {})
+                                        rb[other_acc] = rb.get(other_acc, 0) + diff
+                                        _log_event(session_id, other_acc, "rollback_triggered",
+                                                   f"Cycle error on {account} - scheduling {diff} rollback close(s) on {other_acc}")
+
+                                session["cycle_fail_ts"] = time.time()  # Cooldown: suppress hedge monitor for 30s
+                                _save_sessions()
+                                msg = (f"Cycle reopen FAILED after {retries} attempts on "
+                                       f"{account} (error: {detail}) — reverting to MONITOR")
+                                print(f"[CYCLE-FAIL] {msg}")
+                                _log_event(session_id, account, "cycle_failed", msg)
+                            else:
+                                progress["open_retries"] = retries
+                                progress.pop("open_dispatched", None)
+                                session["cycle_progress"] = progress
+                                _save_sessions()
+                                msg = (f"Cycle reopen timeout on {account} "
+                                       f"(attempt {retries}/{max_retries}, "
+                                       f"error: {detail}) — will retry")
+                                print(f"[CYCLE-RETRY] {msg}")
+                                _log_event(session_id, account, "cycle_retry", msg)
 
                 # ── Max-errors + rollback logic ──
                 max_errors = session.get("max_errors", 1)
@@ -18423,41 +18520,64 @@ if __name__ == '__main__':
                     if _mt_action.startswith("cycle_"):
                         _mt_progress = session.get("cycle_progress", {})
                         if _mt_progress.get("phase") == "open":
-                            _mt_retries = _mt_progress.get("open_retries", 0) + 1
-                            _mt_max_retries = 3
-                            if _mt_retries >= _mt_max_retries:
-                                session["action"] = "monitor"
-                                session["cycle_progress"] = {}
-                                
-                                # Auto-rollback on cycle fail
-                                my_filled = session.get("filled", {}).get(account, 0)
-                                for other_acc in session.get("sides", {}):
-                                    if other_acc == account:
-                                        continue
-                                    other_filled = session.get("filled", {}).get(other_acc, 0)
-                                    if other_filled > my_filled:
-                                        diff = other_filled - my_filled
-                                        rb = session.setdefault("rollback_needed", {})
-                                        rb[other_acc] = rb.get(other_acc, 0) + diff
-                                        _log_event(session_id, other_acc, "rollback_triggered",
-                                                   f"Cycle error on {account} (MT-DIRECT) - scheduling {diff} rollback close(s) on {other_acc}")
-
-                                _save_sessions()
-                                _mt_msg = (f"Cycle reopen FAILED after {_mt_retries} attempts on "
-                                           f"{account} (MT-DIRECT error: {detail}) — reverting to MONITOR")
-                                print(f"[CYCLE-FAIL] {_mt_msg}")
-                                _log_event(session_id, account, "cycle_failed", _mt_msg)
+                            is_limit_batch = _mt_action.startswith("cycle_limit_")
+                            already_placed = _mt_progress.get("limit_placed_this_batch", 0)
+                            batch_sz = int(session.get("cycle_limit_batch_size", 1))
+                            batch_mid_flight = is_limit_batch and 0 < already_placed < batch_sz
+                            if batch_mid_flight:
+                                print(f"[CYCLE-RETRY] Mid-batch error on {account} "
+                                      f"({already_placed}/{batch_sz} placed, "
+                                      f"error: {detail}) -- suppressing retry counter")
                             else:
-                                # Retry: clear dispatch flag so next poll re-sends open
-                                _mt_progress["open_retries"] = _mt_retries
-                                _mt_progress.pop("open_dispatched", None)
-                                session["cycle_progress"] = _mt_progress
-                                _save_sessions()
-                                _mt_msg = (f"Cycle reopen timeout on {account} "
-                                           f"(MT-DIRECT, attempt {_mt_retries}/{_mt_max_retries}, "
-                                           f"error: {detail}) — will retry")
-                                print(f"[CYCLE-RETRY] {_mt_msg}")
-                                _log_event(session_id, account, "cycle_retry", _mt_msg)
+                                _mt_retries = _mt_progress.get("open_retries", 0) + 1
+                                _mt_max_retries = 3
+                                if _mt_retries >= _mt_max_retries:
+                                    # Cleanup any external close_fills added during this cycle if we failed to reopen
+                                    closed_tickets = _mt_progress.get("closed_tickets", [])
+                                    if closed_tickets:
+                                        cf_before = len(session.get("close_fills", []))
+                                        session["close_fills"] = [
+                                            cf for cf in session.get("close_fills", [])
+                                            if not (cf.get("account") == account and cf.get("ticket") in closed_tickets and cf.get("external") == True)
+                                        ]
+                                        cf_removed = cf_before - len(session["close_fills"])
+                                        if cf_removed > 0:
+                                            session.setdefault("closed", {})[account] = max(0, session["closed"].get(account, 0) - cf_removed)
+                                            print(f"[CYCLE-FAIL] Reverted {cf_removed} external close_fills for {account}")
+
+                                    session["action"] = "monitor"
+                                    session["cycle_progress"] = {}
+                                    session["cycle_fail_ts"] = time.time()
+                                    
+                                    # Auto-rollback on cycle fail
+                                    my_filled = session.get("filled", {}).get(account, 0)
+                                    for other_acc in session.get("sides", {}):
+                                        if other_acc == account:
+                                            continue
+                                        other_filled = session.get("filled", {}).get(other_acc, 0)
+                                        if other_filled > my_filled:
+                                            diff = other_filled - my_filled
+                                            rb = session.setdefault("rollback_needed", {})
+                                            rb[other_acc] = rb.get(other_acc, 0) + diff
+                                            _log_event(session_id, other_acc, "rollback_triggered",
+                                                       f"Cycle error on {account} (MT-DIRECT) - scheduling {diff} rollback close(s) on {other_acc}")
+
+                                    _save_sessions()
+                                    _mt_msg = (f"Cycle reopen FAILED after {_mt_retries} attempts on "
+                                               f"{account} (MT-DIRECT error: {detail}) — reverting to MONITOR")
+                                    print(f"[CYCLE-FAIL] {_mt_msg}")
+                                    _log_event(session_id, account, "cycle_failed", _mt_msg)
+                                else:
+                                    # Retry: clear dispatch flag so next poll re-sends open
+                                    _mt_progress["open_retries"] = _mt_retries
+                                    _mt_progress.pop("open_dispatched", None)
+                                    session["cycle_progress"] = _mt_progress
+                                    _save_sessions()
+                                    _mt_msg = (f"Cycle reopen timeout on {account} "
+                                               f"(MT-DIRECT, attempt {_mt_retries}/{_mt_max_retries}, "
+                                               f"error: {detail}) — will retry")
+                                    print(f"[CYCLE-RETRY] {_mt_msg}")
+                                    _log_event(session_id, account, "cycle_retry", _mt_msg)
 
                     # ── Max-errors + rollback logic ──
                     max_errors = session.get("max_errors", 1)
