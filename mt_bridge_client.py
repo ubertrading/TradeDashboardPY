@@ -568,7 +568,6 @@ class MtBridgeAccount:
         # must do the sync here after every successful position push.
         # Skip during cycling/closing/opening — mid-execution the broker async delivery
         # can lag behind fill callbacks, causing a false rollback of the filled count.
-        ea_pos = len(pos_dict)
         _needs_save = False
         sessions_dict = dd.get("sessions", {})
         for _sid, _sess in sessions_dict.items():
@@ -582,6 +581,21 @@ class MtBridgeAccount:
             # (500ms each) causing this sync to decrease filled and retrigger extra orders.
             if sess_action in ("open", "close", "close_limit") or sess_action.startswith("cycle_"):
                 continue
+
+            # Count only positions that match this session's pair — NOT all positions on
+            # the account. Accounts can hold multiple instruments simultaneously and using
+            # len(pos_dict) would inflate the GBPCHF session's filled count with USDCHF
+            # positions (and vice versa).
+            sess_pair = (_sess.get("sides", {}).get(aid, {}).get("pair") or _sess.get("pair", "")).upper().strip()
+            if sess_pair:
+                ea_pos = sum(
+                    1 for p in pos_dict.values()
+                    if (p.get("symbol", "") or "").upper().strip().startswith(sess_pair)
+                    or sess_pair.startswith((p.get("symbol", "") or "").upper().strip())
+                )
+            else:
+                ea_pos = len(pos_dict)
+
             old_filled = _sess.get("filled", {}).get(aid, 0)
             if ea_pos == old_filled:
                 continue
@@ -592,7 +606,7 @@ class MtBridgeAccount:
                 logger.debug("[%s] Bridge auto-sync sid=%s: suppressing downward correction %d -> %d (broker lag)",
                              aid, _sid[:8], old_filled, ea_pos)
                 continue
-            logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed)", aid, _sid[:8], old_filled, ea_pos)
+            logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed, pair=%s)", aid, _sid[:8], old_filled, ea_pos, sess_pair)
             _sess.setdefault("filled", {})[aid] = ea_pos
             _needs_save = True
         if _needs_save:
