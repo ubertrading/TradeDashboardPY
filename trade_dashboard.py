@@ -10596,22 +10596,22 @@ body {
             <th data-acol="0">Name</th>
             <th data-acol="1">Group</th>
             <th data-acol="2">Connection</th>
-            <th data-acol="3">Balance</th>
-            <th data-acol="4">Equity</th>
-            <th data-acol="5" title="Optimal suggested equity distribution based on leverage and stopout levels">Opt Eq</th>
-            <th data-acol="6" title="Suggested fund transfer to reach optimal equity (Optimal Equity - Current Equity)">Shift</th>
-            <th data-acol="7" title="Override intended lots for this hedge group">TGT Lots</th>
-            <th data-acol="8">PnL</th>
-            <th data-acol="9">Leverage</th>
-            <th data-acol="10">Pos.</th>
-            <th data-acol="11">Lots</th>
-            <th data-acol="12">Margin Use</th>
-            <th data-acol="13" title="Net Open Positions (Notional) / Free Margin Cash">NOP/FM</th>
-            <th data-acol="14" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
-            <th data-acol="15" title="Margin alert threshold (%)">Marg.Alrt%</th>
-            <th data-acol="16">Swap</th>
-            <th data-acol="17" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
-            <th data-acol="18" title="Oldest position age (rollover days)">Age</th>
+            <th data-acol="3" title="Net Open Positions (Notional) / Free Margin Cash">NOP/FM</th>
+            <th data-acol="4" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
+            <th data-acol="5" title="Oldest position age (rollover days)">Age</th>
+            <th data-acol="6">Balance</th>
+            <th data-acol="7">Equity</th>
+            <th data-acol="8" title="Optimal suggested equity distribution based on leverage and stopout levels">Opt Eq</th>
+            <th data-acol="9" title="Suggested fund transfer to reach optimal equity (Optimal Equity - Current Equity)">Shift</th>
+            <th data-acol="10" title="Override intended lots for this hedge group">TGT Lots</th>
+            <th data-acol="11">PnL</th>
+            <th data-acol="12">Leverage</th>
+            <th data-acol="13">Pos.</th>
+            <th data-acol="14">Lots</th>
+            <th data-acol="15">Margin Use</th>
+            <th data-acol="16" title="Margin alert threshold (%)">Marg.Alrt%</th>
+            <th data-acol="17">Swap</th>
+            <th data-acol="18" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
             <th data-acol="19">Last Poll</th>
             <th data-acol="20" title="Auto connect account at start">Auto Conn</th>
             <th data-acol="21" title="Alert Email(s) Override">Email Alert</th>
@@ -12363,11 +12363,12 @@ function toggleGroupView(enabled) {
 let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["21", "22"]');
 const ACCT_COLUMNS = [
   {idx:'-1', name:'Hide'}, {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
-  {idx:'3', name:'Balance'}, {idx:'4', name:'Equity'},
-  {idx:'5', name:'Opt Eq'}, {idx:'6', name:'Shift'}, {idx:'7', name:'TGT Lots'},
-  {idx:'8', name:'PnL'}, {idx:'9', name:'Leverage'}, {idx:'10', name:'Pos.'}, {idx:'11', name:'Lots'},
-  {idx:'12', name:'Margin Use'}, {idx:'13', name:'NOP/FM'}, {idx:'14', name:'Pips to MC'}, {idx:'15', name:'Marg.Alrt%'},
-  {idx:'16', name:'Swap'}, {idx:'17', name:'Δ Swap'}, {idx:'18', name:'Age'}, {idx:'19', name:'Last Poll'},
+  {idx:'3', name:'NOP/FM'}, {idx:'4', name:'Pips to MC'}, {idx:'5', name:'Age'},
+  {idx:'6', name:'Balance'}, {idx:'7', name:'Equity'},
+  {idx:'8', name:'Opt Eq'}, {idx:'9', name:'Shift'}, {idx:'10', name:'TGT Lots'},
+  {idx:'11', name:'PnL'}, {idx:'12', name:'Leverage'}, {idx:'13', name:'Pos.'}, {idx:'14', name:'Lots'},
+  {idx:'15', name:'Margin Use'}, {idx:'16', name:'Marg.Alrt%'},
+  {idx:'17', name:'Swap'}, {idx:'18', name:'Δ Swap'}, {idx:'19', name:'Last Poll'},
   {idx:'20', name:'Auto Conn'}, {idx:'21', name:'Email Alert'}, {idx:'22', name:'Telegram Alert'},
   {idx:'23', name:'Stats'}, {idx:'24', name:'Actions'},
 ];
@@ -15930,6 +15931,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><strong>${id}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveFixGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopFmCell(normMu1)}
+        ${_pipsToMcCell(info)}
+        ${_ageCell(info, id)}
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqVal}</td>
@@ -15940,12 +15944,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${pos1}</td>
         ${_lotsCell(id, lots1, lots1Style)}
         <td>${mu1}</td>
-        ${_nopFmCell(normMu1)}
-        ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, true)}
         <td>${swap1}</td>
         ${_swapDeltaCell(id)}
-        ${_ageCell(info, id)}
         <td style="font-size:0.78rem">${lp}</td>
         <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -16004,6 +16005,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><strong>${displayName}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopFmCell(normMuMt)}
+        ${_pipsToMcCell(info)}
+        ${_ageCell(info, id)}
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqMt}</td>
@@ -16014,12 +16018,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${posMt}</td>
         ${_lotsCell(id, lotsMt, lotsMtStyle)}
         <td>${muMt}</td>
-        ${_nopFmCell(normMuMt)}
-        ${_pipsToMcCell(info)}
         ${_marginAlertCell(id, false)}
         <td>${swapMt}</td>
         ${_swapDeltaCell(id)}
-        ${_ageCell(info, id)}
         <td style="font-size:0.78rem">-</td>
         <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -16081,6 +16082,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><strong>${name}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${name}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopFmCell(normMuM)}
+        ${_pipsToMcCell(eaInfo || info)}
+        ${_ageCell(null, name)}
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqM}</td>
@@ -16091,12 +16095,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muM}</td>
-        ${_nopFmCell(normMuM)}
-        ${_pipsToMcCell(eaInfo || info)}
         ${_marginAlertCell(name, false)}
         <td>-</td>
         ${_swapDeltaCell(name)}
-        ${_ageCell(null, name)}
         <td style="font-size:0.78rem">${lp}</td>
         <td style="text-align:center;color:var(--text3)">-</td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${name}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -16140,6 +16141,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><strong>${acc}</strong></td>
         <td><input class="inl" style="width:80px;" value="${mConfig.group_label || ''}" onchange="saveGroupLabel('${acc}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td>${connDot}</td>
+        ${_nopFmCell(normMuE)}
+        ${_pipsToMcCell(info)}
+        ${_ageCell(info, acc)}
         <td>${bal}</td>
         <td>${eq}</td>
         <td>${optEqE}</td>
@@ -16150,12 +16154,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>-</td>
         <td>-</td>
         <td>${muE}</td>
-        ${_nopFmCell(normMuE)}
-        ${_pipsToMcCell(info)}
         ${_marginAlertCell(acc, false)}
         <td>-</td>
         ${_swapDeltaCell(acc)}
-        ${_ageCell(info, acc)}
         <td style="font-size:0.78rem">${lp}</td>
         <td style="text-align:center;color:var(--text3)">-</td>
         <td><input class="inl" style="width:120px;" value="${mConfig.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${acc}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -16500,6 +16501,16 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td></td>
       <td><strong title="${memberList}">${prefix}</strong> <span style="font-size:0.68rem;color:var(--text2);">(${memberCount})</span></td>
       <td></td><td>${connLabel}</td>
+      ${_nopFmCell(fNormMu)}
+      ${(function(){
+        if (minPtmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
+        if (minPtmc <= 0) return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;">\u26a0 MC!</span></td>';
+        const _c = minPtmc < 200 ? 'var(--red)' : minPtmc < 500 ? 'var(--orange)' : 'var(--green)';
+        const _w = minPtmc < 200 ? '700' : minPtmc < 500 ? '600' : '500';
+        const _d = minPtmc >= 10000 ? (minPtmc/1000).toFixed(1)+'k' : minPtmc.toLocaleString(undefined,{maximumFractionDigits:0});
+        return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
+      })()}
+      <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
       <td>${fBal}</td>
       <td>${fEq}</td>
       <td>${fOptEq}</td>
@@ -16510,19 +16521,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td>${fPos}</td>
       ${groupLotsCell}
       <td>${fMu}</td>
-      ${_nopFmCell(fNormMu)}
-      ${(function(){
-        if (minPtmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
-        if (minPtmc <= 0) return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;">\u26a0 MC!</span></td>';
-        const _c = minPtmc < 200 ? 'var(--red)' : minPtmc < 500 ? 'var(--orange)' : 'var(--green)';
-        const _w = minPtmc < 200 ? '700' : minPtmc < 500 ? '600' : '500';
-        const _d = minPtmc >= 10000 ? (minPtmc/1000).toFixed(1)+'k' : minPtmc.toLocaleString(undefined,{maximumFractionDigits:0});
-        return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
-      })()}
       <td></td>
       <td>${fSwap}</td>
       ${groupSwapDeltaCell}
-      <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
       <td></td><td></td><td></td><td></td><td></td><td></td>
     </tr>`);
   }
@@ -16553,6 +16554,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td></td>
     <td>TOTALS</td>
     <td></td><td></td>
+    ${_nopFmCell(fGNormMu)}
+    <td></td><td></td>
     <td>${fGBal}</td>
     <td>${fGEq}</td>
     <td>${fGOptEq}</td>
@@ -16562,11 +16565,10 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td></td><td></td>
     <td style="${gLotsStyle};overflow:hidden;">${fGLots}${gLotsBreak}</td>
     <td></td>
-    ${_nopFmCell(fGNormMu)}
-    <td></td><td></td>
+    <td></td>
     <td>${fGSwap}</td>
     ${totalsSwapDeltaCell}
-    <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+    <td></td><td></td><td></td><td></td><td></td><td></td>
   </tr>`);
   tbody.innerHTML = rows.join('');
 }
