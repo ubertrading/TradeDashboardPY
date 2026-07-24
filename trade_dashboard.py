@@ -2627,6 +2627,9 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     # Track newly created position tickets so they aren't cycled again in the current session
     progress.setdefault("new_cycle_tickets", []).append(str(ticket))
     session["cycle_progress"] = progress
+    
+    # Increment the filled count so the UI correctly offsets the closed ticket
+    session.setdefault("filled", {})[account] = session.setdefault("filled", {}).get(account, 0) + 1
 
     # Check if we have all batch fills — if not, stay in open phase
     if fills_so_far < batch_size:
@@ -2667,8 +2670,13 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
             if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
                 acct_obj._claimed_fill_tickets.clear()
     reopen_price = float(fill_price) if fill_price is not None else None
-    cycle_close_price = progress.pop("last_close_price", None)
+    cycle_close_price = progress.get("last_close_price")
     if reopen_price is not None and cycle_close_price is not None:
+        progress["sum_close_price"] = progress.get("sum_close_price", 0.0) + cycle_close_price
+        progress["sum_reopen_price"] = progress.get("sum_reopen_price", 0.0) + reopen_price
+        side_info = session.get("sides", {}).get(account, {})
+        lot_size = side_info.get("lot_size") or session.get("lot_size", 0.01)
+        progress["sum_lots"] = progress.get("sum_lots", 0.0) + float(lot_size)
         spread_cost = abs(reopen_price - cycle_close_price)
         progress["total_spread_cost"] = progress.get("total_spread_cost", 0.0) + spread_cost
     session["cycle_progress"] = progress
@@ -2693,14 +2701,41 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         # Record cycle completion timestamp so hedge monitor stays suppressed
         # during the brief window where broker ticket data may still be stale
         session["cycle_complete_ts"] = time.time()
-        avg_spread = 0
-        total_sc = progress.get("total_spread_cost", 0)
-        if progress["cycled"] > 0:
-            avg_spread = total_sc / progress["cycled"]
-        _log_event(session_id, account, "cycle_complete",
-                   f"All {progress['cycled']} positions cycled — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
-        print(f"[CYCLE] Complete on {account}: {progress['cycled']} positions cycled, "
-              f"avg spread cost={avg_spread:.5f}, auto-switching to MONITOR")
+        
+        sum_close = progress.get("sum_close_price", 0.0)
+        sum_reopen = progress.get("sum_reopen_price", 0.0)
+        sum_lots = progress.get("sum_lots", 0.0)
+        cycled_count = progress.get("cycled", 0)
+        
+        if cycled_count > 0 and sum_lots > 0:
+            avg_close = sum_close / cycled_count
+            avg_reopen = sum_reopen / cycled_count
+            
+            side_info = session.get("sides", {}).get(account, {})
+            original_side = side_info.get("action", "buy")
+            
+            pair = session.get("pair", "")
+            is_jpy = "JPY" in pair.upper()
+            pip_mult = 1000.0 if is_jpy else 100000.0
+            
+            if original_side == "buy":
+                # Closed by selling, Reopened by buying
+                profit_raw = avg_close - avg_reopen
+                avg_sell = avg_close
+                avg_buy = avg_reopen
+            else:
+                # Closed by buying, Reopened by selling
+                profit_raw = avg_reopen - avg_close
+                avg_sell = avg_reopen
+                avg_buy = avg_close
+                
+            profit_pips = profit_raw * pip_mult
+            msg = (f"cycled {sum_lots:.2f} lots at an {avg_sell:.5f} - {avg_buy:.5f} = {profit_pips:+.1f} pips")
+        else:
+            msg = f"Cycle completed successfully. Cycled {cycled_count} items."
+            
+        _log_event(session_id, account, "cycle_complete", msg)
+        print(f"[CYCLE] Complete on {account}: {msg}")
         # ── Purge stale cycle_progress fields that could interfere with future cycles ──
         # Keep only summary info (cycled count, spread cost, confirmed_closed_tickets for
         # dedup) and strip all in-flight state that would block the next cycle start.
@@ -5502,6 +5537,7 @@ def _should_issue_command(session, account):
                                 print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase\u2192open.")
                                 progress["phase"] = "open"
                                 progress["cycle_close_ts"] = time.time()
+                                progress["last_close_price"] = progress.get("close_tp_price")
                                 progress.pop("close_tp_set", None)
                                 progress.pop("close_tp_set_ts", None)
                                 progress.pop("close_tp_confirmed", None)
