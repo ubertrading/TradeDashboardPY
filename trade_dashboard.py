@@ -16247,6 +16247,8 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       <td></td>
       <td>TOTALS</td>
       <td></td><td></td>
+      ${_nopFmCell(fmtNormMu)}
+      <td></td><td></td>
       <td>${fmtBal}</td>
       <td>${fmtEq}</td>
       <td>${fmtOptEq}</td>
@@ -16256,11 +16258,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       <td></td><td></td>
       <td style="${lotsStyle};overflow:hidden;">${fmtLots}${lotsBreakdown}</td>
       <td></td>
-      ${_nopFmCell(fmtNormMu)}
-      <td></td><td></td>
+      <td></td>
       <td>${fmtSwap}</td>
       ${totalsSwapDeltaCell}
-      <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+      <td></td><td></td><td></td><td></td><td></td><td></td>
     </tr>`);
     tbody.innerHTML = rows.join('');
   }
