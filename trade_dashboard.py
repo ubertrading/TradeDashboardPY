@@ -9612,10 +9612,23 @@ def pnl_request_create():
                 if bal is not None and eq is not None:
                     try:
                         open_pnl = float(eq) - float(bal)
+                        
+                        # Extract open swap
+                        open_swap = 0.0
+                        if acc in mt_accts:
+                            open_swap = mt_accts[acc].get("total_swap", 0.0)
+                        elif acc in fix_accts:
+                            open_swap = fix_accts[acc].get("total_swap", 0.0)
+                        elif acc in ea_account_info:
+                            open_swap = ea_account_info[acc].get("total_swap", 0.0)
+                        elif acc in manual_accounts:
+                            open_swap = manual_accounts[acc].get("total_swap", 0.0)
+
                         current_states[acc] = {
                             "balance": float(bal),
                             "equity": float(eq),
-                            "unrealized_pnl": open_pnl
+                            "unrealized_pnl": open_pnl,
+                            "unrealized_swap": float(open_swap) if open_swap else 0.0
                         }
                     except (ValueError, TypeError):
                         pass
@@ -17931,11 +17944,12 @@ function exportPnlHtmlReport() {
   // Rows
   const metrics = [
     {key: 'pnl', label: 'Realized PnL'},
-    {key: 'swap', label: 'Swap'},
+    {key: 'swap', label: 'Realized Swap'},
     {key: 'fees', label: 'Fees'},
   ];
   if (includeUnrealized) {
     metrics.push({key: 'unrealized', label: 'Unrealized PnL'});
+    metrics.push({key: 'unrealized_swap', label: 'Unrealized Swap'});
   }
   let tableBody = '';
   metrics.forEach(m => {
@@ -17947,7 +17961,11 @@ function exportPnlHtmlReport() {
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+          const u_pnl = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+          const u_swap = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
+          v = u_pnl - u_swap; // Deduct swap from unrealized PnL so it is not double counted
+        } else if (m.key === 'unrealized_swap') {
+          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
           v = results[a] ? results[a][m.key] || 0 : 0;
         }
@@ -17956,7 +17974,7 @@ function exportPnlHtmlReport() {
       }
     });
     let tv = 0;
-    if (m.key === 'unrealized') {
+    if (m.key === 'unrealized' || m.key === 'unrealized_swap') {
       tv = totalVal;
     } else {
       const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
@@ -18260,11 +18278,12 @@ function renderPnlResults(data) {
   // Rows
   const metrics = [
     {key: 'pnl', label: 'Realized PnL'},
-    {key: 'swap', label: 'Swap'},
+    {key: 'swap', label: 'Realized Swap'},
     {key: 'fees', label: 'Fees'},
   ];
   if (includeUnrealized) {
     metrics.push({key: 'unrealized', label: 'Unrealized PnL'});
+    metrics.push({key: 'unrealized_swap', label: 'Unrealized Swap'});
   }
   let tbody = '';
   metrics.forEach(m => {
@@ -18276,7 +18295,11 @@ function renderPnlResults(data) {
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+          const u_pnl = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+          const u_swap = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
+          v = u_pnl - u_swap; // Deduct swap from unrealized PnL
+        } else if (m.key === 'unrealized_swap') {
+          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
           v = results[a] ? results[a][m.key] || 0 : 0;
         }
@@ -18285,7 +18308,7 @@ function renderPnlResults(data) {
       }
     });
     let tv = 0;
-    if (m.key === 'unrealized') {
+    if (m.key === 'unrealized' || m.key === 'unrealized_swap') {
       tv = totalVal;
     } else {
       const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
