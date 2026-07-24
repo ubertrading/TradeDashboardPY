@@ -15900,7 +15900,8 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const fixColor = allConn ? 'var(--green)' : 'var(--red)';
       const implLabel = (info.implementation === 'ctrader') ? 'cTrader FIX' : (info.implementation === 'openapi') ? 'cT OpenAPI' : (info.implementation === 'dukascopy') ? 'DK FIX' : (info.implementation === 'swissquote') ? 'SQ FIX' : 'FIX';
       const connText = `${implLabel} ${tConn?'(T)':'(no T)'} ${qConn?'(Q)':'(no Q)'}`;
-      const connDot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${fixColor};box-shadow:0 0 6px ${fixColor};margin-right:6px;"></span>${implLabel} &nbsp;${tDot}&nbsp;${qDot}`;
+      const fixAction = allConn ? `disconnectFixAccount('${id}')` : `reconnectFixAccount('${id}')`;
+      const connDot = `<span onclick="${fixAction}" style="cursor:pointer;" title="Click to ${allConn?'Disconnect':'Connect'}"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${fixColor};box-shadow:0 0 6px ${fixColor};margin-right:6px;"></span>${implLabel}</span> &nbsp;${tDot}&nbsp;${qDot}`;
       const eaInfo = heartbeats ? heartbeats[id] : null;
       // Balance & equity: prefer FIX collateral data, fall back to EA data
       const rawBal = info.balance != null ? info.balance : (eaInfo && eaInfo.balance != null ? eaInfo.balance : null);
@@ -15974,7 +15975,8 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const typeLabel = (info.type === 'mt5_direct' || info.type === 'mt5') ? 'MT5' : 'MT4';
       const connText = `${typeLabel}${info.last_error ? ' - ' + info.last_error : ''}`.replace(/"/g, '&quot;');
       const errTip = (!isConn && info.last_error) ? ` <span style="font-size:0.65rem;color:var(--red)">⚠ ${info.last_error.substring(0,40)}${info.last_error.length>40?'…':''}</span>` : '';
-      const connDot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${mtColor};box-shadow:0 0 6px ${mtColor};margin-right:6px;"></span>${typeLabel}${errTip}`;
+      const mtAction = isConn ? `disconnectMTDirect('${id}')` : `connectMTDirect('${id}')`;
+      const connDot = `<span onclick="${mtAction}" style="cursor:pointer;" title="Click to ${isConn?'Disconnect':'Connect'}"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${mtColor};box-shadow:0 0 6px ${mtColor};margin-right:6px;"></span>${typeLabel}</span>${errTip}`;
       const eaInfo = heartbeats ? heartbeats[id] : null;
       const rawBal = info.balance != null ? info.balance : (eaInfo && eaInfo.balance != null ? eaInfo.balance : null);
       const rawEq = info.equity != null ? info.equity : (eaInfo && eaInfo.equity != null ? eaInfo.equity : null);
