@@ -4722,7 +4722,7 @@ def _should_issue_command(session, account):
         if max_deals > 0:
             acct_net_open = _get_net_open(session, account)
             if acct_net_open >= max_deals:
-                print(f"[OPEN-BLOCK] {account} max_deals={max_deals} net={acct_net_open}")
+                # print(f"[OPEN-BLOCK] {account} max_deals={max_deals} net={acct_net_open}")
                 return False
 
         # Check max_accum_lots (per-account net open lots limit)
@@ -4732,7 +4732,7 @@ def _should_issue_command(session, account):
             acct_lot = sides[account].get("lot_size", session.get("lot_size", 0.01))
             acct_lots = acct_net * acct_lot
             if acct_lots + acct_lot > max_accum + 1e-9:
-                print(f"[OPEN-BLOCK] {account} max_accum={max_accum} lots={acct_lots}")
+                # print(f"[OPEN-BLOCK] {account} max_accum={max_accum} lots={acct_lots}")
                 return False
 
         # Diff-to-open gating: only open when price diff >= threshold
@@ -4740,11 +4740,11 @@ def _should_issue_command(session, account):
         # Any number including 0 is a valid threshold.
         diff_to_open = session.get("diff_to_open")
         if diff_to_open is None:
-            print(f"[OPEN-BLOCK] {account} diff_to_open is None")
+            # print(f"[OPEN-BLOCK] {account} diff_to_open is None")
             return False  # Blank = don't trade
         curr_diff_val, _ = _calc_curr_diff(session, "open")
         if curr_diff_val is None or curr_diff_val < diff_to_open:
-            print(f"[OPEN-BLOCK] {account} curr_diff_val={curr_diff_val} < diff_to_open={diff_to_open}")
+            # print(f"[OPEN-BLOCK] {account} curr_diff_val={curr_diff_val} < diff_to_open={diff_to_open}")
             return False
 
         # ── Execution Filters (open) ──
@@ -4754,7 +4754,7 @@ def _should_issue_command(session, account):
             for acc in sides:
                 ei = ea_account_info.get(acc, {})
                 if ei.get("ticks_per_5s", 0) > max_ticks:
-                    print(f"[OPEN-BLOCK] {account} max_ticks={max_ticks}")
+                    # print(f"[OPEN-BLOCK] {account} max_ticks={max_ticks}")
                     return False
 
         # Price volatility: block if bid jumped too much
@@ -4763,7 +4763,7 @@ def _should_issue_command(session, account):
             for acc in sides:
                 ei = ea_account_info.get(acc, {})
                 if max(ei.get("last_bid_delta", 0), ei.get("last_ask_delta", 0)) > max_jump:
-                    print(f"[OPEN-BLOCK] {account} max_jump={max_jump}")
+                    # print(f"[OPEN-BLOCK] {account} max_jump={max_jump}")
                     return False
 
         # DIFF skew filter
@@ -4773,10 +4773,10 @@ def _should_issue_command(session, account):
             diff2, _ = _calc_curr_diff(session, "close")
             if diff1 is not None and diff2 is not None:
                 if skew_open == "d1>d2" and diff1 <= diff2:
-                    print(f"[OPEN-BLOCK] {account} skew_open d1>d2 blocked")
+                    # print(f"[OPEN-BLOCK] {account} skew_open d1>d2 blocked")
                     return False
                 if skew_open == "d2>d1" and diff2 <= diff1:
-                    print(f"[OPEN-BLOCK] {account} skew_open d2>d1 blocked")
+                    # print(f"[OPEN-BLOCK] {account} skew_open d2>d1 blocked")
                     return False
 
         # ── Per-side spread gating (open) ──
