@@ -2627,9 +2627,6 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     # Track newly created position tickets so they aren't cycled again in the current session
     progress.setdefault("new_cycle_tickets", []).append(str(ticket))
     session["cycle_progress"] = progress
-    
-    # Increment the filled count so the UI correctly offsets the closed ticket
-    session.setdefault("filled", {})[account] = session.setdefault("filled", {}).get(account, 0) + 1
 
     # Check if we have all batch fills — if not, stay in open phase
     if fills_so_far < batch_size:
@@ -14094,7 +14091,10 @@ function renderSide(session, sideNum) {
         }
         const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
 
-        count = Math.max(0, filled - closed - totalPendingReopens);
+        // Cap at total_positions: cycling inflates filled+closed at the same rate,
+        // so net (filled-closed) is always correct, but we clamp the display so it
+        // never shows more than the original imported position count.
+        count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
@@ -14112,7 +14112,7 @@ function renderSide(session, sideNum) {
         }
         const totalPendingReopens = pendingLimitOpens + pendingMarketOpen;
 
-        count = Math.max(0, filled - closed - totalPendingReopens);
+        count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
         return `<strong>${acc}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
