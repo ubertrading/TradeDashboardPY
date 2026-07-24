@@ -1600,6 +1600,9 @@ _DEFAULT_SETTINGS = {
     "stats_log_accounts": [],     # accounts opted in for market stats CSV logging
     "margin_alert_threshold": 85,  # global default margin use % to trigger alert
     "margin_alert_thresholds": {},  # account_name -> per-account override (%)
+    "nop_fm_alert_threshold": 100,
+    "nop_fm_alert_throttle_sec": 900,
+    "nop_fm_alert_thresholds": {},
     "position_change_alert": False,  # alert when position count decreases (closures)
     "position_change_opened": True,
     "position_change_closed": True,
@@ -1944,6 +1947,102 @@ def _get_stop_out_frac(account_id):
     except (ValueError, TypeError):
         return 0.50
 
+
+# ─── NOP/FM Alert ────────────────────────────────────────────────────────────
+_nop_fm_alert_cooldowns = {}  # account -> last alert timestamp
+_nop_fm_alert_max_triggered = {}  # account -> max NOP/FM value that triggered an alert
+
+def _send_nop_fm_alert(account, nop_fm, threshold, equity, notional):
+    """Send NOP/FM alert via enabled channels (in background)."""
+    grp = ""
+    if manual_accounts.get(account):
+        grp = manual_accounts[account].get("group_label", "")
+    elif fix_manager and fix_manager.accounts.get(account):
+        grp = fix_manager.accounts[account].config.get("group_label", "")
+
+    subject = f"⚠️ NOP/FM Alert: {account}"
+    val_str = "MAX" if nop_fm == float('inf') else f"{nop_fm:,.2f}x"
+    body = (f"NOP/FM alert on account {account}\n"
+            f"Group: {grp}\n"
+            f"NOP/FM: {val_str} (threshold: {threshold}x)\n"
+            f"Equity: {equity:,.2f}\n"
+            f"Notional Volume: {notional:,.2f}")
+    tg_msg = (f"<b>⚠️ NOP/FM Alert</b>\n"
+              f"Account: <code>{account}</code>\n"
+              f"Group: {grp}\n"
+              f"NOP/FM: <b>{val_str}</b> (threshold: {threshold}x)\n"
+              f"Equity: {equity:,.2f}\n"
+              f"Notional Volume: {notional:,.2f}")
+
+    def _send():
+        ok_e, err_e = _send_email(subject, body, account_id=account)
+        ok_t, err_t = _send_telegram(tg_msg, account_id=account)
+        if ok_e:
+            app.logger.info("[NOP/FM-ALERT] Email sent for %s (%s)", account, val_str)
+        if ok_t:
+            app.logger.info("[NOP/FM-ALERT] Telegram sent for %s (%s)", account, val_str)
+        if not ok_e and not ok_t and (dashboard_settings.get("email", {}).get("enabled") or
+                                       dashboard_settings.get("telegram", {}).get("enabled")):
+            app.logger.warning("[NOP/FM-ALERT] Failed to send for %s: email=%s, tg=%s",
+                               account, err_e, err_t)
+    threading.Thread(target=_send, daemon=True, name=f"NopFmAlert-{account}").start()
+
+def _check_nop_fm_alerts(all_accounts_info):
+    """Check NOP/FM ratio across all accounts and send alerts if threshold exceeded."""
+    global_threshold = dashboard_settings.get("nop_fm_alert_threshold", 100)
+    global_throttle = dashboard_settings.get("nop_fm_alert_throttle_sec", 900)
+    per_account = dashboard_settings.get("nop_fm_alert_thresholds", {})
+    now = time.time()
+
+    for acct_id, info in all_accounts_info.items():
+        try:
+            if info.get("_positions_desync"):
+                continue
+            equity = info.get("equity")
+            margin = info.get("margin") or info.get("margin_used")
+            lots = info.get("total_lots")
+            if equity is None or margin is None or lots is None:
+                continue
+            
+            notional = abs(float(lots)) * 100000
+            if notional <= 0:
+                # If no open positions, reset tracking
+                if acct_id in _nop_fm_alert_max_triggered:
+                    del _nop_fm_alert_max_triggered[acct_id]
+                continue
+
+            fm = float(equity) - float(margin)
+            if fm <= 0:
+                nop_fm = float('inf') # MAX
+            else:
+                nop_fm = notional / fm
+
+            # Get threshold: per-account override or global default
+            threshold = per_account.get(acct_id)
+            if threshold is None or threshold == "" or threshold == 0:
+                threshold = global_threshold
+            threshold = float(threshold)
+            if threshold <= 0:
+                continue  # disabled for this account
+
+            if nop_fm < threshold:
+                # Reset if we drop below threshold
+                if acct_id in _nop_fm_alert_max_triggered:
+                    del _nop_fm_alert_max_triggered[acct_id]
+            else:
+                last_alert = _nop_fm_alert_cooldowns.get(acct_id, 0)
+                max_triggered = _nop_fm_alert_max_triggered.get(acct_id, 0)
+
+                time_passed = now - last_alert >= float(global_throttle)
+                # Ignore throttle if situation worsens
+                situation_worsened = nop_fm > max_triggered
+
+                if time_passed or situation_worsened:
+                    _nop_fm_alert_cooldowns[acct_id] = now
+                    _nop_fm_alert_max_triggered[acct_id] = nop_fm
+                    _send_nop_fm_alert(acct_id, nop_fm, threshold, float(equity), notional)
+        except Exception:
+            pass
 
 # ─── Margin Use Alert ────────────────────────────────────────────────────────
 _margin_alert_cooldowns = {}  # account -> last alert timestamp
@@ -7736,6 +7835,7 @@ def api_status():
                 if aid not in _all_acct_info:
                     _all_acct_info[aid] = ainfo
             _check_margin_alerts(_all_acct_info)
+            _check_nop_fm_alerts(_all_acct_info)
             _check_position_changes(_all_acct_info)
         except Exception:
             pass
@@ -7797,6 +7897,11 @@ def api_status():
             "global_threshold": dashboard_settings.get("margin_alert_threshold", 85),
             "per_account": dashboard_settings.get("margin_alert_thresholds", {}),
         }
+        nop_fm_alert_data = {
+            "global_threshold": dashboard_settings.get("nop_fm_alert_threshold", 100),
+            "throttle_sec": dashboard_settings.get("nop_fm_alert_throttle_sec", 900),
+            "per_account": dashboard_settings.get("nop_fm_alert_thresholds", {}),
+        }
 
         # Calculate optimal fund distributions
         global _last_fund_dist_ts, _cached_fund_distributions
@@ -7837,6 +7942,7 @@ def api_status():
             "cycle_reminders": cycle_reminders,
             "news_blackout": {"blocked": news_blocked, "event": news_reason},
             "margin_alert": margin_alert_data,
+            "nop_fm_alert": nop_fm_alert_data,
             "adr_settings": dashboard_settings.get("adr_settings", {}),
             "account_intended_lots": dashboard_settings.get("account_intended_lots", {}),
             "default_intended_lots": dashboard_settings.get("default_intended_lots", 0),
@@ -8054,6 +8160,16 @@ def update_account(account_name):
                         dashboard_settings.setdefault("margin_alert_thresholds", {})[account_name] = float(val)
                     else:
                         dashboard_settings.get("margin_alert_thresholds", {}).pop(account_name, None)
+                    _save_settings()
+                except (ValueError, TypeError):
+                    pass
+            if "nop_fm_alert_threshold" in data:
+                try:
+                    val = data["nop_fm_alert_threshold"]
+                    if val is not None and val != "" and float(val) > 0:
+                        dashboard_settings.setdefault("nop_fm_alert_thresholds", {})[account_name] = float(val)
+                    else:
+                        dashboard_settings.get("nop_fm_alert_thresholds", {}).pop(account_name, None)
                     _save_settings()
                 except (ValueError, TypeError):
                     pass
@@ -9866,6 +9982,19 @@ def api_update_settings():
                 pass
         if "margin_alert_thresholds" in data:
             dashboard_settings["margin_alert_thresholds"] = data["margin_alert_thresholds"]
+            
+        if "nop_fm_alert_threshold" in data:
+            try:
+                dashboard_settings["nop_fm_alert_threshold"] = float(data["nop_fm_alert_threshold"])
+            except (ValueError, TypeError):
+                pass
+        if "nop_fm_alert_throttle_sec" in data:
+            try:
+                dashboard_settings["nop_fm_alert_throttle_sec"] = float(data["nop_fm_alert_throttle_sec"])
+            except (ValueError, TypeError):
+                pass
+        if "nop_fm_alert_thresholds" in data:
+            dashboard_settings["nop_fm_alert_thresholds"] = data["nop_fm_alert_thresholds"]
         if "position_change_alert" in data:
             dashboard_settings["position_change_alert"] = bool(data["position_change_alert"])
         if "position_change_opened" in data:
@@ -10893,14 +11022,30 @@ body {
       </tbody>
     </table>
   </div>
-  <!-- Margin Use Threshold -->
+  <!-- Risk Alert Thresholds -->
   <div class="settings-section">
-    <h3>📊 Margin Use Threshold</h3>
-    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Alert when margin use % exceeds threshold. Per-account overrides can be set in the Accounts tab or below. Empty = use global default.</p>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <label style="font-size:0.85rem;font-weight:600;">Global Default (%)</label>
+    <h3>🚨 Risk Alert Thresholds</h3>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Configure global defaults and per-account overrides for Margin Use and NOP/FM alerts. Empty override = use global default.</p>
+    
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+      <label style="font-size:0.85rem;font-weight:600;">Global Margin Default (%)</label>
       <input type="number" id="setMarginAlertThreshold" value="85" min="0" max="100" step="1" style="width:70px;text-align:center;" onchange="saveMarginAlertGlobal(this.value)">
     </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+      <label style="font-size:0.85rem;font-weight:600;">Global NOP/FM Default (x)</label>
+      <input type="number" id="setNopFmAlertThreshold" value="100" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertGlobal(this.value)">
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+      <label style="font-size:0.85rem;font-weight:600;">NOP/FM Throttle (seconds)</label>
+      <input type="number" id="setNopFmAlertThrottle" value="900" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertThrottle(this.value)">
+    </div>
+
+    <table class="threshold-table" id="riskThresholdTable">
+      <thead><tr><th>Account</th><th>Group</th><th>Margin Thresh (%)</th><th>NOP/FM Thresh (x)</th></tr></thead>
+      <tbody id="riskThresholdBody">
+        <tr><td colspan="4" style="text-align:center;color:var(--text2);padding:16px;">No accounts yet</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <!-- Average Daily Range (ADR) per Instrument -->
@@ -15179,7 +15324,13 @@ async function loadSettings() {
     renderThresholds(s.fee_thresholds || {});
     // Margin alert threshold
     document.getElementById('setMarginAlertThreshold').value = s.margin_alert_threshold != null ? s.margin_alert_threshold : 85;
-    renderMarginThresholds(s.margin_alert_threshold || 85, s.margin_alert_thresholds || {});
+    document.getElementById('setNopFmAlertThreshold').value = s.nop_fm_alert_threshold != null ? s.nop_fm_alert_threshold : 100;
+    document.getElementById('setNopFmAlertThrottle').value = s.nop_fm_alert_throttle_sec != null ? s.nop_fm_alert_throttle_sec : 900;
+    
+    renderRiskThresholds(
+      s.margin_alert_threshold || 85, s.margin_alert_thresholds || {},
+      s.nop_fm_alert_threshold || 100, s.nop_fm_alert_thresholds || {}
+    );
     // Position change alert
     const posAlertEnabled = !!s.position_change_alert;
     document.getElementById('setPosChangeAlert').checked = posAlertEnabled;
@@ -15242,8 +15393,29 @@ async function saveMarginAlertGlobal(value) {
       body: JSON.stringify({margin_alert_threshold: val})
     });
     if (window._marginAlertData) { window._marginAlertData.global_threshold = val; }
-
   } catch(e) { console.error('Failed to save global margin threshold:', e); }
+}
+
+async function saveNopFmAlertGlobal(value) {
+  try {
+    const val = parseFloat(value) || 100;
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({nop_fm_alert_threshold: val})
+    });
+    if (window._nopFmAlertData) { window._nopFmAlertData.global_threshold = val; }
+  } catch(e) { console.error('Failed to save global NOP/FM threshold:', e); }
+}
+
+async function saveNopFmAlertThrottle(value) {
+  try {
+    const val = parseFloat(value) || 900;
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({nop_fm_alert_throttle_sec: val})
+    });
+    if (window._nopFmAlertData) { window._nopFmAlertData.throttle_sec = val; }
+  } catch(e) { console.error('Failed to save NOP/FM throttle:', e); }
 }
 
 // ── ADR Settings ───────────────────────────────────────────────────────────
@@ -15469,8 +15641,8 @@ async function saveEaPollEnabled(enabled) {
   } catch(e) { console.error('Failed to save EA poll enabled:', e); }
 }
 
-function renderMarginThresholds(globalDefault, perAccount) {
-  const tbody = document.getElementById('marginThresholdBody');
+function renderRiskThresholds(globalMargin, perAccMargin, globalNopFm, perAccNopFm) {
+  const tbody = document.getElementById('riskThresholdBody');
   if (!tbody) return;
   const allAccounts = new Set();
   for (const acc of Object.keys(ea_heartbeats_cache || {})) allAccounts.add(acc);
@@ -15478,22 +15650,26 @@ function renderMarginThresholds(globalDefault, perAccount) {
   for (const acc of Object.keys(mt_direct_accounts_cache || {})) allAccounts.add(acc);
   for (const acc of Object.keys(fix_accounts_cache || {})) allAccounts.add(acc);
   if (allAccounts.size === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text2);padding:16px;">No accounts yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text2);padding:16px;">No accounts yet</td></tr>';
     return;
   }
   const rows = [];
   Array.from(allAccounts).sort().forEach(acc => {
     const grp = (manual_accounts_cache[acc] || {}).group_label ||
                 (fix_accounts_cache[acc] || {}).group_label || '';
-    const override = perAccount[acc] !== undefined && perAccount[acc] !== null && perAccount[acc] !== 0 ? perAccount[acc] : '';
-    const isFix = !!(fix_accounts_cache || {})[acc];
-    const saveFunc = isFix ? 'saveFixMarginAlert' : 'saveMarginAlert';
+                
+    const marginOverride = perAccMargin[acc] !== undefined && perAccMargin[acc] !== null && perAccMargin[acc] !== 0 ? perAccMargin[acc] : '';
+    const nopFmOverride = perAccNopFm[acc] !== undefined && perAccNopFm[acc] !== null && perAccNopFm[acc] !== 0 ? perAccNopFm[acc] : '';
+    
     rows.push('<tr>' +
       '<td>' + acc + '</td>' +
       '<td>' + grp + '</td>' +
-      '<td><input type="number" min="0" max="100" step="1" value="' + override + '" placeholder="' + globalDefault + '" ' +
-      'style="width:70px;text-align:center;' + (override === '' ? 'color:var(--text2);' : '') + '" ' +
-      'onchange="' + saveFunc + '(\'' + acc + '\', this.value)" /></td>' +
+      '<td><input type="number" min="0" max="100" step="1" value="' + marginOverride + '" placeholder="' + globalMargin + '" ' +
+      'style="width:70px;text-align:center;' + (marginOverride === '' ? 'color:var(--text2);' : '') + '" ' +
+      'onchange="saveRiskAlert(\'' + acc + '\', \'margin_alert_threshold\', this.value)" /></td>' +
+      '<td><input type="number" min="0" step="1" value="' + nopFmOverride + '" placeholder="' + globalNopFm + '" ' +
+      'style="width:70px;text-align:center;' + (nopFmOverride === '' ? 'color:var(--text2);' : '') + '" ' +
+      'onchange="saveRiskAlert(\'' + acc + '\', \'nop_fm_alert_threshold\', this.value)" /></td>' +
     '</tr>');
   });
   tbody.innerHTML = rows.join('');
@@ -16977,38 +17153,37 @@ async function saveFixGroupLabel(id, value) {
 }
 
 async function saveFixMarginAlert(id, value) {
-  try {
-    const val = value === '' ? null : parseFloat(value);
-    const res = await fetch('/api/fix_accounts/' + encodeURIComponent(id), {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({margin_alert_threshold: val})
-    });
-    const data = await res.json();
-    if (data.error) { alert(data.error); }
-    // Update local cache so next render reflects the change
-    if (window._marginAlertData) {
-      if (val) { window._marginAlertData.per_account[id] = val; }
-      else { delete window._marginAlertData.per_account[id]; }
-    }
-  } catch(e) { console.error('Failed to save margin alert:', e); }
+  // Deprecated, use saveRiskAlert
+  saveRiskAlert(id, 'margin_alert_threshold', value);
 }
 
 async function saveMarginAlert(id, value) {
+  // Deprecated, use saveRiskAlert
+  saveRiskAlert(id, 'margin_alert_threshold', value);
+}
+
+async function saveRiskAlert(id, field, value) {
   try {
     const val = value === '' ? null : parseFloat(value);
+    const payload = {};
+    payload[field] = val;
     const res = await fetch('/api/accounts/' + encodeURIComponent(id), {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({margin_alert_threshold: val})
+      body: JSON.stringify(payload)
     });
     const data = await res.json();
     if (data.error) { alert(data.error); }
-    if (window._marginAlertData) {
+    
+    // Update local caches so UI stays snappy before reload
+    if (field === 'margin_alert_threshold' && window._marginAlertData) {
       if (val) { window._marginAlertData.per_account[id] = val; }
       else { delete window._marginAlertData.per_account[id]; }
+    } else if (field === 'nop_fm_alert_threshold' && window._nopFmAlertData) {
+      if (val) { window._nopFmAlertData.per_account[id] = val; }
+      else { delete window._nopFmAlertData.per_account[id]; }
     }
-  } catch(e) { console.error('Failed to save margin alert:', e); }
+  } catch(e) { console.error(`Failed to save ${field}:`, e); }
 }
 
 async function deleteAccount(name) {
