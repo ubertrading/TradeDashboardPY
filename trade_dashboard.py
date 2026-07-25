@@ -2032,12 +2032,19 @@ def _check_nop_fm_alerts(all_accounts_info):
             else:
                 last_alert = _nop_fm_alert_cooldowns.get(acct_id, 0)
                 max_triggered = _nop_fm_alert_max_triggered.get(acct_id, 0)
+                only_on_peak = dashboard_settings.get("nop_fm_alert_only_peak", False)
 
                 time_passed = now - last_alert >= float(global_throttle)
                 # Ignore throttle if situation worsens
                 situation_worsened = nop_fm > max_triggered
 
-                if time_passed or situation_worsened:
+                trigger = False
+                if only_on_peak:
+                    trigger = situation_worsened
+                else:
+                    trigger = time_passed or situation_worsened
+
+                if trigger:
                     _nop_fm_alert_cooldowns[acct_id] = now
                     _nop_fm_alert_max_triggered[acct_id] = nop_fm
                     _send_nop_fm_alert(acct_id, nop_fm, threshold, float(equity), notional)
@@ -11051,6 +11058,10 @@ body {
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
       <label style="font-size:0.85rem;font-weight:600;">NOP/FM Throttle (seconds)</label>
       <input type="number" id="setNopFmAlertThrottle" value="900" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertThrottle(this.value)">
+      <label style="font-size:0.85rem;display:flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer;">
+        <input type="checkbox" id="setNopFmAlertOnlyPeak" onchange="saveNopFmAlertOnlyPeak(this.checked)">
+        Only alert on previous trigger alert peak breached
+      </label>
     </div>
 
     <table class="threshold-table" id="riskThresholdTable">
@@ -15339,6 +15350,7 @@ async function loadSettings() {
     document.getElementById('setMarginAlertThreshold').value = s.margin_alert_threshold != null ? s.margin_alert_threshold : 85;
     document.getElementById('setNopFmAlertThreshold').value = s.nop_fm_alert_threshold != null ? s.nop_fm_alert_threshold : 100;
     document.getElementById('setNopFmAlertThrottle').value = s.nop_fm_alert_throttle_sec != null ? s.nop_fm_alert_throttle_sec : 900;
+    document.getElementById('setNopFmAlertOnlyPeak').checked = !!s.nop_fm_alert_only_peak;
     
     renderRiskThresholds(
       s.margin_alert_threshold || 85, s.margin_alert_thresholds || {},
@@ -15429,6 +15441,16 @@ async function saveNopFmAlertThrottle(value) {
     });
     if (window._nopFmAlertData) { window._nopFmAlertData.throttle_sec = val; }
   } catch(e) { console.error('Failed to save NOP/FM throttle:', e); }
+}
+
+async function saveNopFmAlertOnlyPeak(checked) {
+  try {
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({nop_fm_alert_only_peak: checked})
+    });
+    if (window._nopFmAlertData) { window._nopFmAlertData.only_peak = checked; }
+  } catch(e) { console.error('Failed to save NOP/FM only peak:', e); }
 }
 
 // ── ADR Settings ───────────────────────────────────────────────────────────
