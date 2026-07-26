@@ -15963,15 +15963,11 @@ function renderCycleReminders(reminders) {
     const pct = Math.min(100, (r.days_held / r.max_days) * 100);
     const color = r.level === 'CRITICAL' ? '#ef4444' : '#f59e0b';
     const icon = r.level === 'CRITICAL' ? '🚨' : '⚠️';
-    return `<div style="background:${color}22;border:1px solid ${color};border-radius:8px;padding:10px 16px;margin-bottom:6px;display:flex;align-items:center;gap:12px;">
-      <span style="font-size:1.4rem;">${icon}</span>
-      <div style="flex:1;">
-        <strong style="color:${color};">${r.message}</strong>
-        <div style="margin-top:4px;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden;">
-          <div style="width:${pct}%;height:100%;background:${color};border-radius:2px;transition:width 0.3s;"></div>
-        </div>
-      </div>
-      <button onclick="_dismissedReminders.add('${acct}');this.parentElement.remove();if(!document.getElementById('cycleReminderBanner').children.length)document.getElementById('cycleReminderBanner').style.display='none';" style="background:none;border:none;color:${color};font-size:1.5rem;cursor:pointer;padding:4px 8px;line-height:1;opacity:1;font-weight:bold;" title="Dismiss" onmouseover="this.style.opacity='0.5'" onmouseout="this.style.opacity='1'">&times;</button>
+    return `<div style="background:${color}18;border-left:3px solid ${color};border-radius:4px;padding:3px 8px 3px 10px;margin-bottom:3px;display:flex;align-items:center;gap:8px;">
+      <span style="font-size:0.8rem;flex-shrink:0;line-height:1;">${icon}</span>
+      <span style="flex:1;font-size:0.8rem;color:${color};font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.message}</span>
+      <span style="font-size:0.68rem;color:${color};opacity:0.7;flex-shrink:0;">${Math.round(pct)}%</span>
+      <button onclick="_dismissedReminders.add('${acct}');this.parentElement.remove();if(!document.getElementById('cycleReminderBanner').children.length)document.getElementById('cycleReminderBanner').style.display='none';" style="background:none;border:none;color:${color};font-size:0.9rem;cursor:pointer;padding:0 2px;line-height:1;opacity:0.7;font-weight:bold;flex-shrink:0;" title="Dismiss" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">&times;</button>
     </div>`;
   }).join('');
 }
