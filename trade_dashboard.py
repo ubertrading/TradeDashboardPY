@@ -12579,6 +12579,11 @@ function toggleAcctCol(colIdx, visible) {
   }
   localStorage.setItem('acctHiddenCols', JSON.stringify(hiddenAcctCols));
   applyAcctColVisibility();
+  
+  // Clear any saved drag-resizes and auto-fit all columns perfectly to accommodate the newly added/removed column.
+  setTimeout(() => {
+    if (typeof autofitAcctCols === 'function') autofitAcctCols();
+  }, 10);
 }
 function applyAcctColVisibility() {
   // Use injected CSS to hide nth-child columns (works on dynamically rendered rows)
@@ -12710,7 +12715,11 @@ function _applyAcctColWidths() {
       totalW += w;
       anyApplied = true;
     } else {
-      totalW += Math.round(th.getBoundingClientRect().width) || 0;
+      // Unassigned column! If we are in fixed layout, we MUST assign it a pixel width,
+      // otherwise it acts as an infinite sponge for table rounding errors and grows on every tick.
+      const rawW = Math.round(th.getBoundingClientRect().width) || 60;
+      th.style.width = rawW + 'px'; th.style.minWidth = rawW + 'px'; th.style.maxWidth = rawW + 'px';
+      totalW += rawW;
     }
   });
   if (anyApplied) {
