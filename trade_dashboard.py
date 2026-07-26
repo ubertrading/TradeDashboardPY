@@ -10015,6 +10015,8 @@ def api_update_settings():
                 pass
         if "nop_fm_alert_thresholds" in data:
             dashboard_settings["nop_fm_alert_thresholds"] = data["nop_fm_alert_thresholds"]
+        if "nop_fm_alert_only_peak" in data:
+            dashboard_settings["nop_fm_alert_only_peak"] = bool(data["nop_fm_alert_only_peak"])
         if "position_change_alert" in data:
             dashboard_settings["position_change_alert"] = bool(data["position_change_alert"])
         if "position_change_opened" in data:
