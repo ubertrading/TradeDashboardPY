@@ -12709,6 +12709,10 @@ function _applyAcctColWidths() {
   let anyApplied = false;
   table.querySelectorAll('thead th[data-acol]').forEach(th => {
     const acol = th.getAttribute('data-acol');
+    // Skip hidden columns so they don't incorrectly inflate totalW
+    if (hiddenAcctCols && hiddenAcctCols.includes(acol)) return;
+    if (getComputedStyle(th).display === 'none') return;
+
     if (saved[acol]) {
       const w = saved[acol];
       th.style.width = w + 'px'; th.style.minWidth = w + 'px'; th.style.maxWidth = w + 'px';
