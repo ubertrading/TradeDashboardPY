@@ -12579,11 +12579,6 @@ function toggleAcctCol(colIdx, visible) {
   }
   localStorage.setItem('acctHiddenCols', JSON.stringify(hiddenAcctCols));
   applyAcctColVisibility();
-  
-  // Clear any saved drag-resizes and auto-fit all columns perfectly to accommodate the newly added/removed column.
-  setTimeout(() => {
-    if (typeof autofitAcctCols === 'function') autofitAcctCols();
-  }, 10);
 }
 function applyAcctColVisibility() {
   // Use injected CSS to hide nth-child columns (works on dynamically rendered rows)
@@ -12619,6 +12614,7 @@ function applyAcctRowDensity(v) {
 }
 
 // ─── Accounts table autofit (content-only) ──────────────────────────────────
+// ─── Accounts table autofit (fit within container) ─────────────────────────
 function autofitAcctCols() {
   const table = document.getElementById('accountsTable');
   if (!table) return;
@@ -12626,18 +12622,17 @@ function autofitAcctCols() {
   // Clear saved manual widths so autofit takes full effect
   localStorage.removeItem('acctColWidths');
 
-  // Reset any previously locked widths on th/td
+  // Reset any previously locked widths on all cells
   table.querySelectorAll('th, td').forEach(c => {
     c.style.width = ''; c.style.minWidth = ''; c.style.maxWidth = '';
   });
 
-  // Temporarily go auto layout so cells measure at natural content size
+  // Go to auto layout to measure natural content sizes
   table.style.tableLayout = 'auto';
   table.style.width = 'min-content';
   table.style.minWidth = '0';
 
-  // Measure MAX cell content width from BODY rows only — headers are EXCLUDED
-  // so abbreviated column labels ("Connection", "Equity") don't inflate widths.
+  // Measure max content width per column from BODY rows only (ignore header label widths)
   const ths = Array.from(table.querySelectorAll('thead th'));
   const colCount = ths.length;
   const colWidths = new Array(colCount).fill(0);
@@ -12651,38 +12646,58 @@ function autofitAcctCols() {
     });
   });
 
-  // Per-column hard caps (px) — prevent wide header labels from being inflated by autofit.
-  // Key = data-acol value.
-  const COL_MAX = { '2': 60 }; // Connection col: dot + "MT4" is ~50px; cap at 60
+  // Per-column hard caps (px)
+  const COL_MAX = { '2': 60 }; // Connection col: dot + "MT4" is ~50px
+
+  // Build desired widths (skipping hidden cols)
+  const desiredWidths = [];
+  ths.forEach((th, i) => {
+    const acol = th.getAttribute('data-acol');
+    if (acol && hiddenAcctCols.includes(acol)) { desiredWidths.push(null); return; }
+    let w = Math.max(colWidths[i] + 6, 20);
+    if (acol && COL_MAX[acol]) w = Math.min(w, COL_MAX[acol]);
+    desiredWidths.push({ th, acol, w, isName: i === 1 });
+  });
+
+  // Scale down proportionally if content is wider than the scroll container
+  const containerW = (table.parentElement || document.body).getBoundingClientRect().width || window.innerWidth;
+  const fixedCols = desiredWidths.filter(d => d && !d.isName);
+  const totalFixed = fixedCols.reduce((s, d) => s + d.w, 0);
+  const nameEntry = desiredWidths.find(d => d && d.isName);
+  const minNameW = nameEntry ? Math.max(colWidths[1] + 4, 60) : 0;
+  const available = containerW - minNameW - 4; // 4px breathing room
+
+  let scale = 1;
+  if (totalFixed > available && available > 0) {
+    scale = available / totalFixed;
+  }
 
   let totalMin = 0;
   const savedWidths = {};
-  ths.forEach((th, i) => {
-    const acol = th.getAttribute('data-acol');
-    if (acol && hiddenAcctCols.includes(acol)) return;
-
-    let w = Math.max(colWidths[i] + 6, 20);
-    if (acol && COL_MAX[acol]) w = Math.min(w, COL_MAX[acol]);
-    totalMin += w;
-
-    if (i === 1) { // Name column — flexible, acts as table width absorber
-      th.style.width = '';
-      th.style.minWidth = Math.max(colWidths[i] + 4, 60) + 'px';
-      th.style.maxWidth = '';
+  desiredWidths.forEach(d => {
+    if (!d) return;
+    if (d.isName) {
+      d.th.style.width = '';
+      d.th.style.minWidth = minNameW + 'px';
+      d.th.style.maxWidth = '';
+      totalMin += minNameW;
       return;
     }
-    th.style.width = w + 'px';
-    th.style.minWidth = w + 'px';
-    th.style.maxWidth = w + 'px';
-    if (acol) savedWidths[acol] = w;
+    const w = Math.max(Math.round(d.w * scale), 20);
+    d.th.style.width = w + 'px';
+    d.th.style.minWidth = w + 'px';
+    d.th.style.maxWidth = w + 'px';
+    totalMin += w;
+    if (d.acol) savedWidths[d.acol] = w;
   });
 
-  // Persist autofit result so column resizer doesn't fight it
+  // Persist autofit result so the drag resizer restores these widths
   localStorage.setItem('acctColWidths', JSON.stringify(savedWidths));
 
   table.style.tableLayout = 'fixed';
+  // Use 100% so the Name column fills remaining space — minWidth ensures we don't shrink below content
   table.style.width = '100%';
-  table.style.minWidth = `max(100%, ${totalMin}px)`;
+  table.style.minWidth = totalMin + 'px';
 }
 
 // ─── Account table column drag-resize ─────────────────────────────────────
@@ -12705,31 +12720,40 @@ function _applyAcctColWidths() {
   if (!table) return;
   const saved = JSON.parse(localStorage.getItem(ACCT_COL_WIDTHS_KEY) || 'null');
   if (!saved) return;
+
   let totalW = 0;
   let anyApplied = false;
+  let hasUnsaved = false;  // track if any visible col has no saved width
+
   table.querySelectorAll('thead th[data-acol]').forEach(th => {
     const acol = th.getAttribute('data-acol');
-    // Skip hidden columns so they don't incorrectly inflate totalW
+    // Skip hidden columns — they don't contribute to visible table width
     if (hiddenAcctCols && hiddenAcctCols.includes(acol)) return;
     if (getComputedStyle(th).display === 'none') return;
 
-    if (saved[acol]) {
+    if (saved[acol] != null) {
       const w = saved[acol];
       th.style.width = w + 'px'; th.style.minWidth = w + 'px'; th.style.maxWidth = w + 'px';
       totalW += w;
       anyApplied = true;
     } else {
-      // Unassigned column! If we are in fixed layout, we MUST assign it a pixel width,
-      // otherwise it acts as an infinite sponge for table rounding errors and grows on every tick.
-      const rawW = Math.round(th.getBoundingClientRect().width) || 60;
-      th.style.width = rawW + 'px'; th.style.minWidth = rawW + 'px'; th.style.maxWidth = rawW + 'px';
-      totalW += rawW;
+      // This column has no saved width — clear any stale inline style and mark flexible
+      th.style.width = ''; th.style.minWidth = ''; th.style.maxWidth = '';
+      hasUnsaved = true;
     }
   });
+
   if (anyApplied) {
     table.style.tableLayout = 'fixed';
-    table.style.width = Math.max(100, totalW) + 'px';
-    table.style.minWidth = '0';
+    if (hasUnsaved) {
+      // Some cols are unsized — use 100% so the browser distributes leftover space naturally.
+      // Don't set a pixel total-width or the unsaved cols will sponge-expand on every tick.
+      table.style.width = '100%';
+      table.style.minWidth = totalW + 'px';
+    } else {
+      table.style.width = Math.max(100, totalW) + 'px';
+      table.style.minWidth = '0';
+    }
   }
 }
 
