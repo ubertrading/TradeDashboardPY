@@ -16179,7 +16179,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 
       rows.push(`<tr>
         <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${id}', this.checked)" title="Hide this account"></td>
-        <td><strong>${id}</strong></td>
+        <td><a href="#" onclick="editFixAccount('${id}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${id}</a></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveFixGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         ${_nopFmCell(normMu1)}
@@ -16254,7 +16254,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 
       rows.push(`<tr>
         <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${id}', this.checked)" title="Hide this account"></td>
-        <td><strong>${displayName}</strong></td>
+        <td><a href="#" onclick="editMTDirect('${id}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${displayName}</a></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         ${_nopFmCell(normMuMt)}
@@ -16390,7 +16390,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 
       rows.push(`<tr>
         <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${acc}', this.checked)" title="Hide this account"></td>
-        <td><strong>${acc}</strong></td>
+        <td><a href="#" onclick="editEAAccount('${acc}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${acc}</a></td>
         <td><input class="inl" style="width:80px;" value="${mConfig.group_label || ''}" onchange="saveGroupLabel('${acc}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td>${connDot}</td>
         ${_nopFmCell(normMuE)}
