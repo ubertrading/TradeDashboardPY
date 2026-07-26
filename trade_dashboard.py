@@ -10268,13 +10268,7 @@ body {
 .container { max-width: 100%; margin: 0 auto; padding: 20px; }
 
 /* Header */
-.header {
-  display: flex; align-items: center; justify-content: flex-end;
-  padding: 6px 16px; margin-bottom: 8px;
-  background: var(--header-bg); border-radius: var(--radius);
-  border: 1px solid rgba(66,130,245,0.25); border-bottom: 2px solid rgba(66,130,245,0.4);
-  box-shadow: var(--shadow), 0 2px 12px rgba(66,130,245,0.08); gap: 12px;
-}
+.header { display: none; }
 
 /* Cards */
 .card {
@@ -10449,10 +10443,13 @@ body {
 
 /* Tab navigation */
 .tab-nav {
-  display: flex; gap: 4px; margin-bottom: 20px;
-  background: var(--surface); padding: 4px; border-radius: 10px;
-  border: 1px solid var(--border);
+  display: flex; align-items: center; gap: 4px; margin-bottom: 12px;
+  background: var(--header-bg); padding: 4px 8px; border-radius: var(--radius);
+  border: 1px solid rgba(66,130,245,0.25); border-bottom: 2px solid rgba(66,130,245,0.4);
+  box-shadow: var(--shadow), 0 2px 12px rgba(66,130,245,0.08);
 }
+.tab-nav-tabs { display: flex; gap: 4px; flex: 1; }
+.tab-nav-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; padding-left: 12px; border-left: 1px solid var(--border); }
 .tab-btn {
   padding: 7px 18px; border-radius: 8px; border: none;
   background: transparent; color: var(--text2); font-family: inherit;
@@ -10679,25 +10676,25 @@ body {
 <div class="refresh-bar" id="refreshBar"></div>
 <div class="container">
 
-<!-- Header -->
-<div class="header">
-  <span id="serverTime" style="font-size:0.85rem;color:var(--text2);font-weight:600;">--:--:--</span>
-  <label style="font-size:0.78rem;color:var(--text2);">Refresh:
-    <input type="number" id="refreshInterval" value="2" min="1" max="30"
-           style="width:50px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.8rem;text-align:center;">s
-  </label>
-  <button id="soundToggle" onclick="toggleSound()" style="background:none;border:none;font-size:1.1rem;cursor:pointer;padding:2px 4px;" title="Toggle trade sounds">🔊</button>
-  <button id="speechToggle" onclick="toggleSpeech()" style="background:none;border:none;font-size:1.1rem;cursor:pointer;padding:2px 4px;" title="Toggle speech notifications">🗣️</button>
-  <div id="eaIndicators" style="display:none;"></div>
-</div>
-
-<!-- Tab Navigation -->
+<!-- Combined Header + Tab Navigation -->
 <div class="tab-nav">
-  <button class="tab-btn active" data-tab="accounts" onclick="switchTab('accounts')">📊 Accounts</button>
-  <button class="tab-btn" data-tab="strategies" onclick="switchTab('strategies')">⚙ Strategies</button>
-  <button class="tab-btn" data-tab="eventlog" onclick="switchTab('eventlog')">📋 Event Log</button>
-  <button class="tab-btn" data-tab="reporting" onclick="switchTab('reporting')">📈 Reporting</button>
-  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ Settings</button>
+  <div class="tab-nav-tabs">
+    <button class="tab-btn active" data-tab="accounts" onclick="switchTab('accounts')">📊 Accounts</button>
+    <button class="tab-btn" data-tab="strategies" onclick="switchTab('strategies')">⚙ Strategies</button>
+    <button class="tab-btn" data-tab="eventlog" onclick="switchTab('eventlog')">📋 Event Log</button>
+    <button class="tab-btn" data-tab="reporting" onclick="switchTab('reporting')">📈 Reporting</button>
+    <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ Settings</button>
+  </div>
+  <div class="tab-nav-controls">
+    <span id="serverTime" style="font-size:0.82rem;color:var(--text2);font-weight:600;">--:--:--</span>
+    <label style="font-size:0.78rem;color:var(--text2);white-space:nowrap;">Refresh:
+      <input type="number" id="refreshInterval" value="2" min="1" max="30"
+             style="width:42px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.78rem;text-align:center;">s
+    </label>
+    <button id="soundToggle" onclick="toggleSound()" style="background:none;border:none;font-size:1rem;cursor:pointer;padding:2px 4px;" title="Toggle trade sounds">🔊</button>
+    <button id="speechToggle" onclick="toggleSpeech()" style="background:none;border:none;font-size:1rem;cursor:pointer;padding:2px 4px;" title="Toggle speech notifications">🗣️</button>
+    <div id="eaIndicators" style="display:none;"></div>
+  </div>
 </div>
 
 <!-- �?�?�?�?�?�?�?�?�?�?�? TAB 1: Accounts �?�?�?�?�?�?�?�?�?�?�? -->
