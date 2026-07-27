@@ -12955,40 +12955,54 @@ function applyColWidths() {
     measureColWidths();
   }
 
-  // JS-based drag-to-resize on the right edge of each th
-  const GRIP = 6; // px from right edge that activates resize
   ths.forEach(th => {
-    if (th._dragResizeInit) return;
-    th._dragResizeInit = true;
+    // Remove old handles to avoid duplicates after re-renders
+    th.querySelectorAll('.col-resize-handle').forEach(h => h.remove());
 
-    // Change cursor when near right edge
-    th.addEventListener('mousemove', e => {
-      const rect = th.getBoundingClientRect();
-      th.style.cursor = (e.clientX >= rect.right - GRIP) ? 'col-resize' : '';
-    });
-    th.addEventListener('mouseleave', () => { th.style.cursor = ''; });
+    const handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    th.appendChild(handle);
 
-    // Drag to resize
-    th.addEventListener('mousedown', e => {
-      const rect = th.getBoundingClientRect();
-      if (e.clientX < rect.right - GRIP) return; // not in grip zone
+    let startX, startW, tableStartW;
+    handle.addEventListener('mousedown', e => {
       e.preventDefault();
-      const startX = e.clientX;
-      const startW = th.offsetWidth;
+      handle.classList.add('dragging');
+      startX = e.clientX;
+      startW = th.getBoundingClientRect().width;
+      tableStartW = Math.round(table.getBoundingClientRect().width);
+
+      // Freeze every column at its current pixel width so other columns don't move
+      table.querySelectorAll('thead th[data-col]').forEach(oth => {
+        const cw = Math.round(oth.getBoundingClientRect().width);
+        if (cw > 0) {
+          oth.style.width = cw + 'px';
+          oth.style.minWidth = cw + 'px';
+          oth.style.maxWidth = cw + 'px';
+        }
+      });
+      table.style.tableLayout = 'fixed';
+      table.style.width = tableStartW + 'px';
+      table.style.minWidth = '0';
 
       function onMove(ev) {
-        const newW = Math.max(10, startW + ev.clientX - startX);
+        const delta = ev.clientX - startX;
+        const newW = Math.max(10, startW + delta);
         th.style.width = newW + 'px';
-        syncTableWidth();
+        th.style.minWidth = newW + 'px';
+        th.style.maxWidth = newW + 'px';
+        // Keep table width = sum of columns
+        table.style.width = Math.max(100, tableStartW + (newW - startW)) + 'px';
       }
       function onUp() {
+        handle.classList.remove('dragging');
+        saveWidths();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        saveWidths();
       }
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+
 
     // Double-click to reset to auto-measured widths
     if (!th._dblReset) {
