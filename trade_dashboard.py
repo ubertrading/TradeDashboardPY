@@ -2049,12 +2049,13 @@ def _check_nop_fm_alerts(all_accounts_info):
                 situation_worsened = nop_fm > last_alerted_peak
 
                 trigger = False
-                if only_on_peak:
-                    # Only alert when a new all-time peak above threshold is reached
-                    trigger = situation_worsened
-                else:
-                    # Alert when throttle expires OR when a new peak is reached
-                    trigger = time_passed or situation_worsened
+                if time_passed:
+                    if only_on_peak:
+                        # Only alert when a new all-time peak above threshold is reached
+                        trigger = situation_worsened
+                    else:
+                        # Alert since the throttle has expired (periodic reminder)
+                        trigger = True
 
                 if trigger:
                     _nop_fm_alert_cooldowns[acct_id] = now
