@@ -1602,6 +1602,7 @@ _DEFAULT_SETTINGS = {
     "margin_alert_thresholds": {},  # account_name -> per-account override (%)
     "nop_fm_alert_threshold": 100,
     "nop_fm_alert_throttle_sec": 900,
+    "nop_fm_alert_peak_throttle_sec": 0,
     "nop_fm_alert_thresholds": {},
     "position_change_alert": False,  # alert when position count decreases (closures)
     "position_change_opened": True,
@@ -2043,19 +2044,26 @@ def _check_nop_fm_alerts(all_accounts_info):
                 last_alerted_peak = _nop_fm_alert_max_triggered.get(acct_id, 0)
                 only_on_peak = dashboard_settings.get("nop_fm_alert_only_peak", False)
 
-                time_passed = now - last_alert >= float(global_throttle)
+                peak_throttle = dashboard_settings.get("nop_fm_alert_peak_throttle_sec", 0)
+
+                time_passed_global = (now - last_alert) >= float(global_throttle)
+                time_passed_peak = (now - last_alert) >= float(peak_throttle)
+
                 # "Worsened" means current value exceeds the running all-time peak
                 # (i.e. we just set a new high-water mark above threshold)
                 situation_worsened = nop_fm > last_alerted_peak
 
                 trigger = False
-                if time_passed:
-                    if only_on_peak:
-                        # Only alert when a new all-time peak above threshold is reached
-                        trigger = situation_worsened
-                    else:
-                        # Alert since the throttle has expired (periodic reminder)
+                if situation_worsened:
+                    # If peak is breached, use the dedicated peak throttle
+                    if time_passed_peak:
                         trigger = True
+                else:
+                    # Peak not breached.
+                    if not only_on_peak:
+                        # If periodic reminders are allowed, use global throttle
+                        if time_passed_global:
+                            trigger = True
 
                 if trigger:
                     _nop_fm_alert_cooldowns[acct_id] = now
@@ -7918,6 +7926,7 @@ def api_status():
         nop_fm_alert_data = {
             "global_threshold": dashboard_settings.get("nop_fm_alert_threshold", 100),
             "throttle_sec": dashboard_settings.get("nop_fm_alert_throttle_sec", 900),
+            "peak_throttle_sec": dashboard_settings.get("nop_fm_alert_peak_throttle_sec", 0),
             "per_account": dashboard_settings.get("nop_fm_alert_thresholds", {}),
         }
 
@@ -11065,9 +11074,14 @@ body {
       <label style="font-size:0.85rem;font-weight:600;">Global NOP/FM Default (x)</label>
       <input type="number" id="setNopFmAlertThreshold" value="100" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertGlobal(this.value)">
     </div>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
       <label style="font-size:0.85rem;font-weight:600;">NOP/FM Throttle (seconds)</label>
       <input type="number" id="setNopFmAlertThrottle" value="900" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertThrottle(this.value)">
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+      <label style="font-size:0.85rem;font-weight:600;">Peak Breach Throttle (sec)</label>
+      <input type="number" id="setNopFmAlertPeakThrottle" value="0" min="0" step="1" style="width:70px;text-align:center;" onchange="saveNopFmAlertPeakThrottle(this.value)">
+
       <label style="font-size:0.85rem;display:flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer;">
         <input type="checkbox" id="setNopFmAlertOnlyPeak" onchange="saveNopFmAlertOnlyPeak(this.checked)">
         Only alert on previous trigger alert peak breached
@@ -15411,6 +15425,9 @@ async function loadSettings() {
     document.getElementById('setMarginAlertThreshold').value = s.margin_alert_threshold != null ? s.margin_alert_threshold : 85;
     document.getElementById('setNopFmAlertThreshold').value = s.nop_fm_alert_threshold != null ? s.nop_fm_alert_threshold : 100;
     document.getElementById('setNopFmAlertThrottle').value = s.nop_fm_alert_throttle_sec != null ? s.nop_fm_alert_throttle_sec : 900;
+    if (document.getElementById('setNopFmAlertPeakThrottle')) {
+      document.getElementById('setNopFmAlertPeakThrottle').value = s.nop_fm_alert_peak_throttle_sec != null ? s.nop_fm_alert_peak_throttle_sec : 0;
+    }
     document.getElementById('setNopFmAlertOnlyPeak').checked = !!s.nop_fm_alert_only_peak;
     
     renderRiskThresholds(
@@ -15502,6 +15519,17 @@ async function saveNopFmAlertThrottle(value) {
     });
     if (window._nopFmAlertData) { window._nopFmAlertData.throttle_sec = val; }
   } catch(e) { console.error('Failed to save NOP/FM throttle:', e); }
+}
+
+async function saveNopFmAlertPeakThrottle(value) {
+  try {
+    const val = parseFloat(value) || 0;
+    await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({nop_fm_alert_peak_throttle_sec: val})
+    });
+    if (window._nopFmAlertData) { window._nopFmAlertData.peak_throttle_sec = val; }
+  } catch(e) { console.error('Failed to save NOP/FM peak throttle:', e); }
 }
 
 async function saveNopFmAlertOnlyPeak(checked) {
