@@ -1949,8 +1949,9 @@ def _get_stop_out_frac(account_id):
 
 
 # ─── NOP/FM Alert ────────────────────────────────────────────────────────────
-_nop_fm_alert_cooldowns = {}  # account -> last alert timestamp
-_nop_fm_alert_max_triggered = {}  # account -> max NOP/FM value that triggered an alert
+_nop_fm_alert_cooldowns = {}      # account -> last alert timestamp
+_nop_fm_alert_max_triggered = {}  # account -> NOP/FM value at the time of the last sent alert
+_nop_fm_running_peak = {}         # account -> highest NOP/FM seen (above threshold) since positions opened
 
 def _send_nop_fm_alert(account, nop_fm, threshold, equity, notional):
     """Send NOP/FM alert via enabled channels (in background)."""
@@ -2006,9 +2007,9 @@ def _check_nop_fm_alerts(all_accounts_info):
             
             notional = abs(float(lots)) * 100000
             if notional <= 0:
-                # If no open positions, reset tracking
-                if acct_id in _nop_fm_alert_max_triggered:
-                    del _nop_fm_alert_max_triggered[acct_id]
+                # No open positions — reset all tracking for this account
+                _nop_fm_alert_max_triggered.pop(acct_id, None)
+                _nop_fm_running_peak.pop(acct_id, None)
                 continue
 
             fm = float(equity) - float(margin)
@@ -2026,22 +2027,33 @@ def _check_nop_fm_alerts(all_accounts_info):
                 continue  # disabled for this account
 
             if nop_fm < threshold:
-                # Reset if we drop below threshold
-                if acct_id in _nop_fm_alert_max_triggered:
-                    del _nop_fm_alert_max_triggered[acct_id]
+                # Below threshold — do NOT wipe the running peak; a momentary dip should
+                # not allow the next tick to be treated as a "new worst-case".
+                # Only reset the last-alert record so that IF the cooldown expires and
+                # value rises again, only a new-peak triggers (not the throttle).
+                pass
             else:
+                # Accumulate the running peak regardless of whether we alert
+                running_peak = _nop_fm_running_peak.get(acct_id, 0)
+                if nop_fm > running_peak:
+                    _nop_fm_running_peak[acct_id] = nop_fm
+                    running_peak = nop_fm
+
                 last_alert = _nop_fm_alert_cooldowns.get(acct_id, 0)
-                max_triggered = _nop_fm_alert_max_triggered.get(acct_id, 0)
+                last_alerted_peak = _nop_fm_alert_max_triggered.get(acct_id, 0)
                 only_on_peak = dashboard_settings.get("nop_fm_alert_only_peak", False)
 
                 time_passed = now - last_alert >= float(global_throttle)
-                # Ignore throttle if situation worsens
-                situation_worsened = nop_fm > max_triggered
+                # "Worsened" means current value exceeds the running all-time peak
+                # (i.e. we just set a new high-water mark above threshold)
+                situation_worsened = nop_fm > last_alerted_peak
 
                 trigger = False
                 if only_on_peak:
+                    # Only alert when a new all-time peak above threshold is reached
                     trigger = situation_worsened
                 else:
+                    # Alert when throttle expires OR when a new peak is reached
                     trigger = time_passed or situation_worsened
 
                 if trigger:
