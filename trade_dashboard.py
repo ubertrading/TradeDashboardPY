@@ -5680,8 +5680,6 @@ def _should_issue_command(session, account):
                                         "ts_epoch": time.time(),
                                         "external": True,
                                     })
-                                    # Keep session["closed"] in sync so filled-closed display is accurate
-                                    session.setdefault("closed", {})[account] = session["closed"].get(account, 0) + 1
                                 session["cycle_progress"] = progress
                                 _save_sessions()
                                 # Phase is now "open" — update local variable and fall through to open-phase dispatch
