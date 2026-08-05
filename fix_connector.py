@@ -634,6 +634,56 @@ class CTraderFixAccount:
             logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
         return positions
 
+    def reload_sessions_from_config(self):
+        """Rebuild FixSession objects from current self.config.
+        Call this after editing credentials (host/user/password/sender_comp_id)
+        so the next start() uses the updated values.
+        """
+        # Stop any running sessions first
+        try:
+            self.trade_session.stop()
+        except Exception:
+            pass
+        try:
+            self.quote_session.stop()
+        except Exception:
+            pass
+
+        sender = self.config.get("sender_comp_id", "")
+        target = self.config.get("target_comp_id", "CSERVER")
+        username = self.config.get("username", "")
+        password = self.config.get("password", "")
+        hb = self.config.get("heartbeat_interval", 30)
+        host = self.config.get("host", "")
+        use_ssl = self.config.get("use_ssl", True)
+
+        self.trade_session = FixSession(
+            host=host, port=self.config.get("trade_port", 5201),
+            sender_comp_id=sender, target_comp_id=target,
+            sender_sub_id="TRADE", target_sub_id="TRADE",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=use_ssl
+        )
+        self.quote_session = FixSession(
+            host=host, port=self.config.get("quote_port", 5202),
+            sender_comp_id=sender, target_comp_id=target,
+            sender_sub_id="QUOTE", target_sub_id="QUOTE",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=use_ssl
+        )
+        # Re-register callbacks
+        self.trade_session.register_callback(b'8', self._on_execution_report)
+        self.trade_session.register_callback(b'y', self._on_security_list)
+        self.trade_session.register_callback(b'AP', self._on_position_report)
+        self.trade_session.register_callback(b'BA', self._on_collateral_report)
+        self.trade_session.register_callback(b'j', self._on_business_reject)
+        self.trade_session.register_callback(b'3', self._on_session_reject)
+        self.quote_session.register_callback(b'W', self._on_market_data_snapshot)
+        self.quote_session.register_callback(b'X', self._on_market_data_incremental)
+        self.quote_session.register_callback(b'Y', self._on_market_data_reject)
+        logger.info("[%s] CTrader FIX sessions rebuilt from config (host=%s user=%s)",
+                    self.account_id, host, username)
+
     def start(self):
         """Start both sessions and begin feeding data."""
         self._running = True
@@ -1736,6 +1786,53 @@ class SwissquoteFixAccount:
     def quote_connected(self):
         return self.quote_session.connected
 
+    def reload_sessions_from_config(self):
+        """Rebuild FixSession objects from current self.config.
+        Call this after editing credentials so the next start() uses the updated values.
+        """
+        try:
+            self.trade_session.stop()
+        except Exception:
+            pass
+        try:
+            self.quote_session.stop()
+        except Exception:
+            pass
+
+        sender = self.config.get("sender_comp_id", "")
+        target = self.config.get("target_comp_id", "")
+        username = self.config.get("username", "")
+        password = self.config.get("password", "")
+        hb = self.config.get("heartbeat_interval", 30)
+        host = self.config.get("host", "")
+        port = self.config.get("trade_port", 443)
+
+        self.trade_session = FixSession(
+            host=host, port=port,
+            sender_comp_id=sender, target_comp_id=target,
+            sender_sub_id="TRADE", target_sub_id="TRADE",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=True,
+            extra_logon_fields=[(TAG_SQ_SENDMISSED, "1")]
+        )
+        self.quote_session = FixSession(
+            host=host, port=port,
+            sender_comp_id=sender, target_comp_id=target,
+            sender_sub_id="QUOTE", target_sub_id="QUOTE",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=True
+        )
+        self.trade_session.register_callback(b'8', self._on_execution_report)
+        self.trade_session.register_callback(b'AP', self._on_position_report)
+        self.trade_session.register_callback(b'AO', self._on_position_report_ack)
+        self.trade_session.register_callback(b'3', self._on_session_reject)
+        self.trade_session.register_callback(b'j', self._on_business_reject)
+        self.trade_session.register_callback(b'9', self._on_order_cancel_reject)
+        self.quote_session.register_callback(b'W', self._on_market_data_snapshot)
+        self.quote_session.register_callback(b'Y', self._on_market_data_reject)
+        logger.info("[%s] Swissquote FIX sessions rebuilt from config (host=%s user=%s)",
+                    self.account_id, host, username)
+
     def start(self):
         """Start TRADE and QUOTE sessions and begin feeding data."""
         self._running = True
@@ -2488,6 +2585,63 @@ class DukascopyFixAccount:
         except Exception as e:
             logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
         return positions
+
+    def reload_sessions_from_config(self):
+        """Rebuild FixSession objects from current self.config.
+        Call this after editing credentials so the next start() uses the updated values.
+        """
+        try:
+            self.trade_session.stop()
+        except Exception:
+            pass
+        try:
+            self.quote_session.stop()
+        except Exception:
+            pass
+
+        sender_trade = self.config.get("sender_comp_id", "")
+        sender_quote = self.config.get("sender_comp_id_quote", sender_trade)
+        target = self.config.get("target_comp_id", "")
+        username = self.config.get("username", "")
+        self.username = username
+        self._external_account = self.config.get("external_account_id") or username
+        password = self.config.get("password", "")
+        hb = self.config.get("heartbeat_interval", 30)
+        trade_host = self.config.get("host", "")
+        trade_port = self.config.get("trade_port", 443)
+        quote_host = self.config.get("quote_host", trade_host)
+        quote_port = self.config.get("quote_port", trade_port)
+        use_ssl = self.config.get("use_ssl", True)
+
+        self.trade_session = FixSession(
+            host=trade_host, port=trade_port,
+            sender_comp_id=sender_trade, target_comp_id=target,
+            sender_sub_id="", target_sub_id="",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=use_ssl
+        )
+        self.quote_session = FixSession(
+            host=quote_host, port=quote_port,
+            sender_comp_id=sender_quote, target_comp_id=target,
+            sender_sub_id="", target_sub_id="",
+            username=username, password=password,
+            heartbeat_interval=hb, use_ssl=use_ssl
+        )
+        self.trade_session.register_callback(b'8', self._on_execution_report)
+        self.trade_session.register_callback(b'U2', self._on_account_info)
+        self.trade_session.register_callback(b'U3', self._on_instrument_position_info)
+        self.trade_session.register_callback(b'U4', self._on_overnight_report)
+        self.trade_session.register_callback(b'U1', self._on_notification)
+        self.trade_session.register_callback(b'h', self._on_trading_session_status)
+        self.trade_session.register_callback(b'3', self._on_session_reject)
+        self.trade_session.register_callback(b'j', self._on_business_reject)
+        self.trade_session.register_callback(b'9', self._on_order_cancel_reject)
+        self.quote_session.register_callback(b'W', self._on_market_data_snapshot)
+        self.quote_session.register_callback(b'Y', self._on_market_data_reject)
+        # Reset subscribed symbols so they'll be re-subscribed on reconnect
+        self._subscribed_symbols.clear()
+        logger.info("[%s] Dukascopy FIX sessions rebuilt from config (host=%s user=%s)",
+                    self.account_id, trade_host, username)
 
     def start(self):
         """Start TRADE and QUOTE sessions and begin feeding data."""
@@ -3581,8 +3735,12 @@ class FixAccountManager:
                         # Determine buy/sell based on side_number convention
                         # Side 1 = buy, Side 2 = sell (standard convention)
                         trade_side = side_info.get("action", "buy") if side_info.get("action") else ("buy" if side_num == 1 else "sell")
+                        is_cycle_op = action.startswith("cycle_") or result is True
+                        op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                        if not op_lot_size:
+                            op_lot_size = lot_size
                         fix_acct.send_market_order(
-                            pair, trade_side, lot_size,
+                            pair, trade_side, op_lot_size,
                             session_id=session_id, comment=comment
                         )
 
@@ -3650,6 +3808,12 @@ class FixAccountManager:
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
             
+            # Record lot size of closed fill into cycle_progress
+            if session.get("action", "").startswith("cycle_"):
+                prog = session.get("cycle_progress", {})
+                prog["last_closed_lots"] = float(fill_lot_size)
+                session["cycle_progress"] = prog
+
             # For netting mode, dynamically override original_side based on actual broker exposure
             ea_info = self.dd["ea_account_info"].get(account_id, {})
             if ea_info.get("netting_mode", False):

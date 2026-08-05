@@ -141,7 +141,7 @@ def normalize_mt_config(cfg):
 # â”€â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 BRIDGE_URL = os.environ.get("MT_BRIDGE_URL", "http://localhost:5090")
 BRIDGE_EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "MtBridgeService", "bin", "Debug", "net8.0", "MtBridgeService.exe")
+                          "MtBridgeService", "bin", "Release", "net8.0", "MtBridgeService.exe")
 
 # â”€â”€â”€ HTTP Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -665,7 +665,8 @@ class MtBridgeAccount:
 
     def get_symbol_info(self, symbol):
         """Get bid/ask/spread for a symbol."""
-        result = _get(f"/api/accounts/{self.account_id}/quote/{symbol}", timeout=5)
+        encoded = urllib.parse.quote(symbol, safe='')
+        result = _get(f"/api/accounts/{self.account_id}/quote/{encoded}", timeout=5)
         if result and "error" in result:
             if "404" not in str(result['error']):
                 logger.error(f"Bridge returned error: {result['error']}")
@@ -1044,10 +1045,11 @@ class MtBridgeManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
-                    # Check spread gating — bypass for rollback, cycle close, and cycle_limit_open
+                    # Check spread gating — bypass for rollback, cycle close, and cycle_limit_open, and close_limit
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen:
+                    act_check = session.get("action", "")
+                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen and not act_check.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -1199,6 +1201,10 @@ class MtBridgeManager:
                 elif action == "open" or (action.startswith("cycle_") and result is True) or action.startswith("open_limit"):
                     # Normal open OR cycle reopen phase OR open_limit
                     trade_side = side_info.get("action", "buy")
+                    is_cycle_op = action.startswith("cycle_") or result == "cycle_limit_open"
+                    op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                    if not op_lot_size:
+                        op_lot_size = lot_size
                     
                     target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
                     my_side_num = side_info.get("side_number", 0)
@@ -1220,7 +1226,7 @@ class MtBridgeManager:
                         )
                     else:
                         order_result = direct_acct.send_market_order(
-                            pair, trade_side, lot_size,
+                            pair, trade_side, op_lot_size,
                             session_id=session_id, comment=comment
                         )
 
@@ -1435,6 +1441,10 @@ class MtBridgeManager:
                         except Exception as e:
                             logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
                                          account_id, ticket, e)
+                        with self.dd["lock"]:
+                            prog = session.get("cycle_progress", {})
+                            prog["last_closed_lots"] = float(actual_lots)
+                            session["cycle_progress"] = prog
                         logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
                                     account_id, ticket, pair, original_side, actual_lots,
                                     idx + 1, len(acct_fills))
@@ -1452,12 +1462,20 @@ class MtBridgeManager:
         # Filter for batch closing
         eligible_fills = []
         now_epoch = time.time()
+        close_limit_done = set()
+        if is_limit:
+            for clf in session.get("close_limit_fills", []):
+                t = clf.get("ticket") if isinstance(clf, dict) else clf
+                if t is not None:
+                    close_limit_done.add(str(t))
         for fill in fills:
             if fill.get("account") != account_id:
                 continue
             ticket = fill.get("ticket")
             if ticket in closed_tickets:
                 continue
+            if is_limit and str(ticket) in close_limit_done:
+                continue  # TP already set — skip to next pending fill
             
             # Age filter for limit orders
             if is_limit and limit_days > 0:
@@ -1515,24 +1533,61 @@ class MtBridgeManager:
                 ticket_found = True
 
             if not ticket_found:
-                # Safety: if broker returned zero open orders, don't auto-skip
+                # If tracked ticket was not found, check if broker has live open orders for this pair/account
+                pair_clean = (pair or "").strip().upper()
+                matching_orders = []
+                orders = []
                 try:
                     orders = direct_acct._get_open_orders()
-                    if len(orders) <= 0:
-                        logger.warning("[%s] SKIP ABORTED: broker has 0 open orders — likely disconnected, "
-                                       "not marking ticket %s as closed", account_id, ticket)
-                        break
+                    if orders:
+                        for o in orders:
+                            o_sym = (o.get("Symbol") or o.get("symbol") or "").strip().upper()
+                            if o_sym and (o_sym == pair_clean or o_sym.startswith(pair_clean) or pair_clean.startswith(o_sym)):
+                                matching_orders.append(o)
                 except Exception:
                     pass
 
-                # Ticket genuinely gone — mark as closed, but only ONE per call
-                session.setdefault("close_fills", []).append({
-                    "ticket": ticket, "account": account_id,
-                    "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "note": "auto-skipped: not in broker open orders"
-                })
-                session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
-                break  # Only handle ONE auto-skip per call
+                if matching_orders:
+                    live_order = matching_orders[0]
+                    live_ticket = live_order.get("Ticket") or live_order.get("ticket")
+                    if live_ticket:
+                        if live_order.get("Lots"):
+                            actual_lots = float(live_order["Lots"])
+                        elif live_order.get("Volume"):
+                            actual_lots = float(live_order["Volume"])
+                        logger.info("[%s] LIVE-RETRY: Tracked ticket %s not found, but live ticket %s is OPEN for %s — retrying close on live ticket (lots=%s)",
+                                    account_id, ticket, live_ticket, pair, actual_lots)
+                        print(f"[LIVE-RETRY] {account_id}: ticket {ticket} not found, retrying close on live ticket {live_ticket}")
+                        ticket = live_ticket
+                        ticket_found = True
+                    else:
+                        break
+                else:
+                    if len(orders) <= 0 and not getattr(direct_acct, "connected", True):
+                        logger.warning("[%s] SKIP ABORTED: broker disconnected, not marking ticket %s as closed", account_id, ticket)
+                        break
+
+                    logger.info("[%s] VERIFIED-ZERO: ticket=%s not found and broker has 0 open orders for %s — marking fill closed",
+                                account_id, ticket, pair)
+                    print(f"[VERIFIED-ZERO] {account_id}: ticket {ticket} not on broker, 0 live positions for {pair} — marking closed")
+                    session.setdefault("close_fills", []).append({
+                        "ticket": ticket, "account": account_id,
+                        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "note": "verified-zero: 0 live broker open orders for pair"
+                    })
+                    session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
+
+                    sides = session.get("sides", {})
+                    for other_acc in sides:
+                        if other_acc != account_id:
+                            other_closed = session.get("closed", {}).get(other_acc, 0)
+                            other_filled = session.get("filled", {}).get(other_acc, 0)
+                            if other_closed < other_filled:
+                                logger.warning("[%s] HEDGE IMBALANCE DETECTED during close: %s closed fill but %s has remaining open positions! Setting partial_close.",
+                                               account_id, account_id, other_acc)
+                                print(f"[HEDGE-IMBALANCE-CLOSE] {account_id} completed fill, setting partial_close for {other_acc}")
+                                session["status"] = "partial_close"
+                    break
 
             if is_limit:
                 logger.info("[%s] CYCLE-LIMIT CLOSE: modifying TP ticket=%s pair=%s side=%s lots=%s TP=%s (batch item %d)",

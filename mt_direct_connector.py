@@ -4068,7 +4068,7 @@ class MTDirectManager:
                     # and bypass for cycle reopen (once closed, must reopen immediately)
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen:
+                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen and not action.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -4147,12 +4147,19 @@ class MTDirectManager:
                     limit_dist = session.get("limit_distance") or 100
                     limit_batch = session.get("limit_batch_size") or 1
                     limit_days = session.get("limit_days") or 0
+                    target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
+                    my_side_num = side_info.get("side_number", 0)
+                    is_limit_side = action.startswith("close_limit") and ((target_side_num == 0) or (target_side_num == my_side_num))
                     self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment,
-                                             is_limit=(action == "close_limit"),
+                                             is_limit=is_limit_side,
                                              limit_dist=limit_dist, limit_batch=limit_batch, limit_days=limit_days)
                 elif action == "open" or (action.startswith("cycle_") and result is True) or action == "open_limit" or result == "cycle_limit_open":
                     # Normal open OR cycle reopen phase OR open_limit OR cycle_limit open
                     trade_side = side_info.get("action", "buy")
+                    is_cycle_op = action.startswith("cycle_") or result == "cycle_limit_open"
+                    op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                    if not op_lot_size:
+                        op_lot_size = lot_size
                     if result == "cycle_limit_open":
                         # Place batch_size limit orders for cycle reopen
                         limit_dist = session.get("cycle_limit_distance") or 10
@@ -4185,7 +4192,7 @@ class MTDirectManager:
                                 logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
                                             account_id, already_placed + i + 1, batch_size, limit_type, lim_pr)
                                 order_result = direct_acct.send_limit_order(
-                                    pair, trade_side, lot_size, lim_pr, limit_type,
+                                    pair, trade_side, op_lot_size, lim_pr, limit_type,
                                     session_id=session_id, comment=comment
                                 )
                                 if isinstance(order_result, tuple) and not order_result[0]:
@@ -4210,7 +4217,7 @@ class MTDirectManager:
                                 logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f",
                                             account_id, already_placed + i + 1, batch_size, limit_type, limit_price)
                                 order_result = direct_acct.send_limit_order(
-                                    pair, trade_side, lot_size, limit_price, limit_type,
+                                    pair, trade_side, op_lot_size, limit_price, limit_type,
                                     session_id=session_id, comment=comment
                                 )
                                 if isinstance(order_result, tuple) and not order_result[0]:
@@ -4247,7 +4254,7 @@ class MTDirectManager:
                             self.dd["in_flight_commands"].pop((session_id, account_id), None)
                     else:
                         order_result = direct_acct.send_market_order(
-                            pair, trade_side, lot_size,
+                            pair, trade_side, op_lot_size,
                             session_id=session_id, comment=comment
                         )
                         # send_market_order returns (success, ticket, price) or raises
@@ -4467,6 +4474,10 @@ class MTDirectManager:
                         except Exception as e:
                             logger.error("[%s] Could not look up lots for cycle ticket %s: %s",
                                          account_id, ticket, e)
+                        with self.dd["lock"]:
+                            prog = session.get("cycle_progress", {})
+                            prog["last_closed_lots"] = float(actual_lots)
+                            session["cycle_progress"] = prog
                         logger.info("[%s] CYCLE CLOSE: ticket=%s pair=%s side=%s lots=%s (fill #%d of %d)",
                                     account_id, ticket, pair, original_side, actual_lots,
                                     idx + 1, len(acct_fills))
@@ -4485,12 +4496,23 @@ class MTDirectManager:
         # Filter eligible fills (apply age filter for limit mode)
         eligible_fills = []
         now_epoch = time.time()
+        # For close_limit mode, also exclude fills whose TP has already been set.
+        # _should_issue_command uses close_limit_fills to determine pending fills;
+        # we must use the same filter here so we modify the correct ticket.
+        close_limit_done = set()
+        if is_limit:
+            for clf in session.get("close_limit_fills", []):
+                t = clf.get("ticket") if isinstance(clf, dict) else clf
+                if t is not None:
+                    close_limit_done.add(str(t))
         for fill in fills:
             if fill.get("account") != account_id:
                 continue
             ticket = fill.get("ticket")
             if ticket in closed_tickets:
                 continue
+            if is_limit and str(ticket) in close_limit_done:
+                continue  # TP already set — skip to next pending fill
             # Age filter for limit orders
             if is_limit and limit_days > 0:
                 ts_epoch = fill.get("ts_epoch", 0)
@@ -4532,27 +4554,61 @@ class MTDirectManager:
                 ticket_found = True
 
             if not ticket_found:
-                # Safety: if broker returned zero open orders, don't auto-skip
-                if len(orders) <= 0:
-                    logger.warning("[%s] SKIP ABORTED: broker has 0 open orders — likely disconnected, "
-                                   "not marking ticket %s as closed", account_id, ticket)
-                    break
+                # If tracked ticket was not found, check if broker has live open orders for this pair/account
+                pair_clean = (pair or "").strip().upper()
+                matching_orders = []
+                if orders:
+                    for o in orders:
+                        o_sym = (o.get("Symbol") or o.get("symbol") or "").strip().upper()
+                        # Match symbol (strip broker suffixes if needed)
+                        if o_sym and (o_sym == pair_clean or o_sym.startswith(pair_clean) or pair_clean.startswith(o_sym)):
+                            matching_orders.append(o)
 
-                # Ticket genuinely gone — mark as closed
-                order_tickets = sorted([o.get('Ticket', 0) for o in orders])
-                t_min = order_tickets[0] if order_tickets else '?'
-                t_max = order_tickets[-1] if order_tickets else '?'
-                logger.info("[%s] SKIP: ticket=%s not found in %d broker orders "
-                            "(ticket range %s..%s) — marking as closed",
-                            account_id, ticket, len(orders), t_min, t_max)
-                print(f"[AUTO-SKIP] {account_id}: ticket {ticket} not on broker, auto-marking closed")
-                session.setdefault("close_fills", []).append({
-                    "ticket": ticket, "account": account_id,
-                    "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "note": "auto-skipped: not in broker open orders"
-                })
-                session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
-                break  # Only handle ONE auto-skip per call
+                if matching_orders:
+                    # Live position(s) for this pair STILL exist on the broker!
+                    # Do NOT auto-skip or increment closed count. Pick the oldest live order and retry closing it right then.
+                    live_order = matching_orders[0]
+                    live_ticket = live_order.get("Ticket") or live_order.get("ticket")
+                    if live_ticket:
+                        if live_order.get("Lots"):
+                            actual_lots = float(live_order["Lots"])
+                        elif live_order.get("Volume"):
+                            actual_lots = float(live_order["Volume"])
+                        logger.info("[%s] LIVE-RETRY: Tracked ticket %s not found, but live ticket %s is OPEN for %s — retrying close on live ticket (lots=%s)",
+                                    account_id, ticket, live_ticket, pair, actual_lots)
+                        print(f"[LIVE-RETRY] {account_id}: ticket {ticket} not found, retrying close on live ticket {live_ticket}")
+                        ticket = live_ticket
+                        ticket_found = True
+                    else:
+                        break
+                else:
+                    # Broker has ZERO open orders for this pair on this account.
+                    if len(orders) <= 0 and not direct_acct.connected:
+                        logger.warning("[%s] SKIP ABORTED: broker disconnected, not marking ticket %s as closed", account_id, ticket)
+                        break
+
+                    logger.info("[%s] VERIFIED-ZERO: ticket=%s not found and broker has 0 open orders for %s — marking fill closed",
+                                account_id, ticket, pair)
+                    print(f"[VERIFIED-ZERO] {account_id}: ticket {ticket} not on broker, 0 live positions for {pair} — marking closed")
+                    session.setdefault("close_fills", []).append({
+                        "ticket": ticket, "account": account_id,
+                        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "note": "verified-zero: 0 live broker open orders for pair"
+                    })
+                    session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
+
+                    # Check if the OTHER side of the session STILL has live open positions for this pair!
+                    sides = session.get("sides", {})
+                    for other_acc in sides:
+                        if other_acc != account_id:
+                            other_closed = session.get("closed", {}).get(other_acc, 0)
+                            other_filled = session.get("filled", {}).get(other_acc, 0)
+                            if other_closed < other_filled:
+                                logger.warning("[%s] HEDGE IMBALANCE DETECTED during close: %s closed fill but %s has remaining open positions! Setting partial_close.",
+                                               account_id, account_id, other_acc)
+                                print(f"[HEDGE-IMBALANCE-CLOSE] {account_id} completed fill, setting partial_close for {other_acc}")
+                                session["status"] = "partial_close"
+                    break
 
             if is_limit:
                 # CLOSE-LIMIT: modify TakeProfit to passive limit price

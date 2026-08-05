@@ -95,6 +95,12 @@ app.MapPost("/api/accounts/{id}/close", (string id, CloseRequest req) =>
     return result != null ? Results.Ok(result) : Results.NotFound();
 });
 
+app.MapPost("/api/accounts/{id}/modify", (string id, ModifyRequest req) =>
+{
+    var result = accountStore.ModifyPosition(id, req);
+    return result != null ? Results.Ok(result) : Results.NotFound();
+});
+
 // ─── Deal History ──────────────────────────────────────────────────────────
 app.MapGet("/api/accounts/{id}/history", (string id, long from, long to, bool? exclude_balance, string? fee_keywords) =>
 {
@@ -153,6 +159,8 @@ public record OrderRequest
     public string Symbol { get; init; } = "";
     public string Side { get; init; } = "buy";
     public double Lots { get; init; }
+    public double? Price { get; init; } // If null, market order
+    public string? Type { get; init; } // If null, defaults based on Side
     public string? SessionId { get; init; }
     public string? Comment { get; init; }
 }
@@ -165,6 +173,17 @@ public record CloseRequest
     public double Lots { get; init; }
     public string? SessionId { get; init; }
     public string? Comment { get; init; }
+}
+
+public record ModifyRequest
+{
+    public long Ticket { get; init; }
+    public string Symbol { get; init; } = "";
+    public string Side { get; init; } = "buy";
+    public double Lots { get; init; }
+    public double? SL { get; init; }
+    public double? TP { get; init; }
+    public double? Price { get; init; }
 }
 
 public record ConfigLoadRequest { public string? Path { get; init; } }
@@ -242,6 +261,9 @@ public class AccountStore
 
     public object? ClosePosition(string id, CloseRequest req) =>
         _accounts.TryGetValue(id, out var a) ? a.ClosePosition(req) : null;
+
+    public object? ModifyPosition(string id, ModifyRequest req) =>
+        _accounts.TryGetValue(id, out var a) ? a.ModifyPosition(req) : null;
 
     public object? GetDealHistory(string id, long fromTs, long toTs, bool excludeBalance = true, string[]? feeKeywords = null) =>
         _accounts.TryGetValue(id, out var a) ? a.GetDealHistory(fromTs, toTs, excludeBalance, feeKeywords) : null;
@@ -802,7 +824,7 @@ public class MtAccount
             var ask = quote.Ask;
             var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
             var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
-            _quotes[sym] = new QuoteData(bid, ask, spread);
+            _quotes[sym] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
         }
         catch { }
     }
@@ -821,7 +843,7 @@ public class MtAccount
             var ask = (double)args.Ask;
             var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
             var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
-            _quotes[sym] = new QuoteData(bid, ask, spread);
+            _quotes[sym] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
         }
         catch { }
     }
@@ -909,11 +931,14 @@ public class MtAccount
             {
                 foreach (var order in _mt5.GetOpenedOrders())
                 {
+                    var isBuy = order.OrderType == mtapi.mt5.OrderType.Buy;
+                    var isSell = order.OrderType == mtapi.mt5.OrderType.Sell;
+                    if (!isBuy && !isSell) continue; // skip pending orders
                     newPositions[order.Ticket] = new PositionData
                     {
                         Ticket = order.Ticket,
                         Symbol = order.Symbol,
-                        Side = order.OrderType.ToString().Contains("Buy") ? "buy" : "sell",
+                        Side = isBuy ? "buy" : "sell",
                         Lots = order.Lots,
                         OpenPrice = order.OpenPrice,
                         OpenTime = order.OpenTime.ToString("o"),
@@ -1014,34 +1039,70 @@ public class MtAccount
         return results;
     }
 
+    // Quote staleness threshold: if no tick has arrived in 60s, treat as frozen.
+    private const int QuoteStalenessSeconds = 60;
+
+    private static object? QuoteIfFresh(QuoteData q, string symbol, ILogger logger, string id)
+    {
+        var age = (DateTime.UtcNow - q.ReceivedAt).TotalSeconds;
+        if (age > QuoteStalenessSeconds)
+        {
+            logger.LogWarning("[{Id}] GetQuote({Symbol}): cached quote is STALE ({Age:F0}s old) — returning null to avoid frozen DIFF",
+                id, symbol, age);
+            return null;
+        }
+        return new { bid = q.Bid, ask = q.Ask, spread = q.Spread };
+    }
+
     public object? GetQuote(string symbol)
     {
         // Try exact match first
         if (_quotes.TryGetValue(symbol, out var q))
-            return new { bid = q.Bid, ask = q.Ask, spread = q.Spread };
+            return QuoteIfFresh(q, symbol, _logger, Config.Id);
 
         // Case-insensitive fallback
         foreach (var (key, val) in _quotes)
         {
             if (key.Equals(symbol, StringComparison.OrdinalIgnoreCase))
-                return new { bid = val.Bid, ask = val.Ask, spread = val.Spread };
+                return QuoteIfFresh(val, symbol, _logger, Config.Id);
         }
 
-        // Try GetQuote from API
+        // Prefix/Suffix matching fallback (e.g. USDCHF matches USDCHF# or USDCHF.b)
+        foreach (var (key, val) in _quotes)
+        {
+            if (key.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(key, StringComparison.OrdinalIgnoreCase))
+                return QuoteIfFresh(val, symbol, _logger, Config.Id);
+        }
+
+        // Check symbols of active positions
+        foreach (var pos in _positions.Values)
+        {
+            if (pos.Symbol.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(pos.Symbol, StringComparison.OrdinalIgnoreCase))
+            {
+                if (_quotes.TryGetValue(pos.Symbol, out var posQuote))
+                    return QuoteIfFresh(posQuote, symbol, _logger, Config.Id);
+            }
+        }
+
+        // Try GetQuote from API (live call — always fresh by definition)
         try
         {
             if (IsMt5 && _mt5 != null)
             {
+                try { _mt5.Subscribe(symbol); } catch { }
                 var mq = _mt5.GetQuote(symbol);
                 if (mq != null)
                 {
                     var pipMult = symbol.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
                     var spread = Math.Round((mq.Ask - mq.Bid) * pipMult, 1);
+                    // Also refresh _quotes cache with this live price
+                    _quotes[symbol] = new QuoteData(mq.Bid, mq.Ask, spread, DateTime.UtcNow);
                     return new { bid = mq.Bid, ask = mq.Ask, spread };
                 }
             }
             else if (_mt4 != null)
             {
+                try { _mt4.Subscribe(symbol); } catch { }
                 var mq = _mt4.GetQuote(symbol);
                 if (mq != null)
                 {
@@ -1049,6 +1110,8 @@ public class MtAccount
                     var bid = (double)mq.Bid;
                     var ask = (double)mq.Ask;
                     var spread = Math.Round((ask - bid) * pipMult, 1);
+                    // Also refresh _quotes cache with this live price
+                    _quotes[symbol] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
                     return new { bid, ask, spread };
                 }
             }
@@ -1107,9 +1170,15 @@ public class MtAccount
             {
                 var orderType = req.Side.Equals("buy", StringComparison.OrdinalIgnoreCase)
                     ? mtapi.mt5.OrderType.Buy : mtapi.mt5.OrderType.Sell;
+                    
+                if (!string.IsNullOrEmpty(req.Type))
+                {
+                    if (req.Type.Equals("BuyLimit", StringComparison.OrdinalIgnoreCase)) orderType = mtapi.mt5.OrderType.BuyLimit;
+                    else if (req.Type.Equals("SellLimit", StringComparison.OrdinalIgnoreCase)) orderType = mtapi.mt5.OrderType.SellLimit;
+                }
 
                 var quote = _mt5.GetQuote(req.Symbol);
-                double price = orderType == mtapi.mt5.OrderType.Buy ? (quote?.Ask ?? 0) : (quote?.Bid ?? 0);
+                double price = req.Price ?? (orderType == mtapi.mt5.OrderType.Buy ? (quote?.Ask ?? 0) : (quote?.Bid ?? 0));
 
                 mtapi.mt5.Order? order = null;
                 var policies = new[] {
@@ -1156,8 +1225,14 @@ public class MtAccount
                 var op = req.Side.Equals("buy", StringComparison.OrdinalIgnoreCase)
                     ? TradingAPI.MT4Server.Op.Buy : TradingAPI.MT4Server.Op.Sell;
 
+                if (!string.IsNullOrEmpty(req.Type))
+                {
+                    if (req.Type.Equals("BuyLimit", StringComparison.OrdinalIgnoreCase)) op = TradingAPI.MT4Server.Op.BuyLimit;
+                    else if (req.Type.Equals("SellLimit", StringComparison.OrdinalIgnoreCase)) op = TradingAPI.MT4Server.Op.SellLimit;
+                }
+
                 var quote = _mt4.GetQuote(req.Symbol);
-                double price = op == TradingAPI.MT4Server.Op.Buy ? (double)(quote?.Ask ?? 0) : (double)(quote?.Bid ?? 0);
+                double price = req.Price ?? (op == TradingAPI.MT4Server.Op.Buy ? (double)(quote?.Ask ?? 0) : (double)(quote?.Bid ?? 0));
 
                 var order = _mt4Order.OrderSend(req.Symbol, op, req.Lots, price, 100, 0, 0,
                     req.Comment, 0, DateTime.MinValue);
@@ -1360,6 +1435,83 @@ public class MtAccount
         }
     }
 
+    public object ModifyPosition(ModifyRequest req)
+    {
+        try
+        {
+            if (IsMt5 && _mt5 != null)
+            {
+                var openedOrders = _mt5.GetOpenedOrders();
+                bool exists = false;
+                string actualSymbol = req.Symbol;
+                mtapi.mt5.OrderType actualType = req.Side.Equals("buy", StringComparison.OrdinalIgnoreCase)
+                    ? mtapi.mt5.OrderType.Buy : mtapi.mt5.OrderType.Sell;
+                double openPrice = 0.0;
+
+                if (openedOrders != null)
+                {
+                    foreach (var o in openedOrders)
+                    {
+                        if (o.Ticket == req.Ticket)
+                        {
+                            exists = true;
+                            actualSymbol = o.Symbol;
+                            actualType = o.OrderType;
+                            openPrice = o.OpenPrice;
+                            break;
+                        }
+                    }
+                }
+                if (!exists) return new { success = false, error = "Ticket not found" };
+                
+                double targetPrice = req.Price ?? openPrice;
+
+                _mt5.OrderModify(req.Ticket, actualSymbol, req.Lots, targetPrice, actualType, req.SL ?? 0.0, req.TP ?? 0.0, 0, 0.0, new mtapi.mt5.Expiration(), "");
+                
+                PushPositions();
+                return new { success = true, ticket = req.Ticket };
+            }
+            else if (_mt4 != null && _mt4Order != null)
+            {
+                var openedOrders = _mt4.GetOpenedOrders();
+                bool exists = false;
+                string actualSymbol = req.Symbol;
+                TradingAPI.MT4Server.Op actualType = req.Side.Equals("buy", StringComparison.OrdinalIgnoreCase)
+                    ? TradingAPI.MT4Server.Op.Buy : TradingAPI.MT4Server.Op.Sell;
+                double openPrice = 0.0;
+                    
+                if (openedOrders != null)
+                {
+                    foreach (var o in openedOrders)
+                    {
+                        if (o.Ticket == req.Ticket)
+                        {
+                            exists = true;
+                            actualSymbol = o.Symbol;
+                            actualType = o.Type;
+                            openPrice = o.OpenPrice;
+                            break;
+                        }
+                    }
+                }
+                if (!exists) return new { success = false, error = "Ticket not found" };
+
+                double targetPrice = req.Price ?? openPrice;
+
+                _mt4Order.OrderModify((int)req.Ticket, actualSymbol, actualType, req.Lots, targetPrice, req.SL ?? 0.0, req.TP ?? 0.0, DateTime.MinValue);
+                
+                PushPositions();
+                return new { success = true, ticket = req.Ticket };
+            }
+            return new { success = false, error = "Not connected" };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("[{Id}] ModifyPosition error: {Err}", Config.Id, ex.Message);
+            return new { success = false, error = ex.Message };
+        }
+    }
+
     // ─── Deal History ──────────────────────────────────────────────────────
     public object? GetDealHistory(long fromTs, long toTs, bool excludeBalance = true, string[]? feeKeywords = null)
     {
@@ -1534,7 +1686,7 @@ public class MtAccount
 // Data Models
 // ═══════════════════════════════════════════════════════════════════════════
 
-public record QuoteData(double Bid, double Ask, double Spread);
+public record QuoteData(double Bid, double Ask, double Spread, DateTime ReceivedAt);
 
 public class PositionData
 {
