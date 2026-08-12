@@ -253,6 +253,8 @@ class MtBridgeAccount:
         self._reconnect_attempt = 0
         self._reconnect_delay = 5
         self._empty_reads = 0
+        self._desync_stable_count = 0   # consecutive polls with same eq-bal gap
+        self._desync_stable_delta = 0.0  # last observed gap
 
     @property
     def connected(self):
@@ -367,8 +369,9 @@ class MtBridgeAccount:
             dd.setdefault("ea_account_info", {})[aid] = {}
 
         acct = dd["ea_account_info"][aid]
-        credit = info.get("credit", 0)
+        credit = info.get("credit", 0.0)
         acct["balance"] = info.get("balance", 0)
+        acct["credit"] = credit           # persist so desync guard can read it
         acct["equity"] = info.get("equity", 0) - credit
         acct["margin"] = info.get("margin", 0)
         acct["free_margin"] = info.get("free_margin", 0)
@@ -377,7 +380,6 @@ class MtBridgeAccount:
         # Safely compute fallback PNL (avoid 0 - 112000 = -112000 glitches)
         eq = info.get("equity", 0)
         bal = info.get("balance", 0)
-        credit = info.get("credit", 0)
         if eq > 0 and bal > 0:
             acct["total_pnl"] = round(eq - bal - credit, 2)
         else:
@@ -454,15 +456,60 @@ class MtBridgeAccount:
                              self.account_id)
                 return
             
-            # If connected but equity != balance, the broker is still syncing positions.
+            # If connected but equity != balance+credit, broker may still be syncing.
+            # However, if the bridge doesn't expose a credit field, accounts with a
+            # permanent broker credit line will show a stable, non-zero gap forever.
+            # Strategy: if we see the same gap for _STABLE_THRESH consecutive polls
+            # (~2.5 s at 0.5 s per poll), treat it as a permanent inferred credit and
+            # stop blocking position pushes.
+            _STABLE_THRESH = 120  # 120 polls × 0.5 s = ~60 s before concluding it's a permanent credit
             info = self.dd.get("ea_account_info", {}).get(self.account_id, {})
-            eq = info.get("equity", 0)
+            eq  = info.get("equity", 0)
             bal = info.get("balance", 0)
-            credit = info.get("credit", 0)
-            if eq > 0 and bal > 0 and abs(eq - bal - credit) > 1.0:
-                logger.warning("[%s] _push_positions: rejecting empty positions array because equity (%.2f) != balance (%.2f) + credit (%.2f). Broker is likely still syncing.", self.account_id, eq, bal, credit)
-                info["_positions_desync"] = True
-                return
+            # Also account for any inferred credit already stabilised in a prior run
+            inferred_credit = info.get("inferred_credit", 0.0)
+            net_eq = eq - inferred_credit
+            if eq > 0 and bal > 0 and abs(net_eq - bal) > 1.0:
+                delta = round(eq - bal, 2)  # raw gap including any existing inferred credit
+                if abs(delta - self._desync_stable_delta) < 1.0:
+                    # Same gap as last poll — increment stability counter
+                    self._desync_stable_count += 1
+                else:
+                    # Gap changed — reset (genuine transient sync)
+                    self._desync_stable_count = 1
+                    self._desync_stable_delta = delta
+
+                if self._desync_stable_count >= _STABLE_THRESH:
+                    # Gap has been constant for N polls → it's a permanent credit offset,
+                    # not a broker sync delay.  Record it and let the position push proceed.
+                    if abs(info.get("inferred_credit", 0.0) - delta) > 1.0:
+                        logger.info(
+                            "[%s] _push_positions: stable equity-balance gap detected "
+                            "(%.2f for %d polls) — treating as broker credit. "
+                            "Storing as inferred_credit and resuming normal operation.",
+                            self.account_id, delta, self._desync_stable_count
+                        )
+                        info["inferred_credit"] = delta
+                    info["_positions_desync"] = False
+                    # Fall through — allow the position push
+                else:
+                    # Throttle: only log every 10 polls (~5 s) to avoid log spam
+                    if self._desync_stable_count % 10 == 1:
+                        credit_stored = info.get("credit", 0)
+                        logger.warning(
+                            "[%s] _push_positions: rejecting empty positions array — "
+                            "equity (%.2f) != balance (%.2f) + credit (%.2f) "
+                            "[inferred_credit=%.2f, stable_count=%d/%d]. "
+                            "Broker is likely still syncing.",
+                            self.account_id, eq, bal, credit_stored,
+                            inferred_credit, self._desync_stable_count, _STABLE_THRESH
+                        )
+                    info["_positions_desync"] = True
+                    return
+            else:
+                # Gap is within tolerance (or zero) — reset stability tracker
+                self._desync_stable_count = 0
+                self._desync_stable_delta = 0.0
 
             # Debounce: MT4/MT5 can briefly report 0 positions and eq==bal during terminal restart
             # before it finishes syncing trade history. We require 3 consecutive polls (1.5s) to confirm.
@@ -1670,13 +1717,25 @@ class MtBridgeManager:
             self.accounts[account_id] = acct
 
     def save_config(self):
-        """Save config â€” delegates to bridge."""
+        """Save config — delegates to bridge."""
+        if not self.accounts:
+            config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
+            if os.path.exists(config_path) and os.path.getsize(config_path) > 10:
+                logger.warning("MtBridgeManager.save_config: self.accounts is empty, refusing to overwrite non-empty %s", config_path)
+                return
         # 1. Write JSON directly from Python -- authoritative on restart
         config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
         _configs = {aid: a.config for aid, a in self.accounts.items()}
         try:
-            import tempfile as _tmpfile
+            import tempfile as _tmpfile, shutil as _shutil
             _dir = os.path.dirname(os.path.abspath(config_path))
+            # Auto-backup: snapshot current file to .bak before overwriting.
+            _bak = config_path + ".bak"
+            if os.path.exists(config_path) and os.path.getsize(config_path) > 10:
+                try:
+                    _shutil.copy2(config_path, _bak)
+                except Exception as _be:
+                    logger.warning("MtBridgeManager.save_config: failed to write backup: %s", _be)
             with _tmpfile.NamedTemporaryFile("w", dir=_dir, delete=False, suffix=".tmp") as _tf:
                 json.dump(_configs, _tf, indent=2)
                 _tmp = _tf.name

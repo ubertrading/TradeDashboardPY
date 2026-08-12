@@ -2577,6 +2577,84 @@ def _log_event(session_id, account, event, detail=""):
     if session_id and event in _TRADE_ALERT_EVENTS:
         _send_trade_alert(session_id, entry)
 
+def _get_live_position_count(account, session):
+    """
+    Returns the count of live open positions ON THE BROKER that belong to THIS session for `account`.
+    Primary check intersects session fill tickets with live broker open tickets (exact session isolation).
+    Returns None if live position data is unavailable.
+    """
+    try:
+        now_ts = time.time()
+        live_tickets = set()
+        live_pos_list = []
+        is_netting = False
+        data_available = False
+
+        # 1. Query MT Direct Manager
+        if mt_direct_manager and hasattr(mt_direct_manager, "accounts") and account in mt_direct_manager.accounts:
+            acct_obj = mt_direct_manager.accounts.get(account)
+            if acct_obj and hasattr(acct_obj, "get_positions"):
+                live_pos_list = acct_obj.get_positions() or []
+                data_available = True
+                for p in live_pos_list:
+                    t = p.get("ticket") or p.get("id")
+                    if t:
+                        live_tickets.add(_normalize_ticket(t))
+        # 2. Query EA polled / general account info cache
+        else:
+            ainfo = ea_account_info.get(account, {}) or account_info.get(account, {})
+            if ainfo:
+                last_upd = ainfo.get("last_update", 0)
+                if last_upd > 0 and (now_ts - last_upd) < 30:
+                    data_available = True
+                    is_netting = ainfo.get("netting_mode", False)
+                    open_tkts_raw = ainfo.get("open_tickets")
+                    if open_tkts_raw is not None:
+                        live_tickets = set(_normalize_ticket(t) for t in open_tkts_raw)
+
+        if not data_available:
+            return None
+
+        if is_netting:
+            return _get_net_open(session, account, ea_account_info)
+
+        # 3. Intersect session fills with live broker tickets (EXACT session-confirmed open count)
+        close_set = set(
+            _normalize_ticket(f["ticket"])
+            for f in session.get("close_fills", [])
+            if f.get("account") == account
+        )
+
+        session_open_count = 0
+        session_fills_exist = False
+        for f in session.get("fills", []):
+            if f.get("account") == account:
+                session_fills_exist = True
+                norm_t = _normalize_ticket(f.get("ticket"))
+                if norm_t not in close_set and norm_t in live_tickets:
+                    session_open_count += 1
+
+        if session_fills_exist:
+            return session_open_count
+
+        # Fallback if session has no fills recorded yet: count live positions matching symbol & comment
+        side_pair = (session.get("sides", {}).get(account, {}).get("pair") or session.get("pair", "")).upper()
+        comment = (session.get("sides", {}).get(account, {}).get("comment") or session.get("comment", ""))
+        fallback_count = 0
+        for p in live_pos_list:
+            p_sym = str(p.get("symbol", "")).upper()
+            p_cmt = str(p.get("comment", ""))
+            sym_match = not side_pair or p_sym == side_pair or p_sym.startswith(side_pair)
+            cmt_match = bool(comment and comment in p_cmt)
+            if sym_match and cmt_match:
+                fallback_count += 1
+        return fallback_count
+
+    except Exception as e:
+        print(f"[LIVE-POS-CHECK] Query error for {account}: {e}")
+
+    return None
+
 # ─── Shared cycle state machine helpers ─────────────────────────────────────
 def _cycle_get_account(session, account):
     """Check if account is the cycling account for this session. Returns True if yes."""
@@ -7635,18 +7713,36 @@ def trade_result():
                                 session["action"] = "monitor"
                                 session["cycle_progress"] = {}
                                 
-                                # Auto-rollback on cycle fail
-                                my_filled = session.get("filled", {}).get(account, 0)
+                                # Auto-rollback on cycle fail (with Position Reality Check)
+                                acct_live = _get_live_position_count(account, session)
                                 for other_acc in session.get("sides", {}):
                                     if other_acc == account:
                                         continue
-                                    other_filled = session.get("filled", {}).get(other_acc, 0)
-                                    if other_filled > my_filled:
-                                        diff = other_filled - my_filled
-                                        rb = session.setdefault("rollback_needed", {})
-                                        rb[other_acc] = rb.get(other_acc, 0) + diff
-                                        _log_event(session_id, other_acc, "rollback_triggered",
-                                                   f"Cycle error on {account} - scheduling {diff} rollback close(s) on {other_acc}")
+                                    other_live = _get_live_position_count(other_acc, session)
+                                    if acct_live is not None and other_live is not None:
+                                        if other_live > acct_live:
+                                            diff = other_live - acct_live
+                                            max_safe_rb = max(1, session.get("filled", {}).get(other_acc, 0), session.get("total_positions", 1))
+                                            diff = min(diff, max_safe_rb)
+                                            rb = session.setdefault("rollback_needed", {})
+                                            rb[other_acc] = rb.get(other_acc, 0) + diff
+                                            _log_event(session_id, other_acc, "rollback_triggered",
+                                                       f"Cycle error on {account} — live imbalance: {other_acc} ({other_live}) vs {account} ({acct_live}). Scheduling {diff} rollback close(s) on {other_acc}")
+                                        else:
+                                            print(f"[ROLLBACK-SKIP] Cycle error on {account}, but live open positions are intact ({other_live} vs {acct_live}). Skipping rollback.")
+                                            _log_event(session_id, account, "rollback_skipped",
+                                                       f"Cycle error on {account}, but live open positions are intact: {other_acc} ({other_live}) vs {account} ({acct_live}). Skipping rollback.")
+                                    else:
+                                        my_filled = session.get("filled", {}).get(account, 0)
+                                        other_filled = session.get("filled", {}).get(other_acc, 0)
+                                        if other_filled > my_filled:
+                                            diff = other_filled - my_filled
+                                            max_safe_rb = max(1, other_filled, session.get("total_positions", 1))
+                                            diff = min(diff, max_safe_rb)
+                                            rb = session.setdefault("rollback_needed", {})
+                                            rb[other_acc] = rb.get(other_acc, 0) + diff
+                                            _log_event(session_id, other_acc, "rollback_triggered",
+                                                       f"Cycle error on {account} — scheduling {diff} rollback close(s) on {other_acc} (fallback counter check)")
 
                                 session["cycle_fail_ts"] = time.time()  # Cooldown: suppress hedge monitor for 30s
                                 _save_sessions()
@@ -7677,18 +7773,37 @@ def trade_result():
 
                 if should_pause and session.get("action") == "open":
                     sides = session.get("sides", {})
-                    my_filled = session["filled"].get(account, 0)
+                    acct_live_pos = _get_live_position_count(account, session)
+
                     for other_acc in sides:
                         if other_acc == account:
                             continue
-                        other_filled = session["filled"].get(other_acc, 0)
-                        if other_filled > my_filled:
-                            # Other side has more fills — needs rollback
-                            diff = other_filled - my_filled
-                            rb = session.setdefault("rollback_needed", {})
-                            rb[other_acc] = rb.get(other_acc, 0) + diff
-                            _log_event(session_id, other_acc, "rollback_triggered",
-                                       f"Side error on {account} — scheduling {diff} rollback close(s) on {other_acc}")
+                        other_live_pos = _get_live_position_count(other_acc, session)
+
+                        # ── Position Reality Check ──────────────────────────────────────
+                        # Verify actual open positions on broker before triggering rollback.
+                        # Compare live open position count of other_acc vs account.
+                        if acct_live_pos is not None and other_live_pos is not None:
+                            if other_live_pos > acct_live_pos:
+                                diff = other_live_pos - acct_live_pos
+                                rb = session.setdefault("rollback_needed", {})
+                                rb[other_acc] = rb.get(other_acc, 0) + diff
+                                _log_event(session_id, other_acc, "rollback_triggered",
+                                           f"Side error on {account} — live imbalance: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Scheduling {diff} rollback close(s) on {other_acc}")
+                            else:
+                                print(f"[ROLLBACK-SKIP] Error on {account}, but live open positions show hedge is intact: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Skipping rollback.")
+                                _log_event(session_id, account, "rollback_skipped",
+                                           f"Broker error on {account}, but live open positions are intact: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Rollback suppressed.")
+                        else:
+                            # Fallback to fill counters if live positions could not be queried
+                            my_filled = session["filled"].get(account, 0)
+                            other_filled = session["filled"].get(other_acc, 0)
+                            if other_filled > my_filled:
+                                diff = other_filled - my_filled
+                                rb = session.setdefault("rollback_needed", {})
+                                rb[other_acc] = rb.get(other_acc, 0) + diff
+                                _log_event(session_id, other_acc, "rollback_triggered",
+                                           f"Side error on {account} — scheduling {diff} rollback close(s) on {other_acc} (fallback counter check)")
                     # Switch to monitor to allow auto-rebalance to execute
                     session["action"] = "monitor"
                     session["status"] = "active"
@@ -10532,6 +10647,40 @@ body {
   outline: none; border-color: var(--accent);
 }
 
+/* Searchable combobox */
+.acct-combo { position: relative; }
+.acct-combo-input {
+  width: 100%; padding: 9px 32px 9px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); font-size: 0.9rem; font-family: inherit;
+  transition: border-color 0.2s; box-sizing: border-box; cursor: pointer;
+}
+.acct-combo-input:focus { outline: none; border-color: var(--accent); }
+.acct-combo-arrow {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; color: var(--text2); font-size: 0.75rem;
+}
+.acct-combo-list {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 9999;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-height: 220px; overflow-y: auto;
+  display: none;
+}
+.acct-combo-list.open { display: block; }
+.acct-combo-item {
+  padding: 8px 12px; cursor: pointer; font-size: 0.85rem;
+  color: var(--text); border-bottom: 1px solid rgba(255,255,255,0.04);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.acct-combo-item:last-child { border-bottom: none; }
+.acct-combo-item:hover, .acct-combo-item.highlighted {
+  background: var(--accent); color: #fff;
+}
+.acct-combo-item.placeholder-item { color: var(--text2); font-style: italic; }
+.acct-combo-no-results {
+  padding: 10px 12px; font-size: 0.82rem; color: var(--text2); text-align: center;
+}
+
 /* Sides config */
 .sides-config {
   display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
@@ -12174,11 +12323,21 @@ body {
       </div>
       <div class="form-group">
         <label>Account 1</label>
-        <select id="sAcct1"><option value="">— select account —</option></select>
+        <div class="acct-combo" id="sAcct1Combo">
+          <input type="text" class="acct-combo-input" id="sAcct1Input" placeholder="— type to search account —" autocomplete="off">
+          <span class="acct-combo-arrow">▼</span>
+          <input type="hidden" id="sAcct1">
+          <ul class="acct-combo-list" id="sAcct1List"></ul>
+        </div>
       </div>
       <div class="form-group">
         <label>Account 2</label>
-        <select id="sAcct2"><option value="">— select account —</option></select>
+        <div class="acct-combo" id="sAcct2Combo">
+          <input type="text" class="acct-combo-input" id="sAcct2Input" placeholder="— type to search account —" autocomplete="off">
+          <span class="acct-combo-arrow">▼</span>
+          <input type="hidden" id="sAcct2">
+          <ul class="acct-combo-list" id="sAcct2List"></ul>
+        </div>
       </div>
     </div>
     <div class="btn-group" style="margin-top:16px;">
@@ -12259,6 +12418,26 @@ body {
           <button class="pos-tab-btn" data-ptab="ptab-closed" onclick="switchPosTab('ptab-closed')">Closed Deals</button>
           <button class="pos-tab-btn" data-ptab="ptab-pending" onclick="switchPosTab('ptab-pending')">Pending</button>
           <button class="pos-tab-btn" data-ptab="ptab-rejected" onclick="switchPosTab('ptab-rejected')">Rejected</button>
+        </div>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+          <label style="font-size:0.75rem;color:var(--text2);display:flex;align-items:center;gap:4px;">
+            Sort:
+            <select id="posSortSelect" onchange="setPosSortOrder(this.value)" style="padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.72rem;cursor:pointer;">
+              <option value="latest">Latest to Earliest</option>
+              <option value="earliest">Earliest to Latest</option>
+            </select>
+          </label>
+          <label style="font-size:0.75rem;color:var(--text2);display:flex;align-items:center;gap:4px;">
+            Limit:
+            <select id="posLimitSelect" onchange="setPosLimit(this.value)" style="padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.72rem;cursor:pointer;">
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <span id="posCountBadge" style="font-size:0.72rem;color:var(--text2);font-weight:500;"></span>
         </div>
       </div>
 
@@ -13254,10 +13433,36 @@ function switchPosTab(tabId) {
   const btn = document.querySelector(`#posTabNav .pos-tab-btn[data-ptab="${tabId}"]`);
   if (btn) btn.classList.add('active');
   localStorage.setItem('activePosTab', tabId);
+  renderOpenedDeals();
+  if (typeof renderClosedDeals === 'function') renderClosedDeals();
 }
 
-// ─── Positions pane collapse ────────────────────────────────────────────
+// ─── Positions pane collapse & sorting/limit state ──────────────────────
 let positionsPaneCollapsed = localStorage.getItem('positionsPaneCollapsed') === 'true';
+let posSortOrder = localStorage.getItem('posSortOrder') || 'latest';
+let posLimit = localStorage.getItem('posLimit') || '100';
+
+function updatePosControlsUI() {
+  const sortSel = document.getElementById('posSortSelect');
+  if (sortSel && sortSel.value !== posSortOrder) sortSel.value = posSortOrder;
+  const limitSel = document.getElementById('posLimitSelect');
+  if (limitSel && limitSel.value !== posLimit) limitSel.value = posLimit;
+}
+
+function setPosSortOrder(order) {
+  posSortOrder = order;
+  localStorage.setItem('posSortOrder', order);
+  renderOpenedDeals();
+  if (typeof renderClosedDeals === 'function') renderClosedDeals();
+}
+
+function setPosLimit(limit) {
+  posLimit = limit;
+  localStorage.setItem('posLimit', limit);
+  renderOpenedDeals();
+  if (typeof renderClosedDeals === 'function') renderClosedDeals();
+}
+
 (function initPosCollapse() {
   // Apply saved state on load
   if (positionsPaneCollapsed) {
@@ -13285,6 +13490,7 @@ function togglePositionsPane() {
 function renderOpenedDeals() {
   // Skip rendering when pane is collapsed to save CPU
   if (positionsPaneCollapsed) return;
+  updatePosControlsUI();
   const tbody = document.getElementById('openedDealsBody');
   if (!tbody) return;
   // Gather deals from sessions belonging to current strategy
@@ -13395,6 +13601,7 @@ function renderOpenedDeals() {
         }
       }
       dealPairs.push({
+        ts_epoch: Math.max(t1epoch || 0, t2epoch || 0),
         sessionId: s.id,
         ticket1: f1 ? f1.ticket : null,
         ticket2: f2 ? f2.ticket : null,
@@ -13426,10 +13633,45 @@ function renderOpenedDeals() {
 
   if (!dealPairs.length) {
     tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No open deals</td></tr>';
+    const countBadge = document.getElementById('posCountBadge');
+    if (countBadge && document.getElementById('ptab-opened')?.classList.contains('active')) {
+      countBadge.textContent = '(0)';
+    }
     return;
   }
 
-  tbody.innerHTML = dealPairs.map(d => {
+  // Sort dealPairs based on user setting
+  if (posSortOrder === 'latest') {
+    dealPairs.sort((a, b) => {
+      const diff = (b.ts_epoch || 0) - (a.ts_epoch || 0);
+      if (diff !== 0) return diff;
+      return (b.time1 || '').localeCompare(a.time1 || '');
+    });
+  } else {
+    dealPairs.sort((a, b) => {
+      const diff = (a.ts_epoch || 0) - (b.ts_epoch || 0);
+      if (diff !== 0) return diff;
+      return (a.time1 || '').localeCompare(b.time1 || '');
+    });
+  }
+
+  const totalOpenCount = dealPairs.length;
+  let displayPairs = dealPairs;
+  if (posLimit !== 'all') {
+    const limitNum = parseInt(posLimit) || 100;
+    displayPairs = dealPairs.slice(0, limitNum);
+  }
+
+  const countBadge = document.getElementById('posCountBadge');
+  if (countBadge && document.getElementById('ptab-opened')?.classList.contains('active')) {
+    if (displayPairs.length < totalOpenCount) {
+      countBadge.textContent = `(${displayPairs.length} of ${totalOpenCount})`;
+    } else {
+      countBadge.textContent = `(${totalOpenCount})`;
+    }
+  }
+
+  tbody.innerHTML = displayPairs.map(d => {
     const profitClass = typeof d.profit === 'number' ? (d.profit >= 0 ? 'profit-pos' : 'profit-neg') : '';
     const profitVal = typeof d.profit === 'number' ? d.profit.toFixed(1) : d.profit;
     return `<tr class="deal-row-top">
@@ -13463,6 +13705,7 @@ function renderOpenedDeals() {
 function renderClosedDeals() {
   // Skip rendering when pane is collapsed to save CPU
   if (positionsPaneCollapsed) return;
+  updatePosControlsUI();
   const tbody = document.getElementById('closedDealsBody');
   if (!tbody) return;
   const stratSessions = sessions_cache.filter(s => s.strategy_id === currentStrategyId);
@@ -13523,6 +13766,14 @@ function renderClosedDeals() {
       const op2 = o2 && o2.open_price != null ? o2.open_price : (o2 && o2.price != null ? o2.price : null);
       const openTime1 = (c1 && c1.open_ts) ? c1.open_ts : (o1 && o1 !== c1 ? o1.ts : null);
       const openTime2 = (c2 && c2.open_ts) ? c2.open_ts : (o2 && o2 !== c2 ? o2.ts : null);
+
+      // Timestamps for sorting
+      const c1epoch = (c1 && c1.ts_epoch) ? c1.ts_epoch : 0;
+      const c2epoch = (c2 && c2.ts_epoch) ? c2.ts_epoch : 0;
+      const o1epoch = (o1 && o1.ts_epoch) ? o1.ts_epoch : 0;
+      const o2epoch = (o2 && o2.ts_epoch) ? o2.ts_epoch : 0;
+      const tsEpoch = Math.max(c1epoch, c2epoch) || Math.max(o1epoch, o2epoch);
+
       // Calculate realized P&L: for each side, (close - open) for buy, (open - close) for sell
       let profit = '-';
       const s1act = (side1.action || 'sell').toLowerCase();
@@ -13569,6 +13820,7 @@ function renderClosedDeals() {
         statusLabel = '<span style="color:#f39c12;font-weight:700;">CYCLE</span>';
       }
       dealRows.push({
+        ts_epoch: tsEpoch,
         pairLabel: s.pair,
         session1: accs[0], session2: accs[1],
         side1Action: (side1.action || 'buy').toUpperCase(),
@@ -13593,10 +13845,45 @@ function renderClosedDeals() {
 
   if (!dealRows.length) {
     tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px;">No closed deals</td></tr>';
+    const countBadge = document.getElementById('posCountBadge');
+    if (countBadge && document.getElementById('ptab-closed')?.classList.contains('active')) {
+      countBadge.textContent = '(0)';
+    }
     return;
   }
 
-  tbody.innerHTML = dealRows.map(d => {
+  // Sort dealRows based on user setting
+  if (posSortOrder === 'latest') {
+    dealRows.sort((a, b) => {
+      const diff = (b.ts_epoch || 0) - (a.ts_epoch || 0);
+      if (diff !== 0) return diff;
+      return (b.closeTime1 || '').localeCompare(a.closeTime1 || '');
+    });
+  } else {
+    dealRows.sort((a, b) => {
+      const diff = (a.ts_epoch || 0) - (b.ts_epoch || 0);
+      if (diff !== 0) return diff;
+      return (a.closeTime1 || '').localeCompare(b.closeTime1 || '');
+    });
+  }
+
+  const totalCount = dealRows.length;
+  let displayRows = dealRows;
+  if (posLimit !== 'all') {
+    const limitNum = parseInt(posLimit) || 100;
+    displayRows = dealRows.slice(0, limitNum);
+  }
+
+  const countBadge = document.getElementById('posCountBadge');
+  if (countBadge && document.getElementById('ptab-closed')?.classList.contains('active')) {
+    if (displayRows.length < totalCount) {
+      countBadge.textContent = `(${displayRows.length} of ${totalCount})`;
+    } else {
+      countBadge.textContent = `(${totalCount})`;
+    }
+  }
+
+  tbody.innerHTML = displayRows.map(d => {
     const profitClass = typeof d.profit === 'number' ? (d.profit >= 0 ? 'profit-pos' : 'profit-neg') : '';
     const profitVal = typeof d.profit === 'number' ? d.profit.toFixed(1) : d.profit;
     return `<tr class="deal-row-top">
@@ -13628,29 +13915,135 @@ function renderClosedDeals() {
 }
 
 // ─── Strategy functions ─────────────────────────────────────────────────
+// ─── Searchable combobox helper ─────────────────────────────────────────
+function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
+  const input   = document.getElementById(inputId);
+  const hidden  = document.getElementById(hiddenId);
+  const list    = document.getElementById(listId);
+  const combo   = document.getElementById(comboId);
+
+  // Build label map: value -> display text
+  const labelMap = {};
+  items.forEach(({value, label}) => { labelMap[value] = label; });
+
+  function renderList(filter) {
+    const q = (filter || '').toLowerCase();
+    const filtered = items.filter(({label}) => label.toLowerCase().includes(q));
+    list.innerHTML = '';
+    if (filtered.length === 0) {
+      list.innerHTML = '<li class="acct-combo-no-results">No matches</li>';
+      return;
+    }
+    // Always show blank option when not filtering
+    if (!q) {
+      const blank = document.createElement('li');
+      blank.className = 'acct-combo-item placeholder-item';
+      blank.textContent = '— select account —';
+      blank.addEventListener('mousedown', e => { e.preventDefault(); selectItem('', ''); });
+      list.appendChild(blank);
+    }
+    filtered.forEach(({value, label}) => {
+      const li = document.createElement('li');
+      li.className = 'acct-combo-item';
+      li.textContent = label;
+      li.dataset.value = value;
+      li.addEventListener('mousedown', e => { e.preventDefault(); selectItem(value, label); });
+      list.appendChild(li);
+    });
+  }
+
+  function selectItem(value, label) {
+    hidden.value  = value;
+    input.value   = label;
+    list.classList.remove('open');
+  }
+
+  function openList() {
+    renderList(input.value);
+    list.classList.add('open');
+  }
+
+  input.addEventListener('focus', () => openList());
+  input.addEventListener('click', () => openList());
+
+  input.addEventListener('input', () => {
+    hidden.value = ''; // clear selection until user picks from list
+    renderList(input.value);
+    list.classList.add('open');
+  });
+
+  // Keyboard navigation
+  input.addEventListener('keydown', e => {
+    const items_el = list.querySelectorAll('.acct-combo-item:not(.placeholder-item)');
+    const highlighted = list.querySelector('.acct-combo-item.highlighted');
+    let idx = Array.from(items_el).indexOf(highlighted);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!list.classList.contains('open')) openList();
+      idx = Math.min(idx + 1, items_el.length - 1);
+      items_el.forEach((el, i) => el.classList.toggle('highlighted', i === idx));
+      if (items_el[idx]) items_el[idx].scrollIntoView({block:'nearest'});
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      idx = Math.max(idx - 1, 0);
+      items_el.forEach((el, i) => el.classList.toggle('highlighted', i === idx));
+      if (items_el[idx]) items_el[idx].scrollIntoView({block:'nearest'});
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlighted) { selectItem(highlighted.dataset.value, highlighted.textContent); }
+    } else if (e.key === 'Escape') {
+      list.classList.remove('open');
+    }
+  });
+
+  // Close on outside click
+  document.addEventListener('mousedown', e => {
+    if (!combo.contains(e.target)) list.classList.remove('open');
+  }, true);
+
+  // Reset helper (called when modal opens)
+  combo._reset = () => { input.value = ''; hidden.value = ''; renderList(''); };
+  combo._setItems = (newItems) => {
+    items.length = 0;
+    newItems.forEach(i => items.push(i));
+    Object.keys(labelMap).forEach(k => delete labelMap[k]);
+    newItems.forEach(({value, label}) => { labelMap[value] = label; });
+  };
+}
+
 function showNewStrategyModal() {
   document.getElementById('sStratName').value = '';
-  // Populate account dropdowns from cached data
+  // Build account list
   const allAccounts = [];
   Object.keys(ea_heartbeats_cache).forEach(a => allAccounts.push(a));
   Object.keys(manual_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
+  Object.keys(fix_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
   Object.keys(mt_direct_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
   allAccounts.sort();
-  ['sAcct1','sAcct2'].forEach(selId => {
-    const sel = document.getElementById(selId);
-    sel.innerHTML = '<option value="">— select account —</option>' + allAccounts.map(a => {
-      let lbl = '';
-      if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
-        lbl = manual_accounts_cache[a].group_label;
-      } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
-        lbl = fix_accounts_cache[a].group_label;
-      } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
-        lbl = mt_direct_accounts_cache[a].label;
-      }
-      const display = lbl ? a + ' — ' + lbl : a;
-      return `<option value="${a}">${display}</option>`;
-    }).join('');
+  const items = allAccounts.map(a => {
+    let lbl = '';
+    if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
+      lbl = manual_accounts_cache[a].group_label;
+    } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
+      lbl = fix_accounts_cache[a].group_label;
+    } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
+      lbl = mt_direct_accounts_cache[a].label;
+    }
+    return { value: a, label: lbl ? a + ' \u2014 ' + lbl : a };
   });
+
+  ['1','2'].forEach(n => {
+    const comboId = 'sAcct' + n + 'Combo';
+    const combo = document.getElementById(comboId);
+    if (!combo._reset) {
+      // First open — initialise
+      initAcctCombo(comboId, 'sAcct' + n + 'Input', 'sAcct' + n, 'sAcct' + n + 'List', [...items]);
+    } else {
+      combo._setItems(items);
+      combo._reset();
+    }
+  });
+
   document.getElementById('newStrategyModal').classList.add('active');
 }
 function closeNewStrategyModal() {
@@ -13659,10 +14052,10 @@ function closeNewStrategyModal() {
 
 async function createStrategy() {
   const name = document.getElementById('sStratName').value.trim();
-  const account1 = document.getElementById('sAcct1').value.trim();
-  const account2 = document.getElementById('sAcct2').value.trim();
+  const account1 = document.getElementById('sAcct1').value.trim();   // hidden field
+  const account2 = document.getElementById('sAcct2').value.trim();   // hidden field
   if (!name) { alert('Strategy name is required'); return; }
-  if (!account1 || !account2) { alert('Both accounts are required'); return; }
+  if (!account1 || !account2) { alert('Both accounts are required. Please select from the dropdown.'); return; }
   try {
     const res = await fetch('/api/strategies', {
       method: 'POST',
@@ -19158,18 +19551,36 @@ if __name__ == '__main__':
                                     session["cycle_progress"] = {}
                                     session["cycle_fail_ts"] = time.time()
                                     
-                                    # Auto-rollback on cycle fail
-                                    my_filled = session.get("filled", {}).get(account, 0)
+                                    # Auto-rollback on cycle fail (with Position Reality Check)
+                                    acct_live = _get_live_position_count(account, session)
                                     for other_acc in session.get("sides", {}):
                                         if other_acc == account:
                                             continue
-                                        other_filled = session.get("filled", {}).get(other_acc, 0)
-                                        if other_filled > my_filled:
-                                            diff = other_filled - my_filled
-                                            rb = session.setdefault("rollback_needed", {})
-                                            rb[other_acc] = rb.get(other_acc, 0) + diff
-                                            _log_event(session_id, other_acc, "rollback_triggered",
-                                                       f"Cycle error on {account} (MT-DIRECT) - scheduling {diff} rollback close(s) on {other_acc}")
+                                        other_live = _get_live_position_count(other_acc, session)
+                                        if acct_live is not None and other_live is not None:
+                                            if other_live > acct_live:
+                                                diff = other_live - acct_live
+                                                max_safe_rb = max(1, session.get("filled", {}).get(other_acc, 0), session.get("total_positions", 1))
+                                                diff = min(diff, max_safe_rb)
+                                                rb = session.setdefault("rollback_needed", {})
+                                                rb[other_acc] = rb.get(other_acc, 0) + diff
+                                                _log_event(session_id, other_acc, "rollback_triggered",
+                                                           f"Cycle error on {account} (MT-DIRECT) — live imbalance: {other_acc} ({other_live}) vs {account} ({acct_live}). Scheduling {diff} rollback close(s) on {other_acc}")
+                                            else:
+                                                print(f"[ROLLBACK-SKIP] Cycle error on {account} (MT-DIRECT), but live open positions are intact ({other_live} vs {acct_live}). Skipping rollback.")
+                                                _log_event(session_id, account, "rollback_skipped",
+                                                           f"Cycle error on {account} (MT-DIRECT), but live open positions are intact: {other_acc} ({other_live}) vs {account} ({acct_live}). Skipping rollback.")
+                                        else:
+                                            my_filled = session.get("filled", {}).get(account, 0)
+                                            other_filled = session.get("filled", {}).get(other_acc, 0)
+                                            if other_filled > my_filled:
+                                                diff = other_filled - my_filled
+                                                max_safe_rb = max(1, other_filled, session.get("total_positions", 1))
+                                                diff = min(diff, max_safe_rb)
+                                                rb = session.setdefault("rollback_needed", {})
+                                                rb[other_acc] = rb.get(other_acc, 0) + diff
+                                                _log_event(session_id, other_acc, "rollback_triggered",
+                                                           f"Cycle error on {account} (MT-DIRECT) — scheduling {diff} rollback close(s) on {other_acc} (fallback counter check)")
 
                                     _save_sessions()
                                     _mt_msg = (f"Cycle reopen FAILED after {_mt_retries} attempts on "
@@ -19199,17 +19610,41 @@ if __name__ == '__main__':
 
                     if should_pause and session.get("action") == "open":
                         sides = session.get("sides", {})
-                        my_filled = session["filled"].get(account, 0)
+                        acct_live_pos = _get_live_position_count(account, session)
+
                         for other_acc in sides:
                             if other_acc == account:
                                 continue
-                            other_filled = session["filled"].get(other_acc, 0)
-                            if other_filled > my_filled:
-                                diff = other_filled - my_filled
-                                rb = session.setdefault("rollback_needed", {})
-                                rb[other_acc] = rb.get(other_acc, 0) + diff
-                                _log_event(session_id, other_acc, "rollback_triggered",
-                                           f"Side error on {account} (MT-DIRECT) — scheduling {diff} rollback close(s) on {other_acc}")
+                            other_live_pos = _get_live_position_count(other_acc, session)
+
+                            # ── Position Reality Check ──────────────────────────────────────
+                            # Verify actual open positions on broker before triggering rollback.
+                            # Compare live open position count of other_acc vs account.
+                            if acct_live_pos is not None and other_live_pos is not None:
+                                if other_live_pos > acct_live_pos:
+                                    diff = other_live_pos - acct_live_pos
+                                    max_safe_rb = max(1, session.get("filled", {}).get(other_acc, 0), session.get("total_positions", 1))
+                                    diff = min(diff, max_safe_rb)
+                                    rb = session.setdefault("rollback_needed", {})
+                                    rb[other_acc] = rb.get(other_acc, 0) + diff
+                                    _log_event(session_id, other_acc, "rollback_triggered",
+                                               f"Side error on {account} (MT-DIRECT) — live imbalance: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Scheduling {diff} rollback close(s) on {other_acc}")
+                                else:
+                                    print(f"[ROLLBACK-SKIP] {account} error received (MT-DIRECT), but live open positions show hedge is intact: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Skipping rollback.")
+                                    _log_event(session_id, account, "rollback_skipped",
+                                               f"Broker error on {account} (MT-DIRECT), but live open positions are intact: {other_acc} ({other_live_pos}) vs {account} ({acct_live_pos}). Rollback suppressed.")
+                            else:
+                                # Fallback to fill counters if live positions could not be queried
+                                my_filled = session["filled"].get(account, 0)
+                                other_filled = session["filled"].get(other_acc, 0)
+                                if other_filled > my_filled:
+                                    diff = other_filled - my_filled
+                                    max_safe_rb = max(1, other_filled, session.get("total_positions", 1))
+                                    diff = min(diff, max_safe_rb)
+                                    rb = session.setdefault("rollback_needed", {})
+                                    rb[other_acc] = rb.get(other_acc, 0) + diff
+                                    _log_event(session_id, other_acc, "rollback_triggered",
+                                               f"Side error on {account} (MT-DIRECT) — scheduling {diff} rollback close(s) on {other_acc} (fallback counter check)")
                         session["action"] = "monitor"
                         session["status"] = "active"
                         msg = f"Failed to open matching position on {account} after {max_errors} retries. Switching to monitor to auto-rebalance."

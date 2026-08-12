@@ -1424,6 +1424,24 @@ class MT4DirectAccount:
         """Modify the entry price of a pending limit order."""
         return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
 
+    def get_closed_ticket_price(self, ticket, symbol=""):
+        """Get the actual close execution price of a closed position by ticket."""
+        if not self._connected or not self._order_client:
+            return None
+        try:
+            with _clr_lock:
+                orders = self._order_client.GetClosedOrders(symbol) if hasattr(self._order_client, 'GetClosedOrders') else None
+                if orders:
+                    for o in orders:
+                        t = getattr(o, 'Ticket', 0)
+                        if int(t) == int(ticket):
+                            cp = getattr(o, 'ClosePrice', None)
+                            if cp is not None and float(cp) > 0:
+                                return float(cp)
+        except Exception as e:
+            logger.debug("[%s] MT4 get_closed_ticket_price error for %s: %s", self.account_id, ticket, e)
+        return None
+
     def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
         """Send a pending limit order (BuyLimit/SellLimit).
         Used by OPEN-LIMIT mode."""
@@ -2752,6 +2770,35 @@ class MT5DirectAccount:
             logger.error("[%s] MT5 get_deal_history error: %s", self.account_id, e)
             return None
 
+    def get_closed_ticket_price(self, ticket, symbol=""):
+        """Get the actual close execution price of a closed position by ticket."""
+        if not self._connected or not self._client:
+            return None
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            net_from = now - timedelta(days=2)
+            net_to = now + timedelta(hours=2)
+            with _clr_lock:
+                if hasattr(self._client, 'DownloadOrderHistoryTimeout'):
+                    try:
+                        self._client.DownloadOrderHistoryTimeout = 10000
+                    except Exception:
+                        pass
+                result = self._client.DownloadOrderHistory(net_from, net_to)
+                raw_orders = list(result.Orders) if (result and hasattr(result, 'Orders') and result.Orders) else []
+                target_t = int(ticket)
+                for o in raw_orders:
+                    t = _normalize_ticket(getattr(o, 'Ticket', getattr(o, 'Id', 0)))
+                    pos_id = _normalize_ticket(getattr(o, 'PositionId', 0))
+                    if t == target_t or pos_id == target_t:
+                        cp = getattr(o, 'ClosePrice', getattr(o, 'PriceClose', getattr(o, 'Price', None)))
+                        if cp is not None and float(cp) > 0:
+                            return float(cp)
+        except Exception as e:
+            logger.debug("[%s] MT5 get_closed_ticket_price error for %s: %s", self.account_id, ticket, e)
+        return None
+
     def _on_quote(self, quote):
         """Handle incoming quote from MT5 server."""
         if not _mt5_init_gate.is_set():
@@ -3758,8 +3805,11 @@ class MTDirectManager:
                 configs = json.load(f)
             for acct_id, config in configs.items():
                 self.add_account(acct_id, config, save=False, auto_connect=False)
-            # Persist any inferred types (e.g. mt5 from account_id) back to config
-            self.save_config()
+            # Persist any inferred types (e.g. mt5 from account_id) back to config.
+            # IMPORTANT: save_config() is called AFTER the full loop so a partial
+            # failure mid-loop cannot write a truncated account list to disk.
+            if self.accounts:
+                self.save_config()
             logger.info("Loaded %d MT Direct account(s) from config", len(configs))
             # Serial batch connect — MT4 and MT5 share the CLR thread pool,
             # so connections must be serialized to prevent thread pool
@@ -3813,12 +3863,25 @@ class MTDirectManager:
 
     def save_config(self):
         """Save Direct accounts to config file atomically."""
+        if not self.accounts:
+            if os.path.exists(self.config_path) and os.path.getsize(self.config_path) > 10:
+                logger.warning("MTDirectManager.save_config: self.accounts is empty, refusing to overwrite non-empty %s", self.config_path)
+                return
         configs = {}
         for acct_id, account in self.accounts.items():
             configs[acct_id] = account.config
         try:
-            import tempfile
+            import tempfile, shutil
             dir_name = os.path.dirname(self.config_path)
+            # Auto-backup: snapshot current file to .bak before overwriting.
+            # This ensures a one-step manual recovery is always available without
+            # touching production configs.
+            bak_path = self.config_path + ".bak"
+            if os.path.exists(self.config_path) and os.path.getsize(self.config_path) > 10:
+                try:
+                    shutil.copy2(self.config_path, bak_path)
+                except Exception as bak_e:
+                    logger.warning("MTDirectManager.save_config: failed to write backup: %s", bak_e)
             # Create a temp file in the same directory to ensure it's on the same drive (required for atomic rename)
             with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, suffix='.tmp') as tf:
                 json.dump(configs, tf, indent=2)
@@ -4423,15 +4486,21 @@ class MTDirectManager:
                                 prog.pop("open_fill_received", None)
                                 batch_tickets = [acct_fills[idx + i].get("ticket") for i in range(batch_size) if idx + i < len(acct_fills)]
                                 prog["closed_tickets"] = batch_tickets
+                                batch_close_prices = []
                                 for ticket in batch_tickets:
+                                    actual_p = direct_acct.get_closed_ticket_price(ticket, symbol=pair)
+                                    c_price = actual_p if (actual_p and actual_p > 0) else limit_price
+                                    batch_close_prices.append(c_price)
                                     session.setdefault("close_fills", []).append({
                                         "account": account_id,
                                         "ticket": ticket,
-                                        "price": limit_price,
+                                        "price": c_price,
                                         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                                         "ts_epoch": time.time(),
                                         "external": True,
                                     })
+                                if batch_close_prices:
+                                    prog["last_close_price"] = sum(batch_close_prices) / len(batch_close_prices)
                                 session["cycle_progress"] = prog
                             self.dd["in_flight_commands"].pop((session.get("id", ""), account_id), None)
                         elif any_tp_ok and all_tp_ok:
