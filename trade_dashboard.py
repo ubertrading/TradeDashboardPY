@@ -4303,6 +4303,33 @@ def _run_hedge_monitor_all():
                     elif all(session.get("filled", {}).get(a, 0) == 0 for a in accs):
                         pass  # No fills tracked on any account in this session, skip
                     else:
+                        # ── PRE-EVALUATION GHOST-CLOSE REVERSAL ──
+                        # Run ghost-close reversal for all session accounts before computing net open counts.
+                        # If an unverified external close_fills entry corresponds to a ticket that is STILL OPEN
+                        # at the broker, remove it from close_fills so _broker_confirmed_open gets clean data.
+                        for _a in accs:
+                            _a_info = ea_account_info.get(_a, {})
+                            _a_raw_tks = _a_info.get("open_tickets")
+                            if _a_raw_tks is not None:
+                                _a_ea_open = set(_normalize_ticket(t) for t in _a_raw_tks)
+                                _cf_list = session.get("close_fills", [])
+                                for _cf in list(_cf_list):
+                                    if (_cf.get("account") == _a
+                                            and _cf.get("external") is True
+                                            and not _cf.get("verified", False)
+                                            and _normalize_ticket(_cf.get("ticket")) in _a_ea_open):
+                                        _ghost_t = _normalize_ticket(_cf["ticket"])
+                                        _cf_list.remove(_cf)
+                                        session["closed"][_a] = max(0, session["closed"].get(_a, 0) - 1)
+                                        _fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
+                                                           if f.get("account") == _a
+                                                           and _normalize_ticket(f.get("ticket")) == _ghost_t), 0)
+                                        if _fill_lots:
+                                            _cur_cl = session.get("closed_lots", {}).get(_a, 0.0)
+                                            session.setdefault("closed_lots", {})[_a] = max(0.0, round(_cur_cl - _fill_lots, 4))
+                                        print(f"[GHOST-CLOSE-REVERSAL] acct={_a} ticket={_ghost_t} is in close_fills but broker shows it open — reversed ghost close entry")
+                                        _save_sessions()
+
                         def _broker_confirmed_open(acc):
                             info = ea_account_info.get(acc, {})
                             if (now_ts - info.get("last_update", 0)) > 30:
@@ -4426,6 +4453,25 @@ def _run_hedge_monitor_all():
                                     orphaned = open_session_fills[paired_count:]
                                     tickets_to_close = [_normalize_ticket(f["ticket"]) for f in orphaned[:excess]]
                                     print(f"[HEDGE-REBAL] ticket-match: paired={paired_count} orphaned={len(orphaned)} closing={tickets_to_close}")
+
+                                    # ── CLOSED DEAL HISTORY VERIFICATION ──
+                                    # Verify that missing counterparty positions on min_acc are backed by confirmed closed deals
+                                    min_close_fills = [cf for cf in session.get("close_fills", []) if cf.get("account") == min_acc]
+                                    has_verified = any(cf.get("verified") for cf in min_close_fills)
+                                    if mt_direct_manager and not has_verified:
+                                        min_acct_obj = mt_direct_manager.accounts.get(min_acc)
+                                        if min_acct_obj and hasattr(min_acct_obj, 'get_deal_history') and getattr(min_acct_obj, 'connected', False):
+                                            try:
+                                                deal_hist = min_acct_obj.get_deal_history(0, int(now_ts), exclude_balance=True)
+                                                if deal_hist and isinstance(deal_hist, dict):
+                                                    deals = deal_hist.get("deals") or []
+                                                    if len(deals) > 0:
+                                                        has_verified = True
+                                            except Exception as _e:
+                                                print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
+                                    if not has_verified and len(min_close_fills) == 0:
+                                        print(f"[HEDGE-REBAL] Suppressing rollback for {max_acc} — missing counterparty positions on {min_acc} are unverified in deal history")
+                                        tickets_to_close = []
                                 else:
                                     tickets_to_close = [_normalize_ticket(f["ticket"]) for f in open_session_fills[:excess]]
                                     print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
@@ -6759,7 +6805,9 @@ def _should_issue_command(session, account):
                                         "price": progress.get("close_tp_price"),
                                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "ts_epoch": time.time(),
-                                        "external": True,
+                                        "external": False,
+                                        "cycle": True,
+                                        "verified": True,
                                     })
                                 session["cycle_progress"] = progress
                                 _save_sessions()
