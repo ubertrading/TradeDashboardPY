@@ -5054,8 +5054,19 @@ def _run_hedge_monitor_all():
 
                     # IF mass position drop (>15% or >=5 trades) OR portfolio flat check passes:
                     if is_mass_missing or _portfolio_flat:
-                        # Skip pausing ONLY for imported sessions or if a structural rollback is ALREADY pending
-                        if session.get("imported") or any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides):
+                        # Skip pausing if all missing tickets are already in close_fills for this account.
+                        # This happens after a rebalance close on the paired side: the rollback_closed handler
+                        # records the close and clears rollback_needed, but broker position list lags.
+                        # The next poll sees the tickets missing + rollback_needed=0 → false panic.
+                        _existing_close_tks = set(
+                            _normalize_ticket(f["ticket"])
+                            for f in session.get("close_fills", [])
+                            if f.get("account") == account
+                        )
+                        _all_missing_already_recorded = missing_real and missing_real.issubset(_existing_close_tks)
+                        # Skip pausing for imported sessions, if a structural rollback is ALREADY pending,
+                        # OR if all missing tickets are already tracked in close_fills (rebalance just ran).
+                        if session.get("imported") or any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides) or _all_missing_already_recorded:
                             print(f"[HEDGE-MON] External close detected for imported session {sid[:8]} on {account} (missing={len(missing_real)}/{len(expected_open)}) — recording close without pausing")
                         else:
                             panic_msg = (
@@ -15548,7 +15559,7 @@ function renderInstrumentsTable() {
   const stratSessions = sessions_cache.filter(s => s.strategy_id === currentStrategyId);
   const hashInput = JSON.stringify(stratSessions.map(s => ({
     id: s.id, status: s.status, action: s.action, pair: s.pair, lot_size: s.lot_size,
-    filled: s.filled, closed: s.closed, close_count: s.close_count,
+    filled: s.filled, closed: s.closed, close_count: s.close_count, close_fills: (s.close_fills || []).length,
     curr_diff_open: s.curr_diff_open, curr_diff_close: s.curr_diff_close,
     curr_spread_1: s.curr_spread_1, curr_spread_2: s.curr_spread_2,
     cycle_progress: s.cycle_progress, execution_order: s.execution_order,
@@ -16158,6 +16169,11 @@ function renderSide(session, sideNum) {
       } else {
         let filled = (session.filled && session.filled[acc]) || 0;
         let closed = (session.closed && session.closed[acc]) || 0;
+        // Also count close_fills for this account as an authoritative floor for closed.
+        // After a rebalance, rollback_closed callbacks may not have all fired yet, causing
+        // the closed counter to lag behind reality and showing a higher net count than actual.
+        const closeFillsForAcc = (session.close_fills || []).filter(f => f.account === acc).length;
+        closed = Math.max(closed, closeFillsForAcc);
         
         // Subtract positions that are currently closed but waiting to reopen (pending limit orders)
         const pendingLimitOpens = (session.cycle_limit_open_fills || []).filter(f => f.account === acc).length;
