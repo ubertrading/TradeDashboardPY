@@ -1513,13 +1513,24 @@ def _load_sessions():
                     # action=monitor but rollback_needed may still hold counts from
                     # that cycle. On restart those counts are stale — the hedge
                     # monitor will re-detect any genuine imbalance within seconds.
-                    if s.get("action") == "monitor" and (
-                            s.get("rollback_needed") or s.get("rollback_tickets")):
-                        s["rollback_needed"] = {}
-                        s["rollback_tickets"] = {}
-                        app.logger.info(
-                            "Cleared stale rollback state for monitor session %s "
-                            "(likely from a mid-cycle abort)", sid[:8])
+                    # Migration: deduplicate rollback_tickets and set rollback_needed to exact unique ticket count
+                    for sid_k, s_k in sessions.items():
+                        rb_tks = s_k.get("rollback_tickets", {})
+                        rb_nd = s_k.get("rollback_needed", {})
+                        for acct_k, tk_list in list(rb_tks.items()):
+                            if tk_list:
+                                seen_tks = set()
+                                uniq_list = []
+                                for tk_item in tk_list:
+                                    t_val = tk_item.get("ticket") if isinstance(tk_item, dict) else tk_item
+                                    norm_t = _normalize_ticket(t_val)
+                                    if norm_t not in seen_tks:
+                                        seen_tks.add(norm_t)
+                                        uniq_list.append(tk_item)
+                                rb_tks[acct_k] = uniq_list
+                                rb_nd[acct_k] = len(uniq_list)
+                            else:
+                                rb_nd[acct_k] = 0
                     # Migration: propagate cmd_ts to all fills sharing the same (account, ts) batch timestamp
                     for sid_k, session_dict in sessions.items():
                         fills_list = session_dict.get("fills", [])
@@ -4425,10 +4436,13 @@ def _run_hedge_monitor_all():
                                     if session.get("rollback_user_rejected", {}).get(max_acc):
                                         print(f"[HEDGE-REBAL] Skipping re-queue for {max_acc} — user previously rejected rollback")
                                     else:
-                                        rb = session.setdefault("rollback_needed", {})
-                                        rb[max_acc] = rb.get(max_acc, 0) + len(tickets_to_close)
                                         rb_tickets = session.setdefault("rollback_tickets", {})
-                                        rb_tickets.setdefault(max_acc, []).extend(tickets_to_close)
+                                        existing_tks = set(_normalize_ticket(t) for t in rb_tickets.get(max_acc, []))
+                                        unique_to_add = [t for t in tickets_to_close if _normalize_ticket(t) not in existing_tks]
+                                        if unique_to_add:
+                                            rb_tickets.setdefault(max_acc, []).extend(unique_to_add)
+                                            rb = session.setdefault("rollback_needed", {})
+                                            rb[max_acc] = len(rb_tickets[max_acc])
                                         rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
                                         session["imbalance_rebal_ts"] = now_ts
 
@@ -4448,6 +4462,16 @@ def _run_hedge_monitor_all():
                             session.pop("imbalance_rebal_ts", None)
 
             # ── Check each account using ea_account_info ──
+            # KEY GUARD: if any paired account already has rollbacks queued
+            # (from the structural imbalance path above, or a previous cycle),
+            # skip ALL per-account missing-ticket detection for this session.
+            # This prevents the two detection paths from stacking closes on top
+            # of each other for the same manual-close event.
+            if any(session.get("rollback_needed", {}).get(a, 0) > 0
+                   or session.get("rollback_tickets", {}).get(a)
+                   for a in sides):
+                continue
+
             for account in sides:
                 # Get open tickets from ea_account_info (populated by EA poll, MT Direct, FIX)
                 info = ea_account_info.get(account, {})
@@ -5137,12 +5161,14 @@ def _run_hedge_monitor_all():
                     if user_rejected.get(other_acc):
                         print(f"[HEDGE-REBAL] Skipping rollback queue for {other_acc} — user previously rejected rollback")
                         continue
-                    rb = session.setdefault("rollback_needed", {})
-                    rb[other_acc] = rb.get(other_acc, 0) + 1
                     rb_tickets = session.setdefault("rollback_tickets", {})
-                    rb_tickets.setdefault(other_acc, []).append(ticket)
-                    # Store reason so rollback prompt can explain WHY to the user
-                    session.setdefault("rollback_reason", {})[other_acc] = _rebal_reason
+                    existing_tks = set(_normalize_ticket(t) for t in rb_tickets.get(other_acc, []))
+                    norm_t = _normalize_ticket(ticket)
+                    if norm_t not in existing_tks:
+                        rb_tickets.setdefault(other_acc, []).append(ticket)
+                        rb = session.setdefault("rollback_needed", {})
+                        rb[other_acc] = len(rb_tickets[other_acc])
+                        session.setdefault("rollback_reason", {})[other_acc] = _rebal_reason
 
                 _log_event(sid, account, "hedge_rebalance",
                            f"Detected {len(missing_tickets)} externally closed position(s). "
