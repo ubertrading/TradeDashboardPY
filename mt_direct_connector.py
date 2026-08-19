@@ -1021,6 +1021,8 @@ class MT4DirectAccount:
                             'OpenPrice': float(getattr(o, 'OpenPrice', 0)),
                             'OpenTimeRaw': getattr(o, 'OpenTime', None),
                             'OpenTime': str(getattr(o, 'OpenTime', '')),
+                            'TakeProfit': float(getattr(o, 'TakeProfit', getattr(o, 'Tp', getattr(o, 'Takeprofit', 0)))),
+                            'StopLoss': float(getattr(o, 'StopLoss', getattr(o, 'Sl', getattr(o, 'Stoploss', 0)))),
                             'Profit': float(getattr(o, 'Profit', 0)),
                             'Swap': float(getattr(o, 'Swap', 0)),
                         })
@@ -1424,6 +1426,22 @@ class MT4DirectAccount:
         """Modify the entry price of a pending limit order."""
         return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
 
+    def delete_pending_order(self, ticket):
+        """Delete/cancel a pending limit order on MT4."""
+        if not self._connected or not self._order_client:
+            return False, "Not connected"
+        try:
+            ticket_val = int(ticket)
+            if hasattr(self._order_client, "OrderDelete"):
+                with _clr_lock:
+                    res = self._order_client.OrderDelete(ticket_val)
+                logger.info("[%s] MT4 pending order deleted: ticket=%s res=%s", self.account_id, ticket, res)
+                return True, "Deleted"
+        except Exception as e:
+            logger.error("[%s] MT4 delete_pending_order error: %s", self.account_id, e)
+            return False, str(e)
+        return False, "OrderDelete not available"
+
     def get_closed_ticket_price(self, ticket, symbol=""):
         """Get the actual close execution price of a closed position by ticket."""
         if not self._connected or not self._order_client:
@@ -1762,6 +1780,8 @@ class MT5DirectAccount:
         # Per-symbol quote cache — populated by _push_account_info (CLR-safe thread),
         # read by get_symbol_info (Flask thread, no CLR calls)
         self._symbol_cache = {}  # {"USDCHF": {"bid": ..., "ask": ..., "spread": ...}}
+        self._partial_read_count = 0
+        self._empty_reads = 0
 
     @property
     def connected(self):
@@ -2350,6 +2370,30 @@ class MT5DirectAccount:
         info["last_update"] = time.time()
         self.dd["ea_heartbeats"][self.account_id] = time.time()
 
+    def _confirm_closed_tickets(self, prev_tickets):
+        """Query recent MT4/MT5 order history (last 5 minutes) to verify if previously open tickets were closed on broker."""
+        if not prev_tickets or not self._client or not self._connected:
+            return False
+        try:
+            to_ts = datetime.datetime.utcnow()
+            from_ts = to_ts - datetime.timedelta(minutes=5)
+            raw_orders = list(self._client.DownloadOrderHistory(from_ts, to_ts))
+            closed_tickets = set()
+            for o in raw_orders:
+                ticket = getattr(o, 'Ticket', getattr(o, 'Order', getattr(o, 'TicketId', 0)))
+                if ticket:
+                    closed_tickets.add(ticket)
+                    closed_tickets.add(str(ticket))
+                    if str(ticket).isdigit():
+                        closed_tickets.add(int(ticket))
+            for t in prev_tickets:
+                if t in closed_tickets or str(t) in closed_tickets or (str(t).isdigit() and int(t) in closed_tickets):
+                    logger.info("[%s] _confirm_closed_tickets: confirmed ticket %s closed in history!", self.account_id, t)
+                    return True
+        except Exception as e:
+            logger.debug("[%s] Error checking closed tickets history: %s", self.account_id, e)
+        return False
+
     def _push_positions(self):
         """Push open position tickets into ea_account_info."""
         if not self._client:
@@ -2367,20 +2411,54 @@ class MT5DirectAccount:
             tickets = [o['Ticket'] for o in orders if str(o.get('Type', '')).lower() in active_types]
             logger.warning("[%s] MT5 _push_positions filtered %d orders down to %d tickets", self.account_id, len(orders), len(tickets))
             
-            # Zero-drop guard: if we previously had N positions and now see 0,
-            # this is almost certainly a transient API error (connection hiccup,
-            # mid-reconnect race, order-update callback firing too early).
-            # Skip writing open_tickets=[] with a fresh last_update — that
-            # combination would defeat the hedge monitor's 30s staleness check
-            # and trigger a false cascade. Log prominently so it's visible.
+            # Zero-drop debounce guard: if we previously had N positions and now see 0,
+            # check order history to immediately confirm closed tickets, or require 3 consecutive zero reads (~1.5s).
             prev_tickets = info.get("open_tickets")
             if prev_tickets and len(prev_tickets) > 0 and len(tickets) == 0:
-                logger.warning(
-                    "[%s] _push_positions: 0 orders returned but had %d open — "
-                    "skipping update to prevent false hedge cascade (transient read)",
-                    self.account_id, len(prev_tickets)
-                )
-                return
+                if self._confirm_closed_tickets(prev_tickets):
+                    logger.info("[%s] _push_positions: closed ticket confirmed in order history — immediately confirming zero positions!", self.account_id)
+                    self._empty_reads = 3
+                else:
+                    self._empty_reads += 1
+
+                if self._empty_reads < 3:
+                    logger.warning(
+                        "[%s] _push_positions: 0 orders returned but had %d open — "
+                        "debouncing zero read (%d/3) to prevent false cascade",
+                        self.account_id, len(prev_tickets), self._empty_reads
+                    )
+                    return
+                logger.info("[%s] _push_positions: 0 orders confirmed over 3 polls — updating open_tickets to []", self.account_id)
+            else:
+                self._empty_reads = 0
+
+            # ── PARTIAL-READ DROP GUARD ───────────────────────────────────────
+            # Detect when the MT5 API returns a suspiciously smaller position
+            # list than previously known (e.g. truncated IEnumerable during broker reset).
+            if prev_tickets and len(prev_tickets) > 4:
+                drop_count = len(prev_tickets) - len(tickets)
+                drop_ratio = drop_count / len(prev_tickets)
+                if drop_ratio > 0.15:
+                    # If current read is 0 positions and empty_reads >= 3, zero read is confirmed!
+                    if len(tickets) == 0 and self._empty_reads >= 3:
+                        logger.info("[%s] _push_positions: zero positions confirmed over 3 polls — bypassing drop guard", self.account_id)
+                    else:
+                        self._partial_read_count += 1
+                        if self._partial_read_count < 3:
+                            logger.warning(
+                                "[%s] _push_positions: PARTIAL-READ DROP GUARD triggered — "
+                                "prev=%d tickets, now=%d tickets (drop=%.0f%%, poll %d/3). "
+                                "Likely broker session reset or truncated IEnumerable. "
+                                "Skipping open_tickets update to prevent false cascade.",
+                                self.account_id, len(prev_tickets), len(tickets), drop_ratio * 100, self._partial_read_count
+                            )
+                            return
+                        logger.info("[%s] _push_positions: position drop > 15%% confirmed over 3 polls — updating open_tickets to %d",
+                                    self.account_id, len(tickets))
+
+            self._partial_read_count = 0
+
+
             info["open_tickets"] = tickets
             info["positions"] = len(tickets)
             # Aggregate PnL — use AccountProfit as the PRIMARY source.
@@ -2496,6 +2574,8 @@ class MT5DirectAccount:
                                     'OpenPrice': float(getattr(o, 'OpenPrice', getattr(o, 'PriceOpen', 0))),
                                     'OpenTimeRaw': getattr(o, 'OpenTime', getattr(o, 'TimeCreate', None)),
                                     'OpenTime': str(getattr(o, 'OpenTime', getattr(o, 'TimeCreate', ''))),
+                                    'TakeProfit': float(getattr(o, 'TakeProfit', getattr(o, 'Tp', getattr(o, 'PriceTP', 0)))),
+                                    'StopLoss': float(getattr(o, 'StopLoss', getattr(o, 'Sl', getattr(o, 'PriceSL', 0)))),
                                     'Profit': float(getattr(o, 'Profit', 0)),
                                     'Swap': float(getattr(o, 'Swap', 0)),
                                 })
@@ -3484,6 +3564,23 @@ class MT5DirectAccount:
         """Modify the entry price of a pending limit order."""
         return self.modify_position_tp(ticket, symbol, side, lots, tp=None, sl=None, price=price)
 
+    def delete_pending_order(self, ticket):
+        """Delete/cancel a pending limit order on MT5."""
+        if not self._connected or not self._client:
+            return False, "Not connected"
+        try:
+            import System
+            ticket_val = System.Int64(int(ticket))
+            if hasattr(self._client, "OrderDelete"):
+                with _clr_lock:
+                    self._client.OrderDelete(ticket_val)
+                logger.info("[%s] MT5 pending order deleted: ticket=%s", self.account_id, ticket)
+                return True, "Deleted"
+        except Exception as e:
+            logger.error("[%s] MT5 delete_pending_order error: %s", self.account_id, e)
+            return False, str(e)
+        return False, "OrderDelete not available"
+
     def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
         """Send a pending limit order (BuyLimit/SellLimit).
         Used by OPEN-LIMIT mode."""
@@ -4129,9 +4226,10 @@ class MTDirectManager:
 
                     # Check spread gating — but bypass for rollback (safety rebalancing must execute)
                     # and bypass for cycle reopen (once closed, must reopen immediately)
+                    # cycle_limit_close (TP setting) IS subject to spread check; reopen always bypasses
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen and not action.startswith("close_limit"):
+                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not action.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -4204,8 +4302,10 @@ class MTDirectManager:
                 elif result == "cycle_limit_close":
                     logger.info("[%s] ENTERED elif cycle_limit_close block! action=%s", account_id, action)
                     limit_dist = session.get("cycle_limit_distance") or 10
+                    limit_batch = int(session.get("cycle_limit_batch_size", 1))
+                    limit_days = float(session.get("cycle_limit_days") or 0)
                     self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment,
-                                             is_limit=True, limit_dist=limit_dist, limit_batch=1, limit_days=0)
+                                             is_limit=True, limit_dist=limit_dist, limit_batch=limit_batch, limit_days=limit_days)
                 elif action == "close" or action.startswith("close_limit"):
                     limit_dist = session.get("limit_distance") or 100
                     limit_batch = session.get("limit_batch_size") or 1
@@ -4295,8 +4395,10 @@ class MTDirectManager:
                             session["cycle_progress"] = prog
                             
                         if not any_placed:
-                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight", account_id, to_place)
+                            logger.warning("[%s] cycle_limit_open: all %d limit orders failed — clearing in-flight and resetting open_dispatched", account_id, to_place)
                             self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                            prog.pop("open_dispatched", None)
+                            session["cycle_progress"] = prog
                         else:
                             had_cycle = True
                     elif action == "open_limit":
@@ -4316,16 +4418,46 @@ class MTDirectManager:
                             logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
                             self.dd["in_flight_commands"].pop((session_id, account_id), None)
                     else:
-                        order_result = direct_acct.send_market_order(
-                            pair, trade_side, op_lot_size,
-                            session_id=session_id, comment=comment
-                        )
-                        # send_market_order returns (success, ticket, price) or raises
-                        if isinstance(order_result, tuple) and not order_result[0]:
-                            logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
-                            self.dd["in_flight_commands"].pop((session_id, account_id), None)
-                        elif action.startswith("cycle_"):
-                            had_cycle = True
+                        closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
+                        if action.startswith("cycle_lm_") and closed_tickets:
+                            batch_size = len(closed_tickets)
+                        elif action.startswith("cycle_lm_") or action.startswith("cycle_limit_"):
+                            batch_size = int(session.get("cycle_limit_batch_size", 1))
+                        else:
+                            batch_size = 1
+
+                        if batch_size > 1:
+                            import threading
+                            threads = []
+                            results = [False] * batch_size
+                            def _place_mkt(i):
+                                res = direct_acct.send_market_order(
+                                    pair, trade_side, op_lot_size,
+                                    session_id=session_id, comment=comment
+                                )
+                                if isinstance(res, tuple) and res[0]:
+                                    results[i] = True
+                            for i in range(batch_size):
+                                t = threading.Thread(target=_place_mkt, args=(i,))
+                                threads.append(t)
+                                t.start()
+                            for t in threads:
+                                t.join()
+                            if any(results):
+                                had_cycle = True
+                            else:
+                                logger.warning("[%s] All %d market orders failed — clearing in-flight", account_id, batch_size)
+                                self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                        else:
+                            order_result = direct_acct.send_market_order(
+                                pair, trade_side, op_lot_size,
+                                session_id=session_id, comment=comment
+                            )
+                            if isinstance(order_result, tuple) and not order_result[0]:
+                                logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
+                                self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                            elif action.startswith("cycle_"):
+                                had_cycle = True
                 else:
                     logger.warning("[%s] Unknown action=%s result=%s — skipping",
                                    account_id, action, repr(result))
@@ -4391,10 +4523,14 @@ class MTDirectManager:
                     str(f["ticket"]) for f in close_fills
                     if f.get("account") == account_id
                 }
+                # Exclude newly-reopened tickets so the fresh position isn't immediately
+                # targeted for TP close on the very next cycle step.
+                new_cycle_tks = set(str(t) for t in progress.get("new_cycle_tickets", []))
                 acct_fills = [
                     f for f in fills
                     if f.get("account") == account_id
                     and str(f.get("ticket")) not in closed_tickets_cycle
+                    and str(f.get("ticket")) not in new_cycle_tks
                 ]
                 # Sort oldest-first to match _should_issue_command's sorted order —
                 # progress["index"] was set based on sorted acct_fills, so we must

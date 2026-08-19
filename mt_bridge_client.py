@@ -140,8 +140,8 @@ def normalize_mt_config(cfg):
 
 # â”€â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 BRIDGE_URL = os.environ.get("MT_BRIDGE_URL", "http://localhost:5090")
-BRIDGE_EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "MtBridgeService", "bin", "Release", "net8.0", "MtBridgeService.exe")
+_bridge_dir = os.path.dirname(os.path.abspath(__file__))
+BRIDGE_EXE = os.path.join(_bridge_dir, "MtBridgeService", "bin", "Release", "net8.0", "MtBridgeService.exe")
 
 # â”€â”€â”€ HTTP Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -196,7 +196,7 @@ def ensure_bridge_running():
         pass
 
     if not os.path.exists(BRIDGE_EXE):
-        logger.error("MtBridgeService not found at %s â€” run 'dotnet build' first", BRIDGE_EXE)
+        logger.error("MtBridgeService not found at %s — run 'dotnet build -c Release' first", BRIDGE_EXE)
         return False
 
     logger.info("Starting MtBridgeService from %s", BRIDGE_EXE)
@@ -255,6 +255,7 @@ class MtBridgeAccount:
         self._empty_reads = 0
         self._desync_stable_count = 0   # consecutive polls with same eq-bal gap
         self._desync_stable_delta = 0.0  # last observed gap
+        self._partial_read_count = 0
 
     @property
     def connected(self):
@@ -348,9 +349,10 @@ class MtBridgeAccount:
                 logger.error("[%s] Bridge heartbeat error: %s", self.account_id, e)
                 self._connected = False
 
-            # Poll more frequently (0.5s) to quickly detect externally closed positions
-            # for hedge rebalancing. Sleep in short increments to allow quick exit.
-            for _ in range(2):
+            # Sleep between heartbeats (1.5s when connected, 5.0s when disconnected to prevent HTTP flooding)
+            sleep_sec = 1.5 if self._connected else 5.0
+            steps = int(sleep_sec / 0.25)
+            for _ in range(steps):
                 if not self._running:
                     break
                 time.sleep(0.25)
@@ -439,6 +441,35 @@ class MtBridgeAccount:
                 continue
         return None
 
+    def _confirm_closed_tickets(self, prev_tickets):
+        """Query recent deal history (last 5 minutes) to verify if previously open tickets were closed on broker."""
+        if not prev_tickets:
+            return False
+        try:
+            to_ts = int(time.time())
+            from_ts = to_ts - 300  # last 5 minutes
+            url = f"/api/accounts/{self.account_id}/history?from={from_ts}&to={to_ts}"
+            res = _get(url, timeout=5)
+            if not res or not isinstance(res, dict):
+                return False
+            deals = res.get("deals", []) or res.get("orders", []) or res.get("closed_orders", [])
+            closed_tickets = set()
+            for d in deals:
+                if isinstance(d, dict):
+                    t = d.get("ticket") or d.get("ticket_id") or d.get("id") or d.get("order")
+                    if t:
+                        closed_tickets.add(t)
+                        closed_tickets.add(str(t))
+                        if str(t).isdigit():
+                            closed_tickets.add(int(t))
+            for t in prev_tickets:
+                if t in closed_tickets or str(t) in closed_tickets or (str(t).isdigit() and int(t) in closed_tickets):
+                    logger.info("[%s] _confirm_closed_tickets: confirmed ticket %s closed in deal history!", self.account_id, t)
+                    return True
+        except Exception as e:
+            logger.debug("[%s] Error checking closed tickets history: %s", self.account_id, e)
+        return False
+
     def _push_positions(self):
         """Push open positions into ea_account_info."""
         positions = _get(f"/api/accounts/{self.account_id}/positions", timeout=10)
@@ -448,7 +479,7 @@ class MtBridgeAccount:
         # likely the stagger window before the live handshake completes.  Skip
         # writing so stale positions from a previous session are not overwritten
         # with an empty dict (which would then look like "no positions" briefly
-        # before the real data arrives â€” or worse, old positions if the bridge
+        # before the real data arrives — or worse, old positions if the bridge
         # wasn't restarted and still has its own stale in-memory cache).
         if isinstance(positions, list) and len(positions) == 0:
             if not self._connected:
@@ -456,72 +487,67 @@ class MtBridgeAccount:
                              self.account_id)
                 return
             
-            # If connected but equity != balance+credit, broker may still be syncing.
-            # However, if the bridge doesn't expose a credit field, accounts with a
-            # permanent broker credit line will show a stable, non-zero gap forever.
-            # Strategy: if we see the same gap for _STABLE_THRESH consecutive polls
-            # (~2.5 s at 0.5 s per poll), treat it as a permanent inferred credit and
-            # stop blocking position pushes.
-            _STABLE_THRESH = 120  # 120 polls × 0.5 s = ~60 s before concluding it's a permanent credit
+            # Debounce zero-position reads over 3 polls (1.5s).
+            # If the account previously had positions, check deal history first to immediately confirm,
+            # or require 3 consecutive zero reads to confirm a total account closure.
             info = self.dd.get("ea_account_info", {}).get(self.account_id, {})
-            eq  = info.get("equity", 0)
-            bal = info.get("balance", 0)
-            # Also account for any inferred credit already stabilised in a prior run
-            inferred_credit = info.get("inferred_credit", 0.0)
-            net_eq = eq - inferred_credit
-            if eq > 0 and bal > 0 and abs(net_eq - bal) > 1.0:
-                delta = round(eq - bal, 2)  # raw gap including any existing inferred credit
-                if abs(delta - self._desync_stable_delta) < 1.0:
-                    # Same gap as last poll — increment stability counter
-                    self._desync_stable_count += 1
-                else:
-                    # Gap changed — reset (genuine transient sync)
-                    self._desync_stable_count = 1
-                    self._desync_stable_delta = delta
-
-                if self._desync_stable_count >= _STABLE_THRESH:
-                    # Gap has been constant for N polls → it's a permanent credit offset,
-                    # not a broker sync delay.  Record it and let the position push proceed.
-                    if abs(info.get("inferred_credit", 0.0) - delta) > 1.0:
-                        logger.info(
-                            "[%s] _push_positions: stable equity-balance gap detected "
-                            "(%.2f for %d polls) — treating as broker credit. "
-                            "Storing as inferred_credit and resuming normal operation.",
-                            self.account_id, delta, self._desync_stable_count
-                        )
-                        info["inferred_credit"] = delta
-                    info["_positions_desync"] = False
-                    # Fall through — allow the position push
-                else:
-                    # Throttle: only log every 10 polls (~5 s) to avoid log spam
-                    if self._desync_stable_count % 10 == 1:
-                        credit_stored = info.get("credit", 0)
-                        logger.warning(
-                            "[%s] _push_positions: rejecting empty positions array — "
-                            "equity (%.2f) != balance (%.2f) + credit (%.2f) "
-                            "[inferred_credit=%.2f, stable_count=%d/%d]. "
-                            "Broker is likely still syncing.",
-                            self.account_id, eq, bal, credit_stored,
-                            inferred_credit, self._desync_stable_count, _STABLE_THRESH
-                        )
-                    info["_positions_desync"] = True
-                    return
-            else:
-                # Gap is within tolerance (or zero) — reset stability tracker
-                self._desync_stable_count = 0
-                self._desync_stable_delta = 0.0
-
-            # Debounce: MT4/MT5 can briefly report 0 positions and eq==bal during terminal restart
-            # before it finishes syncing trade history. We require 3 consecutive polls (1.5s) to confirm.
-            # Only debounce if the account previously had positions to prevent startup delays.
             prev_count = info.get("open_count", 0)
+            prev_tickets = info.get("open_tickets", [])
             if prev_count > 0:
-                self._empty_reads += 1
+                if prev_tickets and self._confirm_closed_tickets(prev_tickets):
+                    logger.info("[%s] _push_positions: closed ticket confirmed in deal history — immediately confirming zero positions!", self.account_id)
+                    self._empty_reads = 3
+                else:
+                    self._empty_reads += 1
+
                 if self._empty_reads < 3:
                     logger.info("[%s] _push_positions: debouncing empty positions array (%d/3) to prevent restart glitch.", self.account_id, self._empty_reads)
                     return
             else:
                 self._empty_reads = 3 # Already confirmed empty or never had positions
+
+            # Only enforce the equity vs balance desync check if empty_reads < 3 (i.e. not yet confirmed zero)
+            # Once 3 consecutive zero reads are confirmed, we know positions are truly 0 regardless of equity/balance gap.
+            if self._empty_reads < 3:
+                _STABLE_THRESH = 120
+                eq  = info.get("equity", 0)
+                bal = info.get("balance", 0)
+                inferred_credit = info.get("inferred_credit", 0.0)
+                net_eq = eq - inferred_credit
+                if eq > 0 and bal > 0 and abs(net_eq - bal) > 1.0:
+                    delta = round(eq - bal, 2)
+                    if abs(delta - self._desync_stable_delta) < 1.0:
+                        self._desync_stable_count += 1
+                    else:
+                        self._desync_stable_count = 1
+                        self._desync_stable_delta = delta
+
+                    if self._desync_stable_count >= _STABLE_THRESH:
+                        if abs(info.get("inferred_credit", 0.0) - delta) > 1.0:
+                            logger.info(
+                                "[%s] _push_positions: stable equity-balance gap detected "
+                                "(%.2f for %d polls) — treating as broker credit. "
+                                "Storing as inferred_credit and resuming normal operation.",
+                                self.account_id, delta, self._desync_stable_count
+                            )
+                            info["inferred_credit"] = delta
+                        info["_positions_desync"] = False
+                    else:
+                        if self._desync_stable_count % 10 == 1:
+                            credit_stored = info.get("credit", 0)
+                            logger.warning(
+                                "[%s] _push_positions: rejecting empty positions array — "
+                                "equity (%.2f) != balance (%.2f) + credit (%.2f) "
+                                "[inferred_credit=%.2f, stable_count=%d/%d]. "
+                                "Broker is likely still syncing.",
+                                self.account_id, eq, bal, credit_stored,
+                                inferred_credit, self._desync_stable_count, _STABLE_THRESH
+                            )
+                        info["_positions_desync"] = True
+                        return
+                else:
+                    self._desync_stable_count = 0
+                    self._desync_stable_delta = 0.0
         else:
             self._empty_reads = 0
 
@@ -563,6 +589,8 @@ class MtBridgeAccount:
                 "profit": p.get("profit", 0),
                 "swap": p.get("swap", 0),
                 "comment": p.get("comment", ""),
+                "tp": float(p.get("tp", p.get("take_profit", p.get("TakeProfit", 0)))),
+                "sl": float(p.get("sl", p.get("stop_loss", p.get("StopLoss", 0)))),
             }
             total_swap += p.get("swap", 0)
             tickets.append(ticket)
@@ -583,6 +611,33 @@ class MtBridgeAccount:
                 _lbi[sym_key]["buy"] = round(_lbi[sym_key]["buy"] + lots, 2)
             else:
                 _lbi[sym_key]["sell"] = round(_lbi[sym_key]["sell"] + lots, 2)
+
+        # ── PARTIAL-READ DROP GUARD ───────────────────────────────────────
+        # Detect when the bridge returns a suspiciously smaller position
+        # list than previously known. This happens during MT4/MT5 terminal restart/reset
+        # or async packet updates where positions are partially read.
+        prev_tickets = acct.get("open_tickets")
+        if prev_tickets and len(prev_tickets) > 4:
+            drop_count = len(prev_tickets) - len(tickets)
+            drop_ratio = drop_count / len(prev_tickets)
+            if drop_ratio > 0.15:
+                # If current read is 0 positions and empty_reads >= 10, zero read is confirmed!
+                if len(tickets) == 0 and getattr(self, '_empty_reads', 0) >= 10:
+                    logger.info("[%s] _push_positions (bridge): zero positions confirmed over 10 polls — bypassing drop guard", self.account_id)
+                else:
+                    self._partial_read_count += 1
+                    if self._partial_read_count < 10:
+                        logger.warning(
+                            "[%s] _push_positions (bridge): PARTIAL-READ DROP GUARD triggered — "
+                            "prev=%d tickets, now=%d tickets (drop=%.0f%%, poll %d/10). "
+                            "Skipping open_tickets update to prevent false cascade.",
+                            self.account_id, len(prev_tickets), len(tickets), drop_ratio * 100, self._partial_read_count
+                        )
+                        return
+                    logger.info("[%s] _push_positions (bridge): position drop > 15%% confirmed over 10 polls — updating open_tickets to %d",
+                                self.account_id, len(tickets))
+
+        self._partial_read_count = 0
 
         acct["positions"] = pos_dict
         acct["open_count"] = len(pos_dict)
@@ -713,10 +768,12 @@ class MtBridgeAccount:
     def get_symbol_info(self, symbol):
         """Get bid/ask/spread for a symbol."""
         encoded = urllib.parse.quote(symbol, safe='')
-        result = _get(f"/api/accounts/{self.account_id}/quote/{encoded}", timeout=5)
+        result = _get(f"/api/accounts/{self.account_id}/quote/{encoded}", timeout=2)
         if result and "error" in result:
-            if "404" not in str(result['error']):
-                logger.error(f"Bridge returned error: {result['error']}")
+            err_str = str(result.get('error', ''))
+            # Suppress high-severity error logs for expected transient states during quote polling (404, timeouts, or disconnected bridge)
+            if not any(k in err_str.lower() for k in ("404", "timed out", "unreachable", "not connected")):
+                logger.warning(f"[{self.account_id}] Bridge quote error for {symbol}: {err_str}")
             return None
         if result:
             return result
@@ -749,15 +806,17 @@ class MtBridgeAccount:
             result = []
             for p in positions:
                 result.append({
-                    'Ticket': int(p.get("ticket", 0)),
-                    'Symbol': str(p.get("symbol", "")),
-                    'Type': str(p.get("side", "")),
-                    'Lots': float(p.get("lots", 0)),
-                    'Comment': str(p.get("comment", "")),
-                    'OpenPrice': float(p.get("open_price", p.get("openPrice", 0))),
-                    'OpenTime': str(p.get("open_time", p.get("openTime", ""))),
-                    'Profit': float(p.get("profit", 0)),
-                    'Swap': float(p.get("swap", 0)),
+                    'Ticket': int(p.get("ticket", p.get("Ticket", 0))),
+                    'Symbol': str(p.get("symbol", p.get("Symbol", ""))),
+                    'Type': str(p.get("side", p.get("Side", ""))),
+                    'Lots': float(p.get("lots", p.get("Lots", 0))),
+                    'Comment': str(p.get("comment", p.get("Comment", ""))),
+                    'OpenPrice': float(p.get("open_price", p.get("openPrice", p.get("OpenPrice", 0)))),
+                    'OpenTime': str(p.get("open_time", p.get("openTime", p.get("OpenTime", "")))),
+                    'Profit': float(p.get("profit", p.get("Profit", 0))),
+                    'Swap': float(p.get("swap", p.get("Swap", 0))),
+                    'TakeProfit': float(p.get("tp", p.get("take_profit", p.get("TakeProfit", 0)))),
+                    'StopLoss': float(p.get("sl", p.get("stop_loss", p.get("StopLoss", 0)))),
                 })
             return result
         except Exception as e:
@@ -1092,11 +1151,12 @@ class MtBridgeManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
-                    # Check spread gating — bypass for rollback, cycle close, and cycle_limit_open, and close_limit
+                    # Check spread gating — bypass for rollback, cycle close, cycle_limit_open (reopen), and close_limit
+                    # cycle_limit_close (TP setting) IS subject to spread check; market reopen always bypasses
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
                     act_check = session.get("action", "")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_close", "cycle_limit_open") and not is_cycle_reopen and not act_check.startswith("close_limit"):
+                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not act_check.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
@@ -1272,16 +1332,46 @@ class MtBridgeManager:
                             session_id=session_id, comment=comment
                         )
                     else:
-                        order_result = direct_acct.send_market_order(
-                            pair, trade_side, op_lot_size,
-                            session_id=session_id, comment=comment
-                        )
+                        closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
+                        if action.startswith("cycle_lm_") and closed_tickets:
+                            batch_size = len(closed_tickets)
+                        elif action.startswith("cycle_lm_") or action.startswith("cycle_limit_"):
+                            batch_size = int(session.get("cycle_limit_batch_size", 1))
+                        else:
+                            batch_size = 1
 
-                    if isinstance(order_result, tuple) and not order_result[0]:
-                        logger.warning("[%s] Order failed (returned False) â€” clearing in-flight", account_id)
-                        self.dd["in_flight_commands"].pop((session_id, account_id), None)
-                    elif action.startswith("cycle_"):
-                        had_cycle = True
+                        if batch_size > 1:
+                            import threading
+                            threads = []
+                            results = [False] * batch_size
+                            def _place_mkt(i):
+                                res = direct_acct.send_market_order(
+                                    pair, trade_side, op_lot_size,
+                                    session_id=session_id, comment=comment
+                                )
+                                if isinstance(res, tuple) and res[0]:
+                                    results[i] = True
+                            for i in range(batch_size):
+                                t = threading.Thread(target=_place_mkt, args=(i,))
+                                threads.append(t)
+                                t.start()
+                            for t in threads:
+                                t.join()
+                            if any(results):
+                                had_cycle = True
+                            else:
+                                logger.warning("[%s] All %d market orders failed — clearing in-flight", account_id, batch_size)
+                                self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                        else:
+                            order_result = direct_acct.send_market_order(
+                                pair, trade_side, op_lot_size,
+                                session_id=session_id, comment=comment
+                            )
+                            if isinstance(order_result, tuple) and not order_result[0]:
+                                logger.warning("[%s] Order failed (returned False) — clearing in-flight", account_id)
+                                self.dd["in_flight_commands"].pop((session_id, account_id), None)
+                            elif action.startswith("cycle_"):
+                                had_cycle = True
                 else:
                     logger.warning("[%s] Unknown action=%s result=%s â€” skipping",
                                    account_id, action, result)
@@ -1347,10 +1437,14 @@ class MtBridgeManager:
                     str(f["ticket"]) for f in close_fills
                     if f.get("account") == account_id
                 }
+                # Exclude newly-reopened tickets so the fresh position isn't immediately
+                # targeted for TP close on the very next cycle step.
+                new_cycle_tks = set(str(t) for t in progress.get("new_cycle_tickets", []))
                 acct_fills = [
                     f for f in fills
                     if f.get("account") == account_id
                     and str(f.get("ticket")) not in closed_tickets_cycle
+                    and str(f.get("ticket")) not in new_cycle_tks
                 ]
                 # Sort oldest-first to match _should_issue_command's sorted order —
                 # progress["index"] was set based on sorted acct_fills, so we must
@@ -1717,14 +1811,29 @@ class MtBridgeManager:
             self.accounts[account_id] = acct
 
     def save_config(self):
-        """Save config — delegates to bridge."""
+        """Save config — Python is the authoritative source."""
+        config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
+
+        # Sanity check: refuse to overwrite if self.accounts is empty or severely truncated
         if not self.accounts:
-            config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
             if os.path.exists(config_path) and os.path.getsize(config_path) > 10:
                 logger.warning("MtBridgeManager.save_config: self.accounts is empty, refusing to overwrite non-empty %s", config_path)
                 return
+        elif os.path.exists(config_path) and os.path.getsize(config_path) > 100:
+            try:
+                with open(config_path, "r") as f:
+                    disk_cfg = json.load(f)
+                if isinstance(disk_cfg, dict) and len(disk_cfg) > 5:
+                    if len(self.accounts) < len(disk_cfg) / 2:
+                        logger.error(
+                            "MtBridgeManager.save_config: Refusing to save %d accounts when disk file has %d accounts! (Safety guard triggered)",
+                            len(self.accounts), len(disk_cfg)
+                        )
+                        return
+            except Exception as _e:
+                logger.warning("MtBridgeManager.save_config: Failed to inspect existing config for count validation: %s", _e)
+
         # 1. Write JSON directly from Python -- authoritative on restart
-        config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
         _configs = {aid: a.config for aid, a in self.accounts.items()}
         try:
             import tempfile as _tmpfile, shutil as _shutil
@@ -1747,6 +1856,7 @@ class MtBridgeManager:
             logger.info("MtBridgeManager: saved %d accounts to %s", len(_configs), config_path)
         except Exception as _e:
             logger.error("Failed to save MT Bridge config: %s", _e)
+
         # 2. Also sync to bridge in-memory state
         for account_id, acct in self.accounts.items():
             cfg = {
@@ -1762,9 +1872,6 @@ class MtBridgeManager:
                 "extra": acct.config,
             }
             _put(f"/api/accounts/{account_id}", cfg)
-            
-
-        _post("/api/config/save", {"path": os.path.abspath(config_path)})
 
     def add_account(self, account_id, config, save=True, auto_connect=True):
         """Add a new MT Direct account. Returns True on success."""

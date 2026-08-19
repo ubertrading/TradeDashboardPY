@@ -1,29 +1,5 @@
 {
   "manual_accounts": {
-    "DEMO-CT-FIX-HDBCH2-9040256": {
-      "balance": null,
-      "conn_type": "poll",
-      "equity": null,
-      "group_label": ""
-    },
-    "DEMO-CT-FIX-HDBCH2-9040257": {
-      "balance": null,
-      "conn_type": "poll",
-      "equity": null,
-      "group_label": ""
-    },
-    "DEMO-CT-OPENAPI-HDBCH2-9040256": {
-      "balance": null,
-      "conn_type": "poll",
-      "equity": null,
-      "group_label": ""
-    },
-    "DEMO-CT-OPENAPI-HDBCH2-9040257": {
-      "balance": null,
-      "conn_type": "poll",
-      "equity": null,
-      "group_label": ""
-    },
     "DEMO-MT4-1218954455": {
       "balance": null,
       "conn_type": "poll",
@@ -31,13 +7,12 @@
       "group_label": ""
     },
     "DEMO-MT5-52769010": {
-      "alert_telegram": "DEMO2uotdK",
       "balance": null,
       "conn_type": "poll",
       "equity": null,
       "group_label": ""
     },
-    "DUKA-DEMO-DEMO2uotdK": {
+    "HU-1-B-ICM11271572": {
       "balance": null,
       "conn_type": "poll",
       "equity": null,
@@ -52,10 +27,10 @@
       "enabled": true,
       "id": "3e569fe6-607a-4b79-9f17-6d7dc1c72e80",
       "name": "DUKA",
-      "running": true,
+      "running": false,
       "trade_alerts": false,
-      "trade_start_time": "00:01",
-      "trade_stop_time": "00:00"
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
     },
     "558dadc8-2b67-4beb-b0e1-4e8ad9b28eaf": {
       "account1": "DEMO-MT4-1218954455",
@@ -67,7 +42,7 @@
       "running": true,
       "trade_alerts": false,
       "trade_start_time": "18:00",
-      "trade_stop_time": "16:30"
+      "trade_stop_time": "16:59"
     },
     "5cba9996-fb53-4fd2-9fa0-46244b34c1ff": {
       "account1": "DEMO-CT-OPENAPI-HDBCH2-9040256",

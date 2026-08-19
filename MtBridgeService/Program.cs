@@ -196,7 +196,6 @@ public record ConfigSaveRequest { public string? Path { get; init; } }
 public class AccountStore
 {
     private readonly ConcurrentDictionary<string, MtAccount> _accounts = new();
-    private readonly SemaphoreSlim _connectLock = new(1, 1);
     private readonly ILogger _logger;
 
     public AccountStore(ILogger logger)
@@ -206,7 +205,7 @@ public class AccountStore
 
     public bool AddAccount(AccountConfig cfg)
     {
-        var acct = new MtAccount(cfg, _logger, _connectLock);
+        var acct = new MtAccount(cfg, _logger);
         return _accounts.TryAdd(cfg.Id, acct);
     }
 
@@ -287,6 +286,17 @@ public class AccountStore
         var configs = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
         if (configs == null) return 0;
 
+        // Remove any stale accounts not in the newly loaded file
+        var currentKeys = new HashSet<string>(_accounts.Keys);
+        foreach (var key in currentKeys)
+        {
+            if (!configs.ContainsKey(key))
+            {
+                RemoveAccount(key);
+                _logger.LogInformation("Removed stale account {Id} not present in loaded config", key);
+            }
+        }
+
         int count = 0;
         int connectIndex = 0;
         foreach (var (id, elem) in configs)
@@ -319,6 +329,27 @@ public class AccountStore
 
     public void SaveConfig(string path)
     {
+        if (_accounts.IsEmpty)
+        {
+            _logger.LogWarning("Refusing to save config to {Path} because _accounts is empty", path);
+            return;
+        }
+
+        if (File.Exists(path))
+        {
+            try
+            {
+                var existingJson = File.ReadAllText(path);
+                var existingConfigs = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(existingJson);
+                if (existingConfigs != null && existingConfigs.Count > 5 && _accounts.Count < existingConfigs.Count / 2)
+                {
+                    _logger.LogError("Refusing to save {Count} accounts to {Path} when disk file has {DiskCount} accounts!", _accounts.Count, path, existingConfigs.Count);
+                    return;
+                }
+            }
+            catch { }
+        }
+
         var configs = new Dictionary<string, Dictionary<string, object>>();
         foreach (var (id, acct) in _accounts)
         {
@@ -500,7 +531,8 @@ public class MtAccount
 {
     public AccountConfig Config { get; private set; }
     private readonly ILogger _logger;
-    private readonly SemaphoreSlim _connectLock;
+    private readonly SemaphoreSlim _connectLock = new(1, 1);
+    private readonly ConcurrentDictionary<string, DateTime> _lastStaleWarningLog = new();
 
     // MT5
     private mtapi.mt5.MT5API? _mt5;
@@ -527,12 +559,12 @@ public class MtAccount
     private int _reconnectAttempt;
     private double _reconnectDelay = 5;
     private const double RECONNECT_MAX_DELAY = 120;
+    private int _partialReadCount;
 
-    public MtAccount(AccountConfig config, ILogger logger, SemaphoreSlim connectLock)
+    public MtAccount(AccountConfig config, ILogger logger)
     {
         Config = config;
         _logger = logger;
-        _connectLock = connectLock;
     }
 
     public void UpdateConfig(AccountConfig cfg)
@@ -559,9 +591,9 @@ public class MtAccount
     // ─── Connect ───────────────────────────────────────────────────────────
     public async Task<(bool, string?)> ConnectAsync()
     {
-        // Serialize all .NET Connect() calls
-        if (!await _connectLock.WaitAsync(TimeSpan.FromSeconds(30)))
-            return (false, "Connect lock timeout — another account is connecting");
+        // Serialize all .NET Connect() calls (short timeout to avoid HTTP request starvation)
+        if (!await _connectLock.WaitAsync(TimeSpan.FromSeconds(5)))
+            return (false, "Connect lock busy — another account is currently connecting");
 
         try
         {
@@ -800,9 +832,15 @@ public class MtAccount
                     else
                     {
                         _logger.LogWarning("[{Id}] Reconnect failed: {Error} — retrying in {Delay}s", Config.Id, err, _reconnectDelay);
-                        Thread.Sleep((int)(_reconnectDelay * 1000));
+                        int totalSleepMs = (int)(_reconnectDelay * 1000);
+                        int sleptMs = 0;
+                        while (sleptMs < totalSleepMs && _running)
+                        {
+                            Thread.Sleep(500);
+                            sleptMs += 500;
+                        }
                         _reconnectDelay = Math.Min(_reconnectDelay * 2, RECONNECT_MAX_DELAY);
-                        continue; // skip the normal 30s sleep
+                        continue;
                     }
                 }
             }
@@ -819,12 +857,15 @@ public class MtAccount
     {
         try
         {
-            var sym = quote.Symbol ?? "";
-            var bid = quote.Bid;
-            var ask = quote.Ask;
-            var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
-            var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
-            _quotes[sym] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
+            var sym = (quote.Symbol ?? "").Trim();
+            if (!string.IsNullOrEmpty(sym))
+            {
+                var bid = quote.Bid;
+                var ask = quote.Ask;
+                var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
+                var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
+                _quotes[sym] = new QuoteData(sym, bid, ask, spread, DateTime.UtcNow);
+            }
         }
         catch { }
     }
@@ -838,12 +879,15 @@ public class MtAccount
     {
         try
         {
-            var sym = args.Symbol ?? "";
-            var bid = (double)args.Bid;
-            var ask = (double)args.Ask;
-            var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
-            var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
-            _quotes[sym] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
+            var sym = (args.Symbol ?? "").Trim();
+            if (!string.IsNullOrEmpty(sym))
+            {
+                var bid = (double)args.Bid;
+                var ask = (double)args.Ask;
+                var pipMult = sym.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
+                var spread = bid > 0 && ask > 0 ? Math.Round((ask - bid) * pipMult, 1) : 0;
+                _quotes[sym] = new QuoteData(sym, bid, ask, spread, DateTime.UtcNow);
+            }
         }
         catch { }
     }
@@ -944,7 +988,9 @@ public class MtAccount
                         OpenTime = order.OpenTime.ToString("o"),
                         Profit = order.Profit,
                         Swap = order.Swap,
-                        Comment = order.Comment ?? ""
+                        Comment = order.Comment ?? "",
+                        TakeProfit = order.TakeProfit,
+                        StopLoss = order.StopLoss
                     };
                 }
             }
@@ -965,11 +1011,37 @@ public class MtAccount
                         OpenTime = order.OpenTime.ToString("o"),
                         Profit = order.Profit,
                         Swap = order.Swap,
-                        Comment = order.Comment ?? ""
+                        Comment = order.Comment ?? "",
+                        TakeProfit = order.TakeProfit,
+                        StopLoss = order.StopLoss
                     };
                 }
             }
 
+            // Partial-read drop guard (C# level)
+            // Detect when mtapi returns a transient partial slice (e.g. 7 positions out of 209)
+            // during async packet unpacking or OnOrderUpdate callbacks.
+            int prevCount = _positions.Count;
+            if (prevCount > 4)
+            {
+                int dropCount = prevCount - newPositions.Count;
+                double dropRatio = (double)dropCount / prevCount;
+                if (dropRatio > 0.15)
+                {
+                    _partialReadCount++;
+                    if (_partialReadCount < 3)
+                    {
+                        _logger.LogWarning(
+                            "[{Id}] PushPositions: PARTIAL-READ DROP GUARD triggered in C# — prev={Prev} tickets, now={Now} tickets (drop={Drop:P0}, count={Count}/3). Skipping _positions update.",
+                            Config.Id, prevCount, newPositions.Count, dropRatio, _partialReadCount
+                        );
+                        return;
+                    }
+                    _logger.LogInformation("[{Id}] PushPositions: Drop confirmed over 3 consecutive reads — accepting new position count ({Now})", Config.Id, newPositions.Count);
+                }
+            }
+
+            _partialReadCount = 0;
             // Atomic swap
             _positions.Clear();
             foreach (var (ticket, pos) in newPositions)
@@ -1042,84 +1114,95 @@ public class MtAccount
     // Quote staleness threshold: if no tick has arrived in 60s, treat as frozen.
     private const int QuoteStalenessSeconds = 60;
 
-    private static object? QuoteIfFresh(QuoteData q, string symbol, ILogger logger, string id)
+    private static object? QuoteIfFresh(QuoteData q, string symbol, ILogger logger, string id, ConcurrentDictionary<string, DateTime> staleLogDict)
     {
         var age = (DateTime.UtcNow - q.ReceivedAt).TotalSeconds;
         if (age > QuoteStalenessSeconds)
         {
-            logger.LogWarning("[{Id}] GetQuote({Symbol}): cached quote is STALE ({Age:F0}s old) — returning null to avoid frozen DIFF",
-                id, symbol, age);
+            var now = DateTime.UtcNow;
+            bool shouldLog = true;
+            if (staleLogDict.TryGetValue(symbol, out var lastLog))
+            {
+                if ((now - lastLog).TotalMinutes < 5)
+                    shouldLog = false;
+            }
+            if (shouldLog)
+            {
+                staleLogDict[symbol] = now;
+                logger.LogWarning("[{Id}] GetQuote({Symbol}): cached quote is STALE ({Age:F0}s old) — returning null to avoid frozen DIFF",
+                    id, symbol, age);
+            }
             return null;
         }
-        return new { bid = q.Bid, ask = q.Ask, spread = q.Spread };
+        return new { bid = q.Bid, ask = q.Ask, spread = q.Spread, symbol = string.IsNullOrEmpty(q.Symbol) ? symbol : q.Symbol };
     }
 
     public object? GetQuote(string symbol)
     {
+        if (!_connected)
+            return null;
+
         // Try exact match first
         if (_quotes.TryGetValue(symbol, out var q))
-            return QuoteIfFresh(q, symbol, _logger, Config.Id);
+        {
+            var res = QuoteIfFresh(q, symbol, _logger, Config.Id, _lastStaleWarningLog);
+            if (res != null) return res;
+            // Cached quote is stale — return null immediately without blocking network socket call
+            return null;
+        }
 
         // Case-insensitive fallback
         foreach (var (key, val) in _quotes)
         {
-            if (key.Equals(symbol, StringComparison.OrdinalIgnoreCase))
-                return QuoteIfFresh(val, symbol, _logger, Config.Id);
+            if (!string.IsNullOrWhiteSpace(key) && key.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+            {
+                var res = QuoteIfFresh(val, symbol, _logger, Config.Id, _lastStaleWarningLog);
+                if (res != null) return res;
+                return null;
+            }
         }
 
         // Prefix/Suffix matching fallback (e.g. USDCHF matches USDCHF# or USDCHF.b)
         foreach (var (key, val) in _quotes)
         {
-            if (key.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(key, StringComparison.OrdinalIgnoreCase))
-                return QuoteIfFresh(val, symbol, _logger, Config.Id);
+            if (!string.IsNullOrWhiteSpace(key) && key.Length >= 4 && symbol.Length >= 4)
+            {
+                if (key.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(key, StringComparison.OrdinalIgnoreCase))
+                {
+                    var res = QuoteIfFresh(val, symbol, _logger, Config.Id, _lastStaleWarningLog);
+                    if (res != null) return res;
+                    return null;
+                }
+            }
         }
 
         // Check symbols of active positions
         foreach (var pos in _positions.Values)
         {
-            if (pos.Symbol.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(pos.Symbol, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(pos.Symbol) && pos.Symbol.Length >= 4 && symbol.Length >= 4)
             {
-                if (_quotes.TryGetValue(pos.Symbol, out var posQuote))
-                    return QuoteIfFresh(posQuote, symbol, _logger, Config.Id);
+                if (pos.Symbol.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) || symbol.StartsWith(pos.Symbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (_quotes.TryGetValue(pos.Symbol, out var posQuote))
+                    {
+                        var res = QuoteIfFresh(posQuote, symbol, _logger, Config.Id, _lastStaleWarningLog);
+                        if (res != null) return res;
+                        return null;
+                    }
+                }
             }
         }
 
-        // Try GetQuote from API (live call — always fresh by definition)
-        try
+        // Asynchronously trigger symbol subscription in background without blocking HTTP thread
+        ThreadPool.QueueUserWorkItem(_ =>
         {
-            if (IsMt5 && _mt5 != null)
+            try
             {
-                try { _mt5.Subscribe(symbol); } catch { }
-                var mq = _mt5.GetQuote(symbol);
-                if (mq != null)
-                {
-                    var pipMult = symbol.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
-                    var spread = Math.Round((mq.Ask - mq.Bid) * pipMult, 1);
-                    // Also refresh _quotes cache with this live price
-                    _quotes[symbol] = new QuoteData(mq.Bid, mq.Ask, spread, DateTime.UtcNow);
-                    return new { bid = mq.Bid, ask = mq.Ask, spread };
-                }
+                if (IsMt5 && _mt5 != null) { try { _mt5.Subscribe(symbol); } catch { } }
+                else if (_mt4 != null) { try { _mt4.Subscribe(symbol); } catch { } }
             }
-            else if (_mt4 != null)
-            {
-                try { _mt4.Subscribe(symbol); } catch { }
-                var mq = _mt4.GetQuote(symbol);
-                if (mq != null)
-                {
-                    var pipMult = symbol.Contains("JPY", StringComparison.OrdinalIgnoreCase) ? 1000.0 : 100000.0;
-                    var bid = (double)mq.Bid;
-                    var ask = (double)mq.Ask;
-                    var spread = Math.Round((ask - bid) * pipMult, 1);
-                    // Also refresh _quotes cache with this live price
-                    _quotes[symbol] = new QuoteData(bid, ask, spread, DateTime.UtcNow);
-                    return new { bid, ask, spread };
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning("[{Id}] GetQuote({Symbol}) error: {Err}", Config.Id, symbol, ex.Message);
-        }
+            catch { }
+        });
 
         return null;
     }
@@ -1127,6 +1210,7 @@ public class MtAccount
     public object GetSwapRates(string[] symbols)
     {
         var result = new Dictionary<string, object>();
+        if (!_connected) return result;
         try
         {
             if (IsMt5 && _mt5 != null)
@@ -1515,6 +1599,7 @@ public class MtAccount
     // ─── Deal History ──────────────────────────────────────────────────────
     public object? GetDealHistory(long fromTs, long toTs, bool excludeBalance = true, string[]? feeKeywords = null)
     {
+        if (!_connected) return null;
         try
         {
             var fromUtc = DateTimeOffset.FromUnixTimeSeconds(fromTs).UtcDateTime;
@@ -1686,7 +1771,7 @@ public class MtAccount
 // Data Models
 // ═══════════════════════════════════════════════════════════════════════════
 
-public record QuoteData(double Bid, double Ask, double Spread, DateTime ReceivedAt);
+public record QuoteData(string Symbol, double Bid, double Ask, double Spread, DateTime ReceivedAt);
 
 public class PositionData
 {
@@ -1699,4 +1784,6 @@ public class PositionData
     public double Profit { get; init; }
     public double Swap { get; init; }
     public string Comment { get; init; } = "";
+    public double TakeProfit { get; init; }
+    public double StopLoss { get; init; }
 }

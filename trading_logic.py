@@ -732,14 +732,16 @@ def _run_hedge_monitor_all():
             if len(sides) < 2:
                 continue
 
-            # Only run after ALL sides have reached fill targets
+            # If all sides have reached target in OPEN mode, auto-switch to MONITOR mode
             if sess_action == "open":
                 all_sides_filled = all(
                     session["filled"].get(acc, 0) >= session["total_positions"]
                     for acc in sides
                 )
-                if not all_sides_filled:
-                    continue
+                if all_sides_filled:
+                    session["action"] = "monitor"
+                    sess_action = "monitor"
+                    _save_sessions()
 
             # COOLDOWN: Skip if any account had a recent trade (within 5s)
             cooldown_secs = 5
