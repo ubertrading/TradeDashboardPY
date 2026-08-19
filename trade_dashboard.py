@@ -341,6 +341,14 @@ def _get_upcoming_monday_open(dt_ny):
     return mon_dt.timestamp()
 
 
+def _get_next_rollover_ts(dt_ny):
+    """Return the Unix timestamp of the NEXT 5:00 PM ET rollover after dt_ny."""
+    target = dt_ny.replace(hour=17, minute=0, second=0, microsecond=0)
+    if dt_ny >= target:
+        target += timedelta(days=1)
+    return target.timestamp()
+
+
 def _reminder_due_day(open_epoch, max_days):
     """Return the date when the reminder should fire, adjusted for weekends."""
     open_dt = datetime.fromtimestamp(open_epoch, tz=NY_TZ)
@@ -461,7 +469,11 @@ def _parse_broker_timestamp(ts_str, is_direct=True):
 def _check_cycle_reminders():
     """Scan all accounts with cycle_reminder_enabled and check position ages.
     Two thresholds: cycle_reminder_days (warning) and cycle_max_days (critical max).
-    Also checks Friday weekend survival: if position won't survive weekend without exceeding max_days.
+    Checks:
+      1. Current position age vs thresholds.
+      2. wont_survive_eod: age will breach max_days after the NEXT daily rollover
+         (tonight's 17:00 ET). This catches e.g. Wed triple-day accounts.
+      3. wont_survive_weekend: position won't survive Mon open (Fri-period only).
     If auto_cycle_enabled, automatically trigger cycle action on sessions."""
     global cycle_reminders
     new_reminders = {}
@@ -479,6 +491,9 @@ def _check_cycle_reminders():
     now_ts = now_dt.timestamp()
     # Friday trading period check: Thursday 17:00 EST through Friday 23:59 EST
     is_friday_period = (now_dt.weekday() == 3 and now_dt.hour >= 17) or (now_dt.weekday() == 4)
+
+    # Next rollover timestamp (tonight's 17:00 ET, or tomorrow's if already past)
+    next_rollover_ts = _get_next_rollover_ts(now_dt)
 
     for acct_id, cfg in all_accounts.items():
         if not cfg.get("cycle_reminder_enabled"):
@@ -505,7 +520,13 @@ def _check_cycle_reminders():
         days_held = _count_rollover_days(oldest_epoch, now_epoch=now_ts, day_schedule=day_sched)
         label = get_account_label(acct_id)
 
-        # Check Friday weekend survival
+        # ── Check 1: Will position breach max_days at the NEXT daily rollover? ──
+        # This catches any day-of-week where the next rollover weight is heavy
+        # (e.g. Wed=3 for AVA) and the current age is close enough to push over.
+        proj_eod_days = _count_rollover_days(oldest_epoch, now_epoch=next_rollover_ts, day_schedule=day_sched)
+        wont_survive_eod = (proj_eod_days > max_days) and (days_held < max_days)
+
+        # ── Check 2: Friday weekend survival (Mon open projection) ──
         wont_survive_weekend = False
         proj_monday_days = None
         if is_friday_period:
@@ -514,7 +535,7 @@ def _check_cycle_reminders():
             if proj_monday_days > max_days:
                 wont_survive_weekend = True
 
-        is_critical = days_held >= max_days or wont_survive_weekend
+        is_critical = days_held >= max_days or wont_survive_eod or wont_survive_weekend
         is_warning = days_held >= remind_days
 
         if is_critical:
@@ -525,7 +546,13 @@ def _check_cycle_reminders():
             continue  # Don't include OK-level accounts in reminders
 
         msg = f"{label}: positions held {days_held:.1f} rollover days (remind {remind_days} / max {max_days})"
-        if wont_survive_weekend and days_held < max_days:
+        if wont_survive_eod:
+            # Determine the next rollover day name for the message
+            next_rollover_dt = datetime.fromtimestamp(next_rollover_ts, tz=NY_TZ)
+            day_name = next_rollover_dt.strftime("%A")  # e.g. "Wednesday"
+            msg += (f" — WILL REACH {proj_eod_days:.1f} DAYS AT {day_name.upper()} CLOSE "
+                    f"(Exceeds max {max_days}). CYCLE BEFORE {day_name.upper()} 5PM!")
+        elif wont_survive_weekend and days_held < max_days:
             msg += f" — WILL REACH {proj_monday_days:.1f} DAYS ON MONDAY (Exceeds max {max_days}). CYCLE BEFORE WEEKEND CLOSE!"
         elif is_critical:
             msg += " — CYCLE IMMEDIATELY"
@@ -539,6 +566,8 @@ def _check_cycle_reminders():
             "oldest_ts": oldest_epoch,
             "level": level,
             "message": msg,
+            "wont_survive_eod": wont_survive_eod,
+            "proj_eod_days": proj_eod_days,
             "wont_survive_weekend": wont_survive_weekend,
             "proj_monday_days": proj_monday_days
         }
@@ -6143,20 +6172,10 @@ def _should_issue_command(session, account):
         acct_fills.sort(key=_clm_sort_key)
         total_to_cycle = len(acct_fills)
 
-        # --- Age filter (cycle_limit_days, required) ---
+        # --- Age filter (cycle_limit_days, required — must be set by user) ---
         cycle_limit_days = session.get("cycle_limit_days")
-        # --- Age filter (cycle_limit_days, required) ---
-        cycle_limit_days = session.get("cycle_limit_days")
-        if cycle_limit_days is None or cycle_limit_days == "":
-            _acct_cfg_lm_fallback = None
-            if mt_direct_manager and account in mt_direct_manager.accounts:
-                _acct_cfg_lm_fallback = mt_direct_manager.accounts[account].config
-            elif fix_manager and account in fix_manager.accounts:
-                _acct_cfg_lm_fallback = fix_manager.accounts[account].config
-            if _acct_cfg_lm_fallback:
-                cycle_limit_days = _acct_cfg_lm_fallback.get("cycle_max_days") or _acct_cfg_lm_fallback.get("cycle_reminder_days")
         print(f"[CYCLE-LM-DBG] acct={account}: cycle_limit_days={repr(cycle_limit_days)} idx={idx} fills={total_to_cycle} phase={phase}")
-        if cycle_limit_days is None or cycle_limit_days == "":
+        if cycle_limit_days is None or cycle_limit_days == "" or str(cycle_limit_days).strip() == "":
             print(f"[CYCLE-LM-DBG] acct={account}: cycle_limit_days not set — blocked")
             return False
         try:
@@ -6648,18 +6667,10 @@ def _should_issue_command(session, account):
                            for f in acct_fills[:5]]
             print(f"[CYCLE-LIMIT-ORDER] acct={account}: sorted fill order (oldest-first): {_order_info}")
 
-        # --- Age filter (cycle_limit_days, required) ---
+        # --- Age filter (cycle_limit_days, required — must be set by user) ---
         cycle_limit_days = session.get("cycle_limit_days")
-        if cycle_limit_days is None or cycle_limit_days == "":
-            _acct_cfg_cl_fallback = None
-            if mt_direct_manager and account in mt_direct_manager.accounts:
-                _acct_cfg_cl_fallback = mt_direct_manager.accounts[account].config
-            elif fix_manager and account in fix_manager.accounts:
-                _acct_cfg_cl_fallback = fix_manager.accounts[account].config
-            if _acct_cfg_cl_fallback:
-                cycle_limit_days = _acct_cfg_cl_fallback.get("cycle_max_days") or _acct_cfg_cl_fallback.get("cycle_reminder_days")
         print(f"[CYCLE-LIMIT-DBG] acct={account}: cycle_limit_days={repr(cycle_limit_days)} idx={idx} fills={total_to_cycle} phase={phase}")
-        if cycle_limit_days is None or cycle_limit_days == "":
+        if cycle_limit_days is None or cycle_limit_days == "" or str(cycle_limit_days).strip() == "":
             print(f"[CYCLE-LIMIT-DBG] acct={account}: cycle_limit_days not set — blocked")
             return False
         try:
@@ -16173,7 +16184,13 @@ function renderSide(session, sideNum) {
       // Error/spread reject counts
       const errCount = (session.errors && session.errors[acc]) ? session.errors[acc].length : 0;
       const srCount = (session.spread_rejects && session.spread_rejects[acc]) || 0;
-      const errLabel = (errCount > 0 || srCount > 0) ? `<br><span style="font-size:0.7rem;color:var(--red);cursor:pointer;text-decoration:underline dotted" title="Click to clear errors" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>loadSessions())">err:${errCount} sr:${srCount} ✕</span>` : '';
+      // Errors = red clickable badge; spread rejects = amber waiting indicator (not an error)
+      const errLabel = errCount > 0
+        ? `<br><span style="font-size:0.7rem;color:var(--red);cursor:pointer;text-decoration:underline dotted" title="Click to clear errors" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>loadSessions())">err:${errCount} ✕</span>`
+        : '';
+      const srLabel = srCount > 0
+        ? `<br><span style="font-size:0.68rem;color:var(--orange)" title="Waiting for spread to narrow (${srCount} skipped)">⏳ spread</span>`
+        : '';
       let count;
       if (action === 'close') {
         const matchMode = session.match_mode || 'ticket';
@@ -16181,19 +16198,19 @@ function renderSide(session, sideNum) {
           const closedLots = (session.closed_lots && session.closed_lots[acc]) || 0;
           const filledLots = (session.filled_lots && session.filled_lots[acc]) || 0;
           const groupLabel = info.group ? ` | ${info.group}` : '';
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closedLots}/${filledLots} lots closed</span>${errLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closedLots}/${filledLots} lots closed</span>${errLabel}${srLabel}`;
         }
         count = (session.closed && session.closed[acc]) || 0;
         const target = session.close_count != null ? session.close_count : session.total_positions;
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${target} closed</span>${errLabel}`;
+        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${target} closed</span>${errLabel}${srLabel}`;
       } else if (action.startsWith('cycle_')) {
         // Derive cycling account using side_number, not Object.keys() order
         const cycleSideNum = (action === 'cycle_acc1' || action === 'cycle_limit_acc1' || action === 'cycle_lm_acc1') ? 1 : 2;
         if (info.side_number === cycleSideNum) {
           const progress = session.cycle_progress || {};
           const groupLabel = info.group ? ` | ${info.group}` : '';
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--orange)">CYCLING${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${progress.cycled||0} cycled (${progress.phase||'-'})</span>${errLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--orange)">CYCLING${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${progress.cycled||0} cycled (${progress.phase||'-'})</span>${errLabel}${srLabel}`;
         }
         // Non-cycling side: show net open positions
         let filled = (session.filled && session.filled[acc]) || 0;
@@ -16214,7 +16231,7 @@ function renderSide(session, sideNum) {
         count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
+        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}${srLabel}`;
 
       } else {
         let filled = (session.filled && session.filled[acc]) || 0;
@@ -16232,7 +16249,7 @@ function renderSide(session, sideNum) {
         count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}`;
+        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}${srLabel}`;
       }
     }
   }
@@ -16371,8 +16388,8 @@ function renderActions(session) {
   }
   html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="cloneSession('${session.id}')" title="Clone">⧉</button> `;
   const totalErrors = Object.values(session.errors||{}).reduce((s,v)=>s+v.length,0);
-  const totalSR = Object.values(session.spread_rejects||{}).reduce((s,v)=>s+v,0);
-  if (totalErrors > 0 || totalSR > 0) {
+  // Only show reset-errors button for actual errors — spread rejects are expected waiting behavior
+  if (totalErrors > 0) {
     html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--orange);border:1px solid var(--orange)" onclick="resetErrors('${session.id}')" title="Reset Errors">↺</button> `;
   }
   const hasRollback = session.rollback_needed && Object.values(session.rollback_needed).some(v=>v>0);

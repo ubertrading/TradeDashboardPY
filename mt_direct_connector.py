@@ -1729,6 +1729,21 @@ class MT4DirectAccount:
         info = self.dd["ea_account_info"].get(self.account_id, {})
         info["symbol"] = symbol
         self.dd["ea_account_info"][self.account_id] = info
+        if self._client and self._connected:
+            try:
+                target = symbol
+                if hasattr(self._client, 'Symbols'):
+                    syms = self._client.Symbols
+                    keys = syms if isinstance(syms, (list, tuple)) else getattr(getattr(self._client, 'Symbols', None), 'Infos', {})
+                    if keys:
+                        for k in keys:
+                            k_str = str(k)
+                            if k_str.upper() == symbol.upper() or k_str.upper().startswith(symbol.upper()) or symbol.upper().startswith(k_str.upper()):
+                                target = k_str
+                                break
+                self._client.Subscribe(target)
+            except Exception:
+                pass
         # Update QuoteBuffer target symbol so C# filters correctly
         if _quote_buffer is not None:
             try:
@@ -3860,6 +3875,20 @@ class MT5DirectAccount:
         info = self.dd["ea_account_info"].get(self.account_id, {})
         info["symbol"] = symbol
         self.dd["ea_account_info"][self.account_id] = info
+        if self._client and self._connected:
+            try:
+                target = symbol
+                syms_obj = getattr(self._client, 'Symbols', None)
+                infos = getattr(syms_obj, 'Infos', None) if syms_obj else None
+                if infos and hasattr(infos, 'Keys'):
+                    for k in infos.Keys:
+                        k_str = str(k)
+                        if k_str.upper() == symbol.upper() or k_str.upper().startswith(symbol.upper()) or symbol.upper().startswith(k_str.upper()):
+                            target = k_str
+                            break
+                self._client.Subscribe(target)
+            except Exception:
+                pass
         # Update QuoteBuffer target symbol so C# filters correctly
         global _quote_buffer
         if _quote_buffer is not None:
@@ -4271,6 +4300,9 @@ class MTDirectManager:
                                 session.get("spread_rejects", {}).get(account_id, 0) + 1
                             continue
                     logger.info("[%s] PASSED all gates for %s — executing order", account_id, pair)
+                    # Auto-clear spread_rejects so the ⏳ spread indicator disappears once spread normalises
+                    if session.get("spread_rejects", {}).get(account_id, 0) > 0:
+                        session.setdefault("spread_rejects", {})[account_id] = 0
 
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()

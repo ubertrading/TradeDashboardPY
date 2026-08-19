@@ -703,6 +703,30 @@ public class MtAccount
         _mt5.OnQuote += OnMt5Quote;
         _mt5.OnOrderUpdate += OnMt5OrderUpdate;
 
+        // Proactively unsubscribe unneeded symbols, then subscribe only to active open positions
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                if (_mt5?.Symbols?.Infos != null)
+                {
+                    foreach (var sym in _mt5.Symbols.Infos.Keys)
+                    {
+                        try { _mt5.Unsubscribe(sym); } catch { }
+                    }
+                }
+                var posSymbols = _positions.Values
+                    .Select(p => p.Symbol)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct();
+                foreach (var sym in posSymbols)
+                {
+                    try { _mt5?.Subscribe(sym); } catch { }
+                }
+            }
+            catch { }
+        });
+
         // Start heartbeat
         StartHeartbeat();
 
@@ -758,6 +782,27 @@ public class MtAccount
         _mt4.OnQuote += OnMt4Quote;
         _mt4.OnOrderUpdate += OnMt4OrderUpdate;
         _mt4.OnDisconnect += OnMt4Disconnect;
+
+        // Proactively unsubscribe unneeded symbols, then subscribe only to active open positions
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                if (_mt4?.Symbols != null && _mt4.Symbols.Length > 0)
+                {
+                    try { _mt4.Unsubscribe(_mt4.Symbols); } catch { }
+                }
+                var posSymbols = _positions.Values
+                    .Select(p => p.Symbol)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct();
+                foreach (var sym in posSymbols)
+                {
+                    try { _mt4?.Subscribe(sym); } catch { }
+                }
+            }
+            catch { }
+        });
 
         StartHeartbeat();
         PushPositions();
@@ -1198,8 +1243,32 @@ public class MtAccount
         {
             try
             {
-                if (IsMt5 && _mt5 != null) { try { _mt5.Subscribe(symbol); } catch { } }
-                else if (_mt4 != null) { try { _mt4.Subscribe(symbol); } catch { } }
+                if (IsMt5 && _mt5 != null)
+                {
+                    string target = symbol;
+                    if (_mt5.Symbols?.Infos != null)
+                    {
+                        var match = _mt5.Symbols.Infos.Keys.FirstOrDefault(k =>
+                            k.Equals(symbol, StringComparison.OrdinalIgnoreCase) ||
+                            k.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) ||
+                            symbol.StartsWith(k, StringComparison.OrdinalIgnoreCase));
+                        if (match != null) target = match;
+                    }
+                    try { _mt5.Subscribe(target); } catch { }
+                }
+                else if (_mt4 != null)
+                {
+                    string target = symbol;
+                    if (_mt4.Symbols != null && _mt4.Symbols.Length > 0)
+                    {
+                        var match = _mt4.Symbols.FirstOrDefault(k =>
+                            k.Equals(symbol, StringComparison.OrdinalIgnoreCase) ||
+                            k.StartsWith(symbol, StringComparison.OrdinalIgnoreCase) ||
+                            symbol.StartsWith(k, StringComparison.OrdinalIgnoreCase));
+                        if (match != null) target = match;
+                    }
+                    try { _mt4.Subscribe(target); } catch { }
+                }
             }
             catch { }
         });

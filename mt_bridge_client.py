@@ -1184,6 +1184,9 @@ class MtBridgeManager:
                             continue
 
                     logger.info("[%s] PASSED all gates for %s — executing order", account_id, pair)
+                    # Auto-clear spread_rejects so the ⏳ spread indicator disappears once spread normalises
+                    if session.get("spread_rejects", {}).get(account_id, 0) > 0:
+                        session.setdefault("spread_rejects", {})[account_id] = 0
 
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()
