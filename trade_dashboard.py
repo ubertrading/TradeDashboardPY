@@ -5064,10 +5064,12 @@ def _run_hedge_monitor_all():
                             if f.get("account") == account
                         )
                         _all_missing_already_recorded = missing_real and missing_real.issubset(_existing_close_tks)
-                        # Skip pausing for imported sessions, if a structural rollback is ALREADY pending,
-                        # OR if all missing tickets are already tracked in close_fills (rebalance just ran).
-                        if session.get("imported") or any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides) or _all_missing_already_recorded:
-                            print(f"[HEDGE-MON] External close detected for imported session {sid[:8]} on {account} (missing={len(missing_real)}/{len(expected_open)}) — recording close without pausing")
+                        # Skip pausing if broker is healthy (len(ea_open_tickets) > 0) so external closes
+                        # can be cleanly rebalanced on the paired side without locking up the session.
+                        # Only pause if broker reports 0 positions (suspected bridge disconnect/data loss).
+                        _is_broker_healthy = len(ea_open_tickets) > 0
+                        if session.get("imported") or any(session.get("rollback_needed", {}).get(a, 0) > 0 for a in sides) or _all_missing_already_recorded or _is_broker_healthy:
+                            print(f"[HEDGE-MON] External close detected on healthy account for session {sid[:8]} on {account} (missing={len(missing_real)}/{len(expected_open)}) — recording close for rebalancing without pausing")
                         else:
                             panic_msg = (
                                 f"🚨 <b>HEDGE PANIC CIRCUIT BREAKER TRIGGERED</b>: {account}\n"
