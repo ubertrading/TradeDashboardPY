@@ -16169,11 +16169,6 @@ function renderSide(session, sideNum) {
       } else {
         let filled = (session.filled && session.filled[acc]) || 0;
         let closed = (session.closed && session.closed[acc]) || 0;
-        // Also count close_fills for this account as an authoritative floor for closed.
-        // After a rebalance, rollback_closed callbacks may not have all fired yet, causing
-        // the closed counter to lag behind reality and showing a higher net count than actual.
-        const closeFillsForAcc = (session.close_fills || []).filter(f => f.account === acc).length;
-        closed = Math.max(closed, closeFillsForAcc);
         
         // Subtract positions that are currently closed but waiting to reopen (pending limit orders)
         const pendingLimitOpens = (session.cycle_limit_open_fills || []).filter(f => f.account === acc).length;
