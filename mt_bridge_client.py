@@ -1095,6 +1095,49 @@ class MtBridgeManager:
                 if session.get("status") not in ("active", "partial_close"):
                     continue
                 sides = session.get("sides", {})
+
+                action = session.get("action", "open")
+
+                # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
+                # Block command issuance for ALL linked accounts if ANY leg fails spread gate.
+                if action in ("open", "open_limit"):
+                    atomic_spread_ok = True
+                    for check_aid in sides:
+                        check_side = sides[check_aid]
+                        check_pair = (check_side.get("pair") or session.get("pair", "")).strip()
+                        check_max_spread = check_side.get("max_spread") if check_side.get("max_spread") is not None else session.get("max_spread_points")
+                        try:
+                            check_max_spread = float(check_max_spread) if check_max_spread is not None else None
+                        except (ValueError, TypeError):
+                            check_max_spread = None
+
+                        if check_max_spread is not None:
+                            check_obj = self.accounts.get(check_aid)
+                            cur_sp = None
+                            if check_obj and check_pair:
+                                try:
+                                    quote = check_obj.get_quote_direct(check_pair)
+                                    if quote:
+                                        cur_sp = quote.get("spread")
+                                except Exception:
+                                    pass
+                            if cur_sp is None:
+                                ea_i = self.dd["ea_account_info"].get(check_aid, {})
+                                cur_sp = ea_i.get("spread")
+
+                            if cur_sp is None:
+                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: no quote for %s — blocking session %s", check_aid, check_pair, session_id[:8])
+                                atomic_spread_ok = False
+                                break
+                            if cur_sp > check_max_spread:
+                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: spread %.1f > max %s for %s — blocking session %s", check_aid, cur_sp, check_max_spread, check_pair, session_id[:8])
+                                session.setdefault("spread_rejects", {})[check_aid] = session.get("spread_rejects", {}).get(check_aid, 0) + 1
+                                atomic_spread_ok = False
+                                break
+                    if not atomic_spread_ok:
+                        continue  # Skip entire session — neither side fires!
+                # ───────────────────────────────────────────────────────────────
+
                 for account_id in sides:
                     # Only process accounts managed by this manager
                     direct_acct = self.accounts.get(account_id)
@@ -1119,18 +1162,30 @@ class MtBridgeManager:
                             self.dd["ea_account_info"][account_id] = dst
                             self.dd["ea_heartbeats"][account_id] = time.time()
 
-                    # Debug: log rollback state before calling should_issue
+                    # Debug: log rollback state before calling should_issue (throttled to max 1x per 15s)
                     rb = session.get("rollback_needed", {})
                     if rb.get(account_id, 0) > 0:
-                        logger.info("[%s] ROLLBACK PENDING: rb_needed=%s rb_tickets=%s",
-                                    account_id, rb, session.get("rollback_tickets", {}))
+                        now_log = time.time()
+                        last_log = getattr(self, "_last_rb_log_ts", {}).get(account_id, 0)
+                        if now_log - last_log > 15:
+                            if not hasattr(self, "_last_rb_log_ts"):
+                                self._last_rb_log_ts = {}
+                            self._last_rb_log_ts[account_id] = now_log
+                            logger.info("[%s] ROLLBACK PENDING: rb_needed=%s rb_tickets=%s",
+                                        account_id, rb, session.get("rollback_tickets", {}))
 
                     result = should_issue(session, account_id)
 
-                    # Debug: log should_issue result for rollback cases
+                    # Debug: log should_issue result for rollback cases (throttled to max 1x per 15s)
                     if rb.get(account_id, 0) > 0:
-                        logger.info("[%s] should_issue returned: %s (status=%s action=%s)",
-                                    account_id, result, session.get("status"), session.get("action"))
+                        now_log = time.time()
+                        last_log = getattr(self, "_last_rb_ret_log_ts", {}).get(account_id, 0)
+                        if now_log - last_log > 15:
+                            if not hasattr(self, "_last_rb_ret_log_ts"):
+                                self._last_rb_ret_log_ts = {}
+                            self._last_rb_ret_log_ts[account_id] = now_log
+                            logger.info("[%s] should_issue returned: %s (status=%s action=%s)",
+                                        account_id, result, session.get("status"), session.get("action"))
 
                     # Debug: log should_issue result for cycle actions
                     action_dbg = session.get("action", "")
@@ -1191,8 +1246,6 @@ class MtBridgeManager:
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()
 
-                    action = session.get("action", "open")
-
                     # Queue the command for execution outside the lock
                     pending_commands.append((
                         direct_acct, session, session_id, account_id,
@@ -1201,8 +1254,45 @@ class MtBridgeManager:
 
         # Phase 2: Execute broker commands OUTSIDE the lock
         had_cycle = False
+
+        # Group open commands by session for simultaneous parallel dispatch
+        open_cmds_by_session = {}
+        non_open_cmds = []
+
+        for item in pending_commands:
+            (direct_acct, session, session_id, account_id, pair, lot_size, comment, result, action, side_info) = item
+            if action == "open" and result not in ("rollback", "cycle_close", "cycle_limit_close"):
+                open_cmds_by_session.setdefault(session_id, []).append(item)
+            else:
+                non_open_cmds.append(item)
+
+        # 1. Dispatch OPEN orders in parallel threads per session
+        for sid, open_items in open_cmds_by_session.items():
+            threads = []
+            def _exec_single_open(dacct, sess, sid_val, aid_val, pr, ls, cm, s_info):
+                try:
+                    trade_side = s_info.get("action", "buy")
+                    logger.info("[%s] SIMULTANEOUS OPEN: sending market order for %s %s %.2f lots", aid_val, trade_side.upper(), pr, ls)
+                    order_res = dacct.send_market_order(pr, trade_side, ls, session_id=sid_val, comment=cm)
+                    if isinstance(order_res, tuple) and not order_res[0]:
+                        logger.warning("[%s] SIMULTANEOUS OPEN order failed (returned False) — clearing in-flight", aid_val)
+                        self.dd["in_flight_commands"].pop((sid_val, aid_val), None)
+                except Exception as ex:
+                    logger.error("[%s] SIMULTANEOUS OPEN error: %s", aid_val, ex)
+                    self.dd["in_flight_commands"].pop((sid_val, aid_val), None)
+
+            for item in open_items:
+                (direct_acct, session, session_id, account_id, pair, lot_size, comment, result, action, side_info) = item
+                t = threading.Thread(target=_exec_single_open, args=(direct_acct, session, session_id, account_id, pair, lot_size, comment, side_info))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+
+        # 2. Process non-open commands sequentially
         for (direct_acct, session, session_id, account_id,
-             pair, lot_size, comment, result, action, side_info) in pending_commands:
+             pair, lot_size, comment, result, action, side_info) in non_open_cmds:
             try:
                 if result == "rollback":
                     self._send_close_command(direct_acct, session, account_id, pair, lot_size, comment)
@@ -1242,7 +1332,6 @@ class MtBridgeManager:
                         any_placed = False
                         placed_now = 0
                         if "MT5" in account_id.upper():
-                            import threading
                             threads = []
                             results = [False] * to_place
                             def _place_init_limit(i, lim_pr, b_pr):
@@ -1335,7 +1424,7 @@ class MtBridgeManager:
                             session_id=session_id, comment=comment
                         )
                     else:
-                        closed_tickets = session.get("cycle_progress", {}).get("closed_tickets", [])
+                        closed_tickets = session.get("cycle_progress", {}).get("closed_tickets_this_reopen") or session.get("cycle_progress", {}).get("closed_tickets", [])
                         if action.startswith("cycle_lm_") and closed_tickets:
                             batch_size = len(closed_tickets)
                         elif action.startswith("cycle_lm_") or action.startswith("cycle_limit_"):
@@ -1344,7 +1433,6 @@ class MtBridgeManager:
                             batch_size = 1
 
                         if batch_size > 1:
-                            import threading
                             threads = []
                             results = [False] * batch_size
                             def _place_mkt(i):

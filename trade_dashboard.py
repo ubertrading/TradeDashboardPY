@@ -724,6 +724,36 @@ _swap_delta = {
     "snapshot_date": None,  # date string of last pre-rollover snapshot
     "snapshot_ts": 0,   # epoch when snapshot was taken
 }
+SWAP_DELTAS_FILE = os.environ.get("TRADE_SWAP_DELTAS_FILE", os.path.join(_CONFIGS_DIR, "swap_deltas.json"))
+
+def _load_swap_deltas():
+    global _swap_delta
+    try:
+        if os.path.exists(SWAP_DELTAS_FILE):
+            with open(SWAP_DELTAS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    _swap_delta["pre"] = data.get("pre", {})
+                    _swap_delta["pre_by_instrument"] = data.get("pre_by_instrument", {})
+                    _swap_delta["delta"] = data.get("delta", {})
+                    _swap_delta["delta_by_instrument"] = data.get("delta_by_instrument", {})
+                    _swap_delta["snapshot_date"] = data.get("snapshot_date")
+                    _swap_delta["snapshot_ts"] = data.get("snapshot_ts", 0)
+            logger.info("[SWAP-DELTA] Loaded swap deltas from file (%d pre accounts, %d deltas)",
+                        len(_swap_delta["pre"]), len(_swap_delta["delta"]))
+    except Exception as e:
+        logger.error("[SWAP-DELTA] Failed loading swap deltas: %s", e)
+
+def _save_swap_deltas():
+    try:
+        tmp_file = SWAP_DELTAS_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(_swap_delta, f, indent=2)
+        os.replace(tmp_file, SWAP_DELTAS_FILE)
+    except Exception as e:
+        logger.error("[SWAP-DELTA] Failed saving swap deltas: %s", e)
+
+_load_swap_deltas()
 
 def _get_all_swap_values():
     """Collect current total_swap for every known account."""
@@ -766,15 +796,13 @@ def _get_all_swap_breakdowns():
 def _compute_swap_deltas_live():
     """Compute swap deltas by comparing current swap values to the pre-rollover snapshot.
     Called from get_status on every poll after rollover."""
-    if not _swap_delta["pre"]:
-        return {}
-    now_et = datetime.now(NY_TZ)
-    # Only compute deltas after 5 PM ET and before the next snapshot (4:58 PM next day)
-    if now_et.hour < 17:
-        # Before 5 PM — show yesterday's computed delta if available
+    if not _swap_delta.get("pre"):
         return _swap_delta.get("delta", {})
-    # After 5 PM: compute live delta = current - pre
+
     current = _get_all_swap_values()
+    if not current:
+        return _swap_delta.get("delta", {})
+
     delta = {}
     delta_by_inst = {}
     for aid, cur_val in current.items():
@@ -799,9 +827,12 @@ def _compute_swap_deltas_live():
         if inst_deltas:
             delta_by_inst[aid] = inst_deltas
 
-    _swap_delta["delta"] = delta
-    _swap_delta["delta_by_instrument"] = delta_by_inst
-    return delta
+    if delta != _swap_delta.get("delta") or delta_by_inst != _swap_delta.get("delta_by_instrument"):
+        _swap_delta["delta"] = delta
+        _swap_delta["delta_by_instrument"] = delta_by_inst
+        _save_swap_deltas()
+
+    return _swap_delta.get("delta", {})
 
 def _calculate_optimal_fund_distributions(all_accounts_info):
     """
@@ -1082,6 +1113,7 @@ def _swap_delta_loop():
             _swap_delta["snapshot_ts"] = time.time()
             _swap_delta["delta"] = {}  # Clear old deltas; live computation will repopulate after 5 PM
             _swap_delta["delta_by_instrument"] = {}
+            _save_swap_deltas()
             logger.info("[SWAP-DELTA] Pre-rollover snapshot taken: %d accounts on %s | values: %s",
                         len(snap), snap_date,
                         {k: v for k, v in list(snap.items())[:5]})  # Log first 5 for diagnostics
@@ -1475,7 +1507,7 @@ _SYMBOL_SUFFIX_RE = _re.compile(
     (?:
         [._]        # separator: dot or underscore
         [a-zA-Z0-9]* # followed by zero or more alphanumeric chars (.b, .ecn, _raw, . etc.)
-    |   [+\-]$      # OR a trailing + or - (GBPCHF+ / GBPCHF-)
+    |   [+\-#@!$]$  # OR a trailing +, -, #, @, !, $
     )$"""
 )
 
@@ -1838,11 +1870,190 @@ def _snapshot_scheduler():
 _snapshot_thread = threading.Thread(target=_snapshot_scheduler, daemon=True, name="ReportingSnapshot")
 _snapshot_thread.start()
 
+# ─── Daily Account Statements ────────────────────────────────────────────────
+_STMTS_DIR = os.path.join(_SCRIPT_DIR, "stmts")
+os.makedirs(_STMTS_DIR, exist_ok=True)
+
+def _save_daily_statements(date_str=None):
+    """Save full account statements for all connected accounts to stmts/YYYY-MM-DD/.
+
+    Each statement file contains:
+      - Account ID, date, balance, equity, margin, free_margin, leverage
+      - Open positions (ticket, symbol, side, lots, open_price, open_time, profit, swap, tp, sl)
+      - Today's closed trade PnL from broker deal history (pnl, swap, fees, deal_count)
+      - Lots and PnL breakdown by symbol
+
+    A summary.json is also written in the same directory with totals across all accounts.
+    """
+    try:
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        day_dir = os.path.join(_STMTS_DIR, date_str)
+        os.makedirs(day_dir, exist_ok=True)
+
+        # Date range for today's deal history: midnight → now (UTC)
+        today_start = datetime.strptime(date_str, "%Y-%m-%d")
+        day_from_ts = today_start.timestamp()
+        day_to_ts   = day_from_ts + 86400  # +24 h
+
+        all_accounts = {}
+
+        # ── 1. Gather live data from ea_account_info (all connector types) ──
+        with lock:
+            for acct_id, info in ea_account_info.items():
+                all_accounts[acct_id] = dict(info)
+        # Also include manual/FIX accounts that may not appear in ea_account_info
+        for acct_id, info in manual_accounts.items():
+            if acct_id not in all_accounts:
+                all_accounts[acct_id] = dict(info)
+
+        if not all_accounts:
+            logger.info("[STMTS] No accounts found — skipping statement save for %s", date_str)
+            return
+
+        summary_rows = []
+        generated_ts = time.time()
+
+        for acct_id, info in all_accounts.items():
+            try:
+                stmt = {
+                    "account_id":  acct_id,
+                    "date":        date_str,
+                    "generated_ts": generated_ts,
+                    "balance":     info.get("balance"),
+                    "equity":      info.get("equity"),
+                    "margin":      info.get("margin"),
+                    "free_margin": info.get("free_margin"),
+                    "leverage":    info.get("leverage"),
+                    "conn_type":   info.get("conn_type", ""),
+                    "group_label": (
+                        manual_accounts.get(acct_id, {}).get("group_label") or
+                        info.get("group_label", "")
+                    ),
+                }
+
+                # ── Open positions ──────────────────────────────────────────
+                open_positions = []
+                pos_val = info.get("position_details") or []
+                pos_dict = info.get("positions") or {}  # bridge uses dict form
+                if isinstance(pos_val, list) and pos_val:
+                    # position_details list (bridge & mt_direct connector format)
+                    for p in pos_val:
+                        open_positions.append({
+                            "ticket":     p.get("ticket"),
+                            "symbol":     p.get("symbol", ""),
+                            "comment":    p.get("comment", ""),
+                            "open_price": p.get("open_price"),
+                            "open_epoch": p.get("open_epoch"),
+                            "profit":     p.get("profit"),
+                            "swap":       p.get("swap"),
+                            "lots":       p.get("lots"),
+                            "tp":         p.get("tp"),
+                            "sl":         p.get("sl"),
+                        })
+                elif isinstance(pos_dict, dict) and pos_dict:
+                    # Bridge positions dict keyed by ticket
+                    for ticket, p in pos_dict.items():
+                        open_positions.append({
+                            "ticket":     ticket,
+                            "symbol":     p.get("symbol", ""),
+                            "side":       "buy" if p.get("type") == 0 else "sell",
+                            "lots":       p.get("lots"),
+                            "open_price": p.get("open_price"),
+                            "open_time":  p.get("open_time"),
+                            "profit":     p.get("profit"),
+                            "swap":       p.get("swap"),
+                            "tp":         p.get("tp"),
+                            "sl":         p.get("sl"),
+                        })
+                stmt["open_positions"]      = open_positions
+                stmt["open_position_count"] = len(open_positions)
+                stmt["lots_by_instrument"]  = info.get("lots_by_instrument", {})
+                stmt["swap_by_instrument"]  = info.get("swap_by_instrument", {})
+
+                # ── Today's closed deal history ─────────────────────────────
+                deal_hist = None
+                acct_obj  = None
+                if mt_direct_manager:
+                    acct_obj = mt_direct_manager.accounts.get(acct_id)
+                if acct_obj and hasattr(acct_obj, "get_deal_history"):
+                    try:
+                        deal_hist = acct_obj.get_deal_history(
+                            day_from_ts, day_to_ts, exclude_balance=True)
+                    except Exception as _dh_err:
+                        logger.warning("[STMTS] deal_history failed for %s: %s", acct_id, _dh_err)
+
+                if deal_hist:
+                    stmt["day_pnl"]        = deal_hist.get("pnl")
+                    stmt["day_swap"]       = deal_hist.get("swap")
+                    stmt["day_fees"]       = deal_hist.get("fees")
+                    stmt["day_deal_count"] = deal_hist.get("deal_count")
+                    stmt["day_by_symbol"]  = deal_hist.get("by_symbol", {})
+                else:
+                    stmt["day_pnl"] = stmt["day_swap"] = stmt["day_fees"] = stmt["day_deal_count"] = None
+                    stmt["day_by_symbol"] = {}
+
+                # ── Write per-account file ──────────────────────────────────
+                safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
+                stmt_path = os.path.join(day_dir, f"{safe_id}.json")
+                with open(stmt_path, "w", encoding="utf-8") as _f:
+                    json.dump(stmt, _f, indent=2, default=str)
+
+                summary_rows.append({
+                    "account_id":   acct_id,
+                    "group_label":  stmt["group_label"],
+                    "balance":      stmt["balance"],
+                    "equity":       stmt["equity"],
+                    "open_count":   stmt["open_position_count"],
+                    "day_pnl":      stmt["day_pnl"],
+                    "day_swap":     stmt["day_swap"],
+                    "day_fees":     stmt["day_fees"],
+                    "day_deal_count": stmt["day_deal_count"],
+                })
+
+            except Exception as _acct_err:
+                logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err)
+
+        # ── Write summary ───────────────────────────────────────────────────
+        summary = {
+            "date":          date_str,
+            "generated_ts":  generated_ts,
+            "account_count": len(summary_rows),
+            "accounts":      summary_rows,
+        }
+        summary_path = os.path.join(day_dir, "summary.json")
+        with open(summary_path, "w", encoding="utf-8") as _f:
+            json.dump(summary, _f, indent=2, default=str)
+
+        logger.info("[STMTS] Saved daily statements for %s: %d accounts → %s",
+                    date_str, len(summary_rows), day_dir)
+
+    except Exception as e:
+        logger.error("[STMTS] Statement save error for %s: %s", date_str, e, exc_info=True)
+
+
+def _daily_statements_loop():
+    """Background thread: save account statements once per day at midnight."""
+    import time as _time
+    # Initial run after a short delay so connections can settle on startup
+    _time.sleep(15)
+    _save_daily_statements()
+    while True:
+        now      = datetime.now()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+        _time.sleep((tomorrow - now).total_seconds())
+        _save_daily_statements()
+
+
+threading.Thread(target=_daily_statements_loop, daemon=True, name="DailyStatements").start()
+
+
 # ─── Dashboard Settings (alerts, notifications) ────────────────────────────
 _DEFAULT_SETTINGS = {
     "email": {"enabled": False, "smtp_host": "", "smtp_port": 587,
               "smtp_user": "", "smtp_pass": "", "from_addr": "", "to_addr": ""},
-    "telegram": {"enabled": False, "bot_token": "", "chat_id": ""},
+    "telegram": {"enabled": False, "bot_token": "", "chat_id": "", "quiet_hours_enabled": False, "quiet_start": "22:00", "quiet_end": "07:00"},
+    "telegram_red_alert": {"enabled": False, "bot_token": "", "chat_id": ""},
     "fee_thresholds": {},  # account_name -> threshold (default 0 = any fee)
     "fee_keywords_per_name": {},  # name -> "keyword1,keyword2" (overrides global)
     "stats_log_accounts": [],     # accounts opted in for market stats CSV logging
@@ -2033,16 +2244,38 @@ def _send_email_direct(recipients, subject, body, is_html=False):
         app.logger.exception("Direct email send failed")
         return False, str(e)
 
-def _send_telegram(message, account_id=None):
-    """Send Telegram message via Bot API. Returns (success, error_msg)."""
-    cfg = dashboard_settings.get("telegram", {})
+def _is_in_quiet_hours(start_str, end_str):
+    """Return True if current local time falls within [start_str, end_str] (HH:MM format)."""
+    try:
+        from datetime import datetime
+        now = datetime.now().time()
+        s_h, s_m = map(int, str(start_str).split(":"))
+        e_h, e_m = map(int, str(end_str).split(":"))
+        start_time = datetime.now().replace(hour=s_h, minute=s_m, second=0, microsecond=0).time()
+        end_time = datetime.now().replace(hour=e_h, minute=e_m, second=0, microsecond=0).time()
+        
+        if start_time <= end_time:
+            return start_time <= now <= end_time
+        else:
+            return now >= start_time or now <= end_time
+    except Exception:
+        return False
+
+def _send_telegram_single_channel(cfg, message, account_id=None, red_alert=False):
+    """Helper to send a message via a specific telegram config dict (telegram or telegram_red_alert)."""
     if not cfg.get("enabled"):
-        return False, "Telegram not enabled"
+        return False, "Telegram channel not enabled"
     token = cfg.get("bot_token", "")
     if not token:
         return False, "Bot token not configured"
         
-    # Collect chat IDs: start with global chat ID(s) and append per-account overrides
+    # Check quiet hours for standard notifications (red_alert ALWAYS bypasses quiet hours)
+    if not red_alert and cfg.get("quiet_hours_enabled"):
+        q_start = cfg.get("quiet_start", "22:00")
+        q_end = cfg.get("quiet_end", "07:00")
+        if _is_in_quiet_hours(q_start, q_end):
+            return False, f"Standard Telegram alert suppressed during quiet hours ({q_start} - {q_end})"
+        
     chat_ids = []
     global_chat = cfg.get("chat_id", "")
     if global_chat:
@@ -2051,11 +2284,10 @@ def _send_telegram(message, account_id=None):
     if account_id:
         acct_cfg = _get_account_config(account_id)
         if acct_cfg:
-            local_chat = acct_cfg.get("alert_telegram")
+            local_chat = acct_cfg.get("alert_telegram_red" if red_alert else "alert_telegram")
             if local_chat:
                 chat_ids.extend([cid.strip() for cid in str(local_chat).split(",") if cid.strip()])
                 
-    # Deduplicate while preserving order
     seen = set()
     chat_ids = [cid for cid in chat_ids if not (cid in seen or seen.add(cid))]
     
@@ -2090,6 +2322,35 @@ def _send_telegram(message, account_id=None):
         return True, None
     else:
         return False, "; ".join(errors)
+
+def _send_telegram(message, account_id=None, red_alert=False):
+    """Send Telegram message via Bot API. Returns (success, error_msg).
+    If red_alert is True, attempts to send via Red Alert channel (telegram_red_alert) first,
+    and also dispatches to standard Telegram channel if enabled.
+    """
+    if red_alert:
+        red_cfg = dashboard_settings.get("telegram_red_alert", {})
+        red_ok = False
+        red_err = None
+        if red_cfg.get("enabled"):
+            red_ok, red_err = _send_telegram_single_channel(red_cfg, message, account_id=account_id, red_alert=True)
+            
+        std_cfg = dashboard_settings.get("telegram", {})
+        std_ok = False
+        std_err = None
+        if std_cfg.get("enabled"):
+            std_ok, std_err = _send_telegram_single_channel(std_cfg, message, account_id=account_id, red_alert=False)
+            
+        if red_ok or std_ok:
+            return True, None
+        return False, red_err or std_err or "Neither Telegram nor Red Alert Telegram is enabled/configured"
+    else:
+        std_cfg = dashboard_settings.get("telegram", {})
+        return _send_telegram_single_channel(std_cfg, message, account_id=account_id, red_alert=False)
+
+def _send_red_alert_telegram(message, account_id=None):
+    """Helper to send high-priority Red Alert notifications to the dedicated Red Alert Telegram bot."""
+    return _send_telegram(message, account_id=account_id, red_alert=True)
 
 def _send_fee_alert(account, fee_entry):
     """Check threshold and send fee alert via enabled channels (in background)."""
@@ -2798,6 +3059,8 @@ def _disbalance_alert_loop():
                             _send_email(s, b)
                         if dashboard_settings.get("disbalance_alert_telegram", True):
                             _send_telegram(tm)
+                        # Dispatch Red Alert notification for confirmed disbalance
+                        _send_red_alert_telegram(f"🚨 <b>RED ALERT — HEDGE DISBALANCE</b>\n" + tm)
                     threading.Thread(target=_send, args=(subject, body, tg_msg), daemon=True).start()
 
             # Sleep briefly before next check
@@ -3044,7 +3307,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     # Determine batch size from session
     try:
         if session.get("action", "").startswith(("cycle_limit_", "cycle_lm_")):
-            closed_tickets = progress.get("closed_tickets", [])
+            closed_tickets = progress.get("closed_tickets_this_reopen") or progress.get("closed_tickets", [])
             batch_size = len(closed_tickets) if closed_tickets else int(session.get("cycle_limit_batch_size", 1))
         else:
             batch_size = 1
@@ -3089,7 +3352,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     print(f"[CYCLE] Batch fill {fills_so_far}/{batch_size} received on {account}: ticket={ticket}")
 
     # Replace closed fills with the new fills using the closed_tickets list (set by watchdog/TP handler)
-    closed_tickets = list(progress.get("closed_tickets", []))
+    closed_tickets = list(progress.get("closed_tickets_this_reopen", [])) or list(progress.get("closed_tickets", []))
     # Backwards-compat: handle old single closed_ticket field
     if not closed_tickets:
         old_ct = progress.get("closed_ticket")
@@ -3124,7 +3387,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                     replaced_idx = i
                     break
         if replaced_idx is not None:
-            old_t = session["fills"][replaced_idx].get("ticket")
+            old_f = session["fills"][replaced_idx]
             session["fills"][replaced_idx] = new_fill
             replaced = True
             print(f"[CYCLE] Replaced stale fill ticket={old_t} with new ticket={ticket} at fills[{replaced_idx}]")
@@ -3295,19 +3558,24 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                         matching_pos = [
                             p for p in pos_val
                             if isinstance(p, dict) and p.get("symbol") and _symbol_matches(p.get("symbol"), a_pair)
+                            and str(p.get("ticket")) not in closed_set_a
                         ]
-                        pos_tickets = set(str(p.get("ticket")) for p in matching_pos if p.get("ticket"))
+                        pos_tickets = set(str(p.get("ticket")) for p in matching_pos if p.get("ticket") is not None)
                         count = len(matching_pos)
                         # Reconcile recently filled tickets (last 15s) confirmed via order socket but not yet in background poll
-                        for f in sess_active_a:
-                            t_str = str(f.get("ticket"))
-                            ts_e = f.get("ts_epoch") or 0
-                            if t_str and t_str not in pos_tickets and (now_epoch - ts_e <= 15.0):
-                                count += 1
-                                pos_tickets.add(t_str)
+                        # ONLY reconcile if count < expected_count to avoid double-counting fresh fills when broker poll is already up-to-date
+                        if count < expected_count:
+                            for f in sess_active_a:
+                                t_str = str(f.get("ticket"))
+                                ts_e = f.get("ts_epoch") or 0
+                                if t_str and t_str not in pos_tickets and (now_epoch - ts_e <= 15.0):
+                                    count += 1
+                                    pos_tickets.add(t_str)
+                                    if count >= expected_count:
+                                        break
                         acct_counts[a] = count
                     elif open_tickets is not None and isinstance(open_tickets, (list, set)):
-                        ea_open_set = set(str(t) for t in open_tickets)
+                        ea_open_set = set(str(t) for t in open_tickets if str(t) not in closed_set_a)
                         count = 0
                         for f in sess_active_a:
                             t_str = str(f.get("ticket"))
@@ -3322,10 +3590,10 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
             counts = _get_acct_counts()
             actual = counts.get(account, -1)
 
-            # If count is less than expected, wait briefly and retry up to 2 times for background polling loop to sync
+            # If count does not match expected, wait briefly and retry up to 3 times for background polling loop to sync
             retry_count = 0
-            while actual >= 0 and actual < expected_count and retry_count < 2:
-                time.sleep(0.5)
+            while actual >= 0 and actual != expected_count and retry_count < 3:
+                time.sleep(1.0)
                 retry_count += 1
                 counts = _get_acct_counts()
                 actual = counts.get(account, -1)
@@ -3463,7 +3731,7 @@ def _new_session(data):
         "status": "draft",
         "filled": {a: 0 for a in accounts},
         "closed": {a: 0 for a in accounts},
-        "close_count": data.get("close_count"),
+        "close_count": int(data["close_count"]) if (data.get("close_count") is not None and data.get("close_count") != "") else None,
         "action": data.get("action", "monitor"),
         "created_at": now,
         "updated_at": now,
@@ -4246,9 +4514,17 @@ def _run_hedge_monitor_all():
             sess_action = session.get("action", "")
             if sess_action in ("close", "close_limit"):
                 continue
-            # Cycle mode: skip hedge monitor entirely — cycle deliberately closes/reopens
+            # Cycle mode: allow hedge monitor ONLY when fully settled post-reopen
+            # (i.e. phase=="close", no close/reopen in-flight, and not waiting for reopen fill)
             if sess_action.startswith("cycle_"):
-                continue
+                cycle_prog = session.get("cycle_progress", {})
+                phase = cycle_prog.get("phase", "close")
+                flight_active = any(
+                    in_flight_commands.get((sid, a), 0) > 0 and (now_ts - in_flight_commands.get((sid, a), 0)) < 10
+                    for a in sides
+                )
+                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set"):
+                    continue
             # Post-cycle cooldown: skip hedge monitor for 30s after cycle completes.
             # The cycle close/reopen replaces tickets, and the broker's position list
             # may briefly lag behind close_fills — causing false "missing ticket" detections.
@@ -4316,7 +4592,7 @@ def _run_hedge_monitor_all():
                 continue
 
             # ── IMBALANCE REBALANCE: close excess positions on the higher side ──
-            if sess_action in ("monitor", "open"):
+            if sess_action in ("monitor", "open") or sess_action.startswith("cycle_"):
                 accs = list(sides.keys())
                 if len(accs) >= 2:
                     # Skip imbalance check if a close_deal is still in-flight or cycling completed recently
@@ -4394,6 +4670,16 @@ def _run_hedge_monitor_all():
                         if net_1 is None or net_2 is None:
                             pass  # One or both sides have stale data — skip
                         elif net_1 != net_2:
+                            # ── OPENING / REBALANCING GRACE PERIOD ──
+                            # If session is in OPEN mode and a fill occurred recently (within last 15s),
+                            # grant a grace period for the counterparty leg to execute/pass spread gate.
+                            last_fill_ts = max((f.get("ts_epoch", 0) for f in session.get("fills", [])), default=0)
+                            in_open_mode = session.get("action", "") in ("open", "open_limit")
+                            if in_open_mode and (now_ts - last_fill_ts) < 15.0:
+                                print(f"[HEDGE-REBAL] sid={session.get('id', '')[:8]}: SUPPRESSING rollback "
+                                      f"({net_1} vs {net_2}) — in OPEN mode with recent fill (age={round(now_ts - last_fill_ts, 1)}s < 15s grace period)")
+                                continue
+
                             # ── GLOBAL HEDGE SAFETY CHECK (per-instrument) ──
                             # Do not prompt for rollback if the portfolio is perfectly hedged
                             # globally across all accounts on EVERY individual instrument.
@@ -4484,27 +4770,60 @@ def _run_hedge_monitor_all():
                                     print(f"[HEDGE-REBAL] ticket-match: paired={paired_count} orphaned={len(orphaned)} closing={tickets_to_close}")
 
                                     # ── CLOSED DEAL HISTORY VERIFICATION ──
-                                    # Verify that missing counterparty positions on min_acc are backed by confirmed closed deals
+                                    # Verify that missing counterparty positions on min_acc are backed by confirmed closed deals on the broker
                                     min_close_fills = [cf for cf in session.get("close_fills", []) if cf.get("account") == min_acc]
                                     has_verified = any(cf.get("verified") for cf in min_close_fills)
                                     if mt_direct_manager and not has_verified:
                                         min_acct_obj = mt_direct_manager.accounts.get(min_acc)
-                                        if min_acct_obj and hasattr(min_acct_obj, 'get_deal_history') and getattr(min_acct_obj, 'connected', False):
-                                            try:
-                                                deal_hist = min_acct_obj.get_deal_history(0, int(now_ts), exclude_balance=True)
-                                                if deal_hist and isinstance(deal_hist, dict):
-                                                    deals = deal_hist.get("deals") or []
-                                                    if len(deals) > 0:
-                                                        has_verified = True
-                                            except Exception as _e:
-                                                print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
-                                    if not has_verified and len(min_close_fills) == 0:
-                                        print(f"[HEDGE-REBAL] Suppressing rollback for {max_acc} — missing counterparty positions on {min_acc} are unverified in deal history")
+                                        if min_acct_obj and getattr(min_acct_obj, 'connected', False):
+                                            # Identify candidate missing tickets on min_acc
+                                            min_ea_open_norm = set(_normalize_ticket(t) for t in min_info.get("open_tickets", []))
+                                            min_close_set_norm = set(_normalize_ticket(f["ticket"]) for f in min_close_fills)
+                                            candidate_missing = [
+                                                _normalize_ticket(f["ticket"]) for f in session.get("fills", [])
+                                                if f.get("account") == min_acc
+                                                and _normalize_ticket(f["ticket"]) not in min_close_set_norm
+                                                and _normalize_ticket(f["ticket"]) not in min_ea_open_norm
+                                            ]
+                                            if candidate_missing and hasattr(min_acct_obj, '_confirm_closed_tickets'):
+                                                try:
+                                                    has_verified = min_acct_obj._confirm_closed_tickets(candidate_missing)
+                                                except Exception as _e:
+                                                    print(f"[HEDGE-REBAL] Ticket history verification warning for {min_acc}: {_e}")
+                                            
+                                            # For Netting accounts or general deal history fallback
+                                            if not has_verified and hasattr(min_acct_obj, 'get_deal_history'):
+                                                try:
+                                                    dh = min_acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True)
+                                                    if dh and isinstance(dh, dict):
+                                                        deals_list = dh.get("deals") or dh.get("orders") or []
+                                                        if deals_list:
+                                                            has_verified = True
+                                                        elif dh.get("deal_count", 0) > 0:
+                                                            has_verified = True
+                                                        elif min_netting and dh.get("by_symbol"):
+                                                            has_verified = True
+                                                except Exception as _e:
+                                                    print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
+                                    if not has_verified:
+                                        print(f"[HEDGE-REBAL] Suppressing rollback for {max_acc} — missing counterparty positions on {min_acc} are unverified in deal history (transient desync)")
                                         tickets_to_close = []
                                 else:
                                     tickets_to_close = [_normalize_ticket(f["ticket"]) for f in open_session_fills[:excess]]
                                     print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
                                     
+                                if tickets_to_close:
+                                    # ── IMBALANCE PERSISTENCE DEBOUNCE (3-second buffer) ──
+                                    # Require imbalance to persist for >= 3 seconds to absorb transient snapshot drops on all account types
+                                    imbalance_start = session.get("_imbalance_first_seen_ts", 0)
+                                    if imbalance_start == 0:
+                                        session["_imbalance_first_seen_ts"] = now_ts
+                                        print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} (excess={excess}) — waiting 3.0s for persistence...")
+                                        tickets_to_close = []
+                                    elif (now_ts - imbalance_start) < 3.0:
+                                        print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} ({now_ts - imbalance_start:.1f}s / 3.0s)...")
+                                        tickets_to_close = []
+
                                 if tickets_to_close:
                                     # Skip if user already rejected a rollback for this account.
                                     # "NO means NO" — don't re-prompt until session is reimported.
@@ -4532,8 +4851,15 @@ def _run_hedge_monitor_all():
                                         _save_sessions()
                                         continue
                         else:
-                            # Fills balanced — clear imbalance cooldown so ticket
-                            # detection resumes for genuine external closes
+                            # Fills balanced — clear imbalance debounce timestamp and auto-clear any pending structural rollbacks
+                            session.pop("_imbalance_first_seen_ts", None)
+                            if session.get("rollback_needed") or session.get("rollback_tickets"):
+                                print(f"[HEDGE-REBAL] sid={sid[:8]}: Fills balanced ({net_1} vs {net_2}) — auto-clearing pending structural rollback")
+                                session["rollback_needed"] = {}
+                                session["rollback_tickets"] = {}
+                                session.pop("rollback_start_ts", None)
+                                session.pop("rollback_reason", None)
+                                _save_sessions()
                             session.pop("imbalance_rebal_ts", None)
 
             # ── Check each account using ea_account_info ──
@@ -4721,13 +5047,14 @@ def _run_hedge_monitor_all():
                                     or (_open_dispatched and _phase_is_open and session.get("cycle_account") == account)
                                 )
                                 
-                                if pair_matches and (is_waiting_limit or (sess_id_short in comment) or (sess_comment and sess_comment in comment)):
+                                if pair_matches and (is_waiting_limit or (sess_id_short in comment) or (sess_comment and (sess_comment in comment or (len(comment) >= 10 and comment in sess_comment)))):
                                     print(f"[AUTO-HEAL] Found untracked ticket {t} ({symbol}) for session {sess_id_short} on {account} (is_waiting_limit={is_waiting_limit})")
                                     
                                     # Fallback to session lot size if not provided
                                     heal_lots = session.get("sides", {}).get(account, {}).get("lot_size")
                                     if not heal_lots:
                                         heal_lots = session.get("lot_size", 0.01)
+                                    heal_price = float(pos.get("open_price", 0.0) or 0.0)
                                         
                                     # Check if this is the pending limit fill we're waiting for.
                                     # IMPORTANT: also check cycle_progress.phase even if action == "monitor"
@@ -4777,7 +5104,7 @@ def _run_hedge_monitor_all():
                                                     _orig_ts_epoch = _fentry.get("ts_epoch", _orig_ts_epoch)
                                                     break
                                             session.setdefault("fills", []).append({
-                                                "account": account, "ticket": t, "price": 0.0,
+                                                "account": account, "ticket": t, "price": heal_price,
                                                 "lots": float(heal_lots), "ts": _orig_ts,
                                                 "ts_epoch": _orig_ts_epoch, "auto_healed": True,
                                             })
@@ -4827,7 +5154,7 @@ def _run_hedge_monitor_all():
                                             session.setdefault("fills", []).append({
                                                 "account": account,
                                                 "ticket": t,
-                                                "price": 0.0,
+                                                "price": heal_price,
                                                 "lots": float(heal_lots),
                                                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                                 "ts_epoch": time.time(),
@@ -4863,7 +5190,7 @@ def _run_hedge_monitor_all():
                                                 session.setdefault("fills", []).append({
                                                     "account": account,
                                                     "ticket": t,
-                                                    "price": 0.0,
+                                                    "price": heal_price,
                                                     "lots": float(heal_lots),
                                                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                                     "ts_epoch": time.time(),
@@ -5449,7 +5776,22 @@ def _should_issue_command(session, account):
                 return False
             else:
                 # Not yet answered — register as pending and skip this cycle
-                _rollback_pending_confirmations[key] = None
+                if key not in _rollback_pending_confirmations:
+                    _rollback_pending_confirmations[key] = None
+                    rb_count = session.get("rollback_needed", {}).get(account, 0)
+                    pair = session.get("pair", "")
+                    reason = session.get("rollback_reason", {}).get(account, "")
+                    
+                    prompt_msg = (
+                        f"🚨 <b>RED ALERT: REBALANCE / ROLLBACK PROMPT</b>\n"
+                        f"Account: <code>{account}</code>\n"
+                        f"Pair: {pair}\n"
+                        f"Pending Closes: <b>{rb_count} position(s)</b>\n"
+                        f"Reason: {reason or 'Structural imbalance / missing counterparty'}\n"
+                        f"Session ID: <code>{session.get('id', '')[:8]}</code>\n\n"
+                        f"⚠️ <b>Action Required:</b> Please approve or deny rollback in Trade Dashboard UI."
+                    )
+                    _send_red_alert_telegram(prompt_msg, account_id=account)
                 return False  # Hold — command loop will retry next cycle
 
         # ── ROLLBACK RATE LIMITER ─────────────────────────────────────────────
@@ -5873,11 +6215,26 @@ def _should_issue_command(session, account):
         else:
             # Ticket-by-ticket (original logic)
             acct_filled = session["filled"].get(account, 0)
+            acct_closed = session["closed"].get(account, 0)
+
+            # Use close_start_closed to measure closes in this session run
+            start_closed_dict = session.setdefault("close_start_closed", {})
+            if account not in start_closed_dict:
+                start_closed_dict[account] = acct_closed
+            start_closed = start_closed_dict[account]
+
             close_cap = session.get("close_count")
-            effective_target = min(close_cap, acct_filled) if close_cap is not None else acct_filled
-            current = session["closed"].get(account, 0)
-            if current >= effective_target:
-                return False
+            if close_cap is not None and close_cap != "":
+                target_closes = int(close_cap)
+                closes_done = max(0, acct_closed - start_closed)
+                net_open_at_start = max(0, acct_filled - start_closed)
+                effective_target = min(target_closes, net_open_at_start)
+                if closes_done >= effective_target:
+                    return False
+            else:
+                effective_target = acct_filled
+                if acct_closed >= effective_target:
+                    return False
 
             # Cross-account close sync: close one hedge pair at a time.
             exec_order = session.get("execution_order", "simultaneous")
@@ -5886,30 +6243,38 @@ def _should_issue_command(session, account):
             for other_acc in sides:
                 if other_acc != account:
                     other_closed = session["closed"].get(other_acc, 0)
-                    
-                    # Only block if the other side is still actively closing
                     other_filled = session["filled"].get(other_acc, 0)
-                    other_close_cap = session.get("close_count")
-                    other_effective_target = min(other_close_cap, other_filled) if other_close_cap is not None else other_filled
-                    
-                    if other_closed < other_effective_target:
-                        # Other side is behind and still has work to do — wait for it
+                    other_start_closed = start_closed_dict.get(other_acc, other_closed)
+
+                    if close_cap is not None and close_cap != "":
+                        other_target = int(close_cap)
+                        other_closes_done = max(0, other_closed - other_start_closed)
+                        other_net_open_start = max(0, other_filled - other_start_closed)
+                        other_effective_target = min(other_target, other_net_open_start)
+                        other_still_closing = other_closes_done < other_effective_target
+                    else:
+                        other_still_closing = other_closed < other_filled
+
+                    if other_still_closing:
+                        my_done = max(0, acct_closed - start_closed) if (close_cap is not None and close_cap != "") else acct_closed
+                        other_done = max(0, other_closed - other_start_closed) if (close_cap is not None and close_cap != "") else other_closed
+
                         if exec_order == "simultaneous":
-                            if current > other_closed:
+                            if my_done > other_done:
                                 return False
                         elif exec_order == "side1_first":
                             if my_side_num == 1:
-                                if current > other_closed:
+                                if my_done > other_done:
                                     return False
                             elif my_side_num == 2:
-                                if current >= other_closed:
+                                if my_done >= other_done:
                                     return False
                         elif exec_order == "side2_first":
                             if my_side_num == 2:
-                                if current > other_closed:
+                                if my_done > other_done:
                                     return False
                             elif my_side_num == 1:
-                                if current >= other_closed:
+                                if my_done >= other_done:
                                     return False
                         # Other side is already done — run freely
 
@@ -6252,21 +6617,32 @@ def _should_issue_command(session, account):
                         ea_open_tickets_raw = ea_info.get("open_tickets")
                         if ea_open_tickets_raw is not None:
                             ea_open_tickets = set(_normalize_ticket(t) for t in ea_open_tickets_raw)
-                            tickets_still_open = any(_normalize_ticket(t) in ea_open_tickets for t in target_tickets if t is not None)
-                            if not tickets_still_open and target_tickets:
-                                # TP was hit — transition to open phase
-                                print(f"[CYCLE-LM] TP HIT: ALL {len(target_tickets)} tickets closed on {account}. Advancing phase→open (market reopen).")
+                            reopened = progress.get("reopened_tickets_in_batch", [])
+                            reopened_set = set(_normalize_ticket(t) for t in reopened)
+
+                            # Find target tickets that hit TP and are no longer open on the broker
+                            newly_closed = [
+                                t for t in target_tickets
+                                if t is not None and _normalize_ticket(t) not in ea_open_tickets and _normalize_ticket(t) not in reopened_set
+                            ]
+
+                            if newly_closed:
+                                # Incremental TP HIT: at least one position in the batch closed!
+                                print(f"[CYCLE-LM] Incremental TP HIT on {account}: {len(newly_closed)}/{len(target_tickets)} tickets closed ({newly_closed}). Reopening market order(s) immediately.")
+                                progress["reopened_tickets_in_batch"] = reopened + newly_closed
+                                progress["closed_tickets_this_reopen"] = newly_closed
                                 progress["phase"] = "open"
                                 progress["cycle_close_ts"] = time.time()
                                 progress["last_close_price"] = progress.get("close_tp_price")
-                                progress.pop("close_tp_set", None)
-                                progress.pop("close_tp_set_ts", None)
-                                progress.pop("close_tp_confirmed", None)
                                 progress.pop("open_dispatched", None)
                                 progress.pop("open_fill_received", None)
-                                progress["closed_tickets"] = target_tickets
-                                # Record as close fills so idx advances next iteration
-                                for target_ticket in target_tickets:
+
+                                # If ALL batch tickets have closed & reopened, log batch completion
+                                if len(progress["reopened_tickets_in_batch"]) >= len(target_tickets):
+                                    print(f"[CYCLE-LM] All {len(target_tickets)} tickets in batch fully cycled on {account}.")
+
+                                # Record newly closed tickets as close fills so idx advances
+                                for target_ticket in newly_closed:
                                     session.setdefault("close_fills", []).append({
                                         "account": account,
                                         "ticket": target_ticket,
@@ -6283,7 +6659,7 @@ def _should_issue_command(session, account):
                                 _save_sessions()
                                 phase = "open"
                             else:
-                                return False  # Waiting for TP to be hit
+                                return False  # Waiting for remaining TPs to be hit
                         else:
                             return False  # open_tickets not yet available
                 else:
@@ -6462,18 +6838,15 @@ def _should_issue_command(session, account):
         # the close shrinks acct_fills and we still need the reopen to fire)
         if phase != "open":
             # When cycle_days > 0 and no old-enough position was found,
-            # all remaining positions are too new — but only treat as completion
-            # if we already cycled at least one position (i.e. the fresh replacements
-            # are the ones that are too new).  If cycled==0 the age gate hasn't
-            # fired even once yet — just wait for positions to age.
+            # all remaining positions are too new — treat as completion and switch to MONITOR
             no_more_to_cycle = cycle_days > 0 and not found_old_enough
             cycled_count = progress.get("cycled", 0)
             target_cycles = progress.get("cycle_total", len(acct_fills))
-            age_gated_complete = no_more_to_cycle and cycled_count > 0
+            age_gated_complete = no_more_to_cycle
             truly_exhausted = cycled_count >= target_cycles or (idx >= len(acct_fills) and not no_more_to_cycle)
             if truly_exhausted or age_gated_complete:
                 print(f"[CYCLE-DBG] acct={account}: No more positions to cycle (idx={idx}, acct_fills={len(acct_fills)}, found_old_enough={found_old_enough}, cycled={cycled_count})")
-                # Auto-switch to monitor when all positions are cycled
+                # Auto-switch to monitor when all positions are cycled or 0 positions qualify
                 if session.get("action", "").startswith("cycle_"):
                     session["action"] = "monitor"
                     _save_sessions()
@@ -6481,14 +6854,12 @@ def _should_issue_command(session, account):
                     total_sc = progress.get("total_spread_cost", 0)
                     if cycled_count > 0:
                         avg_spread = total_sc / cycled_count
-                    _log_event(session["id"], account, "cycle_complete",
-                               f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
-                    print(f"[CYCLE] Complete: {cycled_count} cycled, avg spread cost={avg_spread:.5f}, auto-switching to MONITOR")
+                        msg = f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR"
+                    else:
+                        msg = f"0 positions meet min AGE threshold of {cycle_days}d — cycle complete — switching to MONITOR"
+                    _log_event(session["id"], account, "cycle_complete", msg)
+                    print(f"[CYCLE] Complete: {cycled_count} cycled, {msg}")
                 return False  # All positions cycled or skipped
-            elif no_more_to_cycle:
-                # cycled==0 and all positions still too young — wait for age gate
-                print(f"[CYCLE-DBG] acct={account}: No positions old enough yet (cycled=0, idx={idx}) — waiting")
-                return False
 
         if phase == "close":
             # Check spread gating for the cycling account
@@ -6721,13 +7092,9 @@ def _should_issue_command(session, account):
         # --- Completion check (close phase only) ---
         if phase != "open":
             no_more_to_cycle = cycle_limit_days > 0 and not found_old_enough
-            # In cycle limit, target_cycles is locked in at the start of the cycle.
-            # Only treat no_more_to_cycle as completion if we already cycled at least
-            # one position — those replacements are the "too new" ones.  If cycled==0
-            # the age gate hasn't fired yet; just wait for positions to age.
             cycled_count = progress.get("cycled", 0)
             target_cycles = progress.get("cycle_total", len(acct_fills))
-            age_gated_complete = no_more_to_cycle and cycled_count > 0
+            age_gated_complete = no_more_to_cycle
             truly_exhausted = cycled_count >= target_cycles or (idx >= len(acct_fills) and not no_more_to_cycle)
             if truly_exhausted or age_gated_complete:
                 print(f"[CYCLE-LIMIT-DBG] acct={account}: All done (cycled={cycled_count}, idx={idx}, fills={total_to_cycle})")
@@ -6738,13 +7105,11 @@ def _should_issue_command(session, account):
                     total_sc = progress.get("total_spread_cost", 0)
                     if cycled_count > 0:
                         avg_spread = total_sc / cycled_count
-                    _log_event(session["id"], account, "cycle_limit_complete",
-                               f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
-                    print(f"[CYCLE-LIMIT] Complete: {cycled_count} cycled, avg_cost={avg_spread:.5f}, → MONITOR")
-                return False
-            elif no_more_to_cycle:
-                # cycled==0 and all positions still too young — wait for age gate
-                print(f"[CYCLE-LIMIT-DBG] acct={account}: No positions old enough yet (cycled=0, idx={idx}) — waiting")
+                        msg = f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR"
+                    else:
+                        msg = f"0 positions meet min AGE threshold of {cycle_limit_days}d — cycle complete — switching to MONITOR"
+                    _log_event(session["id"], account, "cycle_limit_complete", msg)
+                    print(f"[CYCLE-LIMIT] Complete: {cycled_count} cycled, {msg}")
                 return False
 
         if phase == "close":
@@ -7149,11 +7514,21 @@ def _check_session_completion(session):
                     break
             else:
                 acct_filled = session["filled"].get(account, 0)
+                acct_closed = session["closed"].get(account, 0)
                 close_cap = session.get("close_count")
-                effective = min(close_cap, acct_filled) if close_cap is not None else acct_filled
-                if session["closed"].get(account, 0) < effective:
-                    all_done = False
-                    break
+                
+                if close_cap is not None and close_cap != "":
+                    start_closed = session.get("close_start_closed", {}).get(account, 0)
+                    closes_done = max(0, acct_closed - start_closed)
+                    net_open_start = max(0, acct_filled - start_closed)
+                    effective = min(int(close_cap), net_open_start)
+                    if closes_done < effective:
+                        all_done = False
+                        break
+                else:
+                    if acct_closed < acct_filled:
+                        all_done = False
+                        break
 
     if all_done and action == "close":
         # Safety check: only compare accounts that actually had positions to close.
@@ -7161,8 +7536,15 @@ def _check_session_completion(session):
         active_close_counts = []
         for acc in session.get("sides", {}):
             acct_filled = session["filled"].get(acc, 0)
+            acct_closed = session["closed"].get(acc, 0)
             close_cap = session.get("close_count")
-            effective = min(close_cap, acct_filled) if close_cap is not None else acct_filled
+            if close_cap is not None and close_cap != "":
+                start_closed = session.get("close_start_closed", {}).get(acc, 0)
+                closes_done = max(0, acct_closed - start_closed)
+                net_open_start = max(0, acct_filled - start_closed)
+                effective = min(int(close_cap), net_open_start)
+            else:
+                effective = acct_filled
             if effective > 0:
                 active_close_counts.append(session["closed"].get(acc, 0))
         if active_close_counts and max(active_close_counts) > 0 and min(active_close_counts) == 0:
@@ -7210,7 +7592,11 @@ def _check_session_completion(session):
         # Only relevant when action is 'close' — during opening, imbalanced fills are normal.
         action = session.get("action", "open")
         if action == "close":
-            close_count = session.get("close_count", 0) or 0
+            close_count = session.get("close_count")
+            if close_count is not None and close_count != "":
+                close_count = int(close_count)
+            else:
+                close_count = 0
             sides = session.get("sides", {})
             if len(sides) >= 2:
                 done_accounts = []
@@ -7338,8 +7724,17 @@ def update_session(session_id):
                 s["max_accum_lots"] = float(s["max_accum_lots"])
             if s.get("max_accum_deals") is not None:
                 s["max_accum_deals"] = int(s["max_accum_deals"])
-            if s.get("close_count") is not None:
-                s["close_count"] = int(s["close_count"])
+            if "close_count" in data:
+                val = data["close_count"]
+                if val is None or val == "":
+                    s["close_count"] = None
+                else:
+                    try:
+                        s["close_count"] = int(val)
+                    except (ValueError, TypeError):
+                        s["close_count"] = None
+                if s.get("action") == "close":
+                    s["close_start_closed"] = {acc: s.get("closed", {}).get(acc, 0) for acc in s.get("sides", {})}
             if s.get("max_ticks_per_5s") is not None:
                 s["max_ticks_per_5s"] = int(s["max_ticks_per_5s"])
             if s.get("max_price_jump") is not None:
@@ -7572,10 +7967,14 @@ def set_session_mode(session_id):
             _clear_limit_tps_for_session(session_id, s)
 
         if mode == "close":
-            # Set close_count to None = close all filled positions
-            # This works correctly even after partial closes via buttons,
-            # since _should_issue_command uses min(close_count, filled) as the target.
-            s["close_count"] = None
+            if "close_count" in data:
+                val = data["close_count"]
+                s["close_count"] = int(val) if (val is not None and val != "") else None
+            elif s.get("close_count") is not None:
+                pass
+            else:
+                s["close_count"] = None
+            s["close_start_closed"] = {acc: s.get("closed", {}).get(acc, 0) for acc in s.get("sides", {})}
         elif mode.startswith("cycle_lm_"):
             # CYCLE-LIMIT-MARKET init — shares cycle_limit_* session fields for the close phase
             target_side_num = 1 if mode == "cycle_lm_acc1" else 2
@@ -8455,12 +8854,23 @@ def trade_result():
                 if not _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                     in_flight_commands.pop((session_id, account), None)
                     # Normal fill (open mode or non-cycle)
-                    # ── Deduplication Guard ──
-                    # Check if this ticket is already in our fills list to prevent duplicate reporting
-                    # from inflating the dashboard's position count.
+                    fill_price = data.get("fill_price")
+                    quote_price = data.get("quote_price")
                     existing_tickets = {str(f.get("ticket")) for f in session.get("fills", []) if f.get("account") == account}
                     if str(ticket) in existing_tickets:
-                        print(f"[TRADE_RESULT] Suppressed duplicate fill report for ticket={ticket} on account={account}")
+                        for f in session.get("fills", []):
+                            if f.get("account") == account and str(f.get("ticket")) == str(ticket):
+                                if fill_price and (not f.get("price") or float(f.get("price") or 0.0) == 0.0):
+                                    f["price"] = float(fill_price)
+                                    if quote_price:
+                                        f["quote_price"] = float(quote_price)
+                                    if spread:
+                                        f["spread"] = int(spread)
+                                    print(f"[TRADE_RESULT] Updated fill price for auto-healed ticket={ticket} on account={account} to {fill_price}")
+                                    _save_sessions()
+                                else:
+                                    print(f"[TRADE_RESULT] Suppressed duplicate fill report for ticket={ticket} on account={account}")
+                                break
                         return jsonify({"ok": True, "suppressed_duplicate": True})
 
                     session["filled"][account] = session["filled"].get(account, 0) + 1
@@ -9328,6 +9738,7 @@ def api_swap_breakdown():
     """
     account_filter = request.args.get("account", "").strip()
     with lock:
+        _compute_swap_deltas_live()
         totals = {}  # symbol -> {"lots": 0.0, "delta_swap": 0.0}
         seen = set()
         
@@ -10911,14 +11322,76 @@ def delete_fee(fee_id):
     return jsonify({"error": "Fee not found"}), 404
 
 
+# ─── Daily Statements API ────────────────────────────────────────────────────
+
+@app.route('/statements', methods=['GET'])
+def list_statements():
+    """List available statement directories (one per date) with account counts."""
+    try:
+        result = []
+        if os.path.isdir(_STMTS_DIR):
+            for entry in sorted(os.listdir(_STMTS_DIR), reverse=True):
+                day_dir = os.path.join(_STMTS_DIR, entry)
+                if not os.path.isdir(day_dir):
+                    continue
+                summary_path = os.path.join(day_dir, "summary.json")
+                if os.path.exists(summary_path):
+                    try:
+                        with open(summary_path, "r", encoding="utf-8") as _f:
+                            s = json.load(_f)
+                        result.append({
+                            "date":          entry,
+                            "account_count": s.get("account_count", 0),
+                            "generated_ts":  s.get("generated_ts"),
+                        })
+                    except Exception:
+                        result.append({"date": entry, "account_count": None})
+                else:
+                    # Count JSON files (excluding summary.json)
+                    cnt = len([n for n in os.listdir(day_dir)
+                               if n.endswith(".json") and n != "summary.json"])
+                    result.append({"date": entry, "account_count": cnt})
+        return jsonify({"dates": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/statements/generate', methods=['POST'])
+def generate_statements():
+    """Trigger on-demand statement generation.
+    Optional body: {"date": "YYYY-MM-DD"}  — defaults to today.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        date_str = (data.get("date") or "").strip()
+        if date_str:
+            # Validate format
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
+        else:
+            date_str = None  # _save_daily_statements will use today
+
+        def _run():
+            _save_daily_statements(date_str)
+
+        threading.Thread(target=_run, daemon=True, name="StmtsOnDemand").start()
+        return jsonify({"ok": True, "date": date_str or datetime.now().strftime("%Y-%m-%d")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── PnL Report API ─────────────────────────────────────────────────────────
 
 @app.route('/api/pnl/request', methods=['POST'])
 def pnl_request_create():
-    """Create a PnL request for all accounts under a name group."""
+    """Create a PnL request for all accounts under a name group (or hedge subgroup)."""
     try:
         data = request.get_json(force=True)
         name = (data.get("name") or "").strip()
+        # Optional: hedge_key narrows to a specific subgroup, e.g. "HU-02"
+        hedge_key = (data.get("hedge_key") or "").strip()  # e.g. "HU-02"
         from_date = data.get("from_date", "")
         to_date = data.get("to_date", "")
         fee_keywords_override = data.get("fee_keywords")  # optional override
@@ -10935,11 +11408,15 @@ def pnl_request_create():
         except ValueError:
             return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
 
-        # Find all accounts under this name from current account data
-        # Match if the first segment of group_label OR account name (split by '-') equals the name
+        # Find all accounts under this name (optionally filtered to a specific hedge subgroup).
+        # Group label format: NAME-HEDGENUM-SIDE  (e.g. HU-02-A)
         # Account names follow: NAME-hedgenumber-side-accountnumber (e.g. HU-1-A-SQ2200508)
         acct_list = []
         seen = set()
+
+        # If hedge_key is set (e.g. "HU-02"), match accounts whose label prefix is NAME-HEDGENUM.
+        # Otherwise fall back to matching just the NAME (original behaviour).
+        hedge_key_upper = hedge_key.upper() if hedge_key else ""
 
         def _check_account(acc, grp=""):
             if acc in seen:
@@ -10947,15 +11424,30 @@ def pnl_request_create():
             # Check group_label first
             if grp:
                 parts = grp.split("-")
-                if parts[0].strip().upper() == name.upper():
-                    acct_list.append(acc)
-                    seen.add(acc)
-                    return
+                if hedge_key_upper:
+                    # Subgroup mode: match "NAME-HEDGENUM" prefix exactly
+                    grp_prefix = "-".join(p.strip() for p in parts[:2]).upper() if len(parts) >= 2 else parts[0].strip().upper()
+                    if grp_prefix == hedge_key_upper:
+                        acct_list.append(acc)
+                        seen.add(acc)
+                        return
+                else:
+                    # Name-level mode: match first segment
+                    if parts[0].strip().upper() == name.upper():
+                        acct_list.append(acc)
+                        seen.add(acc)
+                        return
             # Then check account name itself
             acc_parts = acc.split("-")
-            if acc_parts[0].strip().upper() == name.upper():
-                acct_list.append(acc)
-                seen.add(acc)
+            if hedge_key_upper:
+                acc_prefix = "-".join(p.strip() for p in acc_parts[:2]).upper() if len(acc_parts) >= 2 else acc_parts[0].strip().upper()
+                if acc_prefix == hedge_key_upper:
+                    acct_list.append(acc)
+                    seen.add(acc)
+            else:
+                if acc_parts[0].strip().upper() == name.upper():
+                    acct_list.append(acc)
+                    seen.add(acc)
 
         # EA / heartbeat accounts
         for acc in list(ea_account_info.keys()):
@@ -10977,8 +11469,9 @@ def pnl_request_create():
                     grp = manual_accounts.get(acc, {}).get("group_label", "")
                 _check_account(acc, grp)
 
+        scope_label = hedge_key if hedge_key else name
         if not acct_list:
-            return jsonify({"error": f"No accounts found for name '{name}'"}), 404
+            return jsonify({"error": f"No accounts found for '{scope_label}'"}), 404
 
         # Determine fee keywords: override > per-name > global
         if fee_keywords_override is not None:
@@ -11047,7 +11540,7 @@ def pnl_request_create():
         rid = str(uuid.uuid4())
         pnl_requests[rid] = {
             "id": rid,
-            "name": name,
+            "name": scope_label,  # use subgroup label when filtering by hedge_key
             "accounts": acct_list,
             "from_date": from_date,
             "to_date": to_date,
@@ -11060,8 +11553,8 @@ def pnl_request_create():
             "created_ts": int(time.time()),
             "current_states": current_states,
         }
-        app.logger.info("[PnL] Created request %s for name=%s accounts=%s range=%s->%s fee_kw=%s",
-                        rid, name, acct_list, from_date, to_date, fee_kw)
+        app.logger.info("[PnL] Created request %s for scope=%s accounts=%s range=%s->%s fee_kw=%s",
+                        rid, scope_label, acct_list, from_date, to_date, fee_kw)
 
         # ── Service server-side accounts (bypass EA polling) ──
         # Identify accounts that can report PnL directly via their connector:
@@ -11390,11 +11883,18 @@ def api_update_settings():
                 email_cfg["smtp_pass"] = data["email"]["smtp_pass"]
         if "telegram" in data:
             tg_cfg = dashboard_settings.setdefault("telegram", {})
-            for k in ["enabled", "chat_id"]:
+            for k in ["enabled", "chat_id", "quiet_hours_enabled", "quiet_start", "quiet_end"]:
                 if k in data["telegram"]:
                     tg_cfg[k] = data["telegram"][k]
             if "bot_token" in data["telegram"] and "••••" not in data["telegram"]["bot_token"]:
                 tg_cfg["bot_token"] = data["telegram"]["bot_token"]
+        if "telegram_red_alert" in data:
+            tg_red_cfg = dashboard_settings.setdefault("telegram_red_alert", {})
+            for k in ["enabled", "chat_id"]:
+                if k in data["telegram_red_alert"]:
+                    tg_red_cfg[k] = data["telegram_red_alert"][k]
+            if "bot_token" in data["telegram_red_alert"] and "••••" not in data["telegram_red_alert"]["bot_token"]:
+                tg_red_cfg["bot_token"] = data["telegram_red_alert"]["bot_token"]
         if "fee_thresholds" in data:
             dashboard_settings["fee_thresholds"] = data["fee_thresholds"]
         if "margin_alert_threshold" in data:
@@ -11568,6 +12068,13 @@ def test_email():
 def test_telegram():
     """Send a test Telegram message."""
     ok, err = _send_telegram("<b>Trade Dashboard</b>\nThis is a test message.")
+    return jsonify({"ok": ok, "error": err})
+
+
+@app.route('/api/settings/test_telegram_red_alert', methods=['POST'])
+def test_telegram_red_alert():
+    """Send a test Red Alert Telegram message."""
+    ok, err = _send_telegram("🚨 <b>Trade Dashboard — RED ALERT TEST</b>\nThis is a test notification from your Red Alert Bot.", red_alert=True)
     return jsonify({"ok": ok, "error": err})
 
 
@@ -12456,9 +12963,34 @@ body {
       <label>Chat ID</label>
       <input type="text" id="setTgChatId" placeholder="-1001234567890">
     </div>
-    <div class="settings-actions">
+    <h4 style="margin-top:15px; border-top:1px solid var(--border); padding-top:12px; color:var(--text1); font-size:0.88rem;">🌙 Standard Telegram Night Quiet Hours</h4>
+    <p style="font-size:0.78rem;color:var(--text2);margin-bottom:8px;">Automatically mute standard notifications (fee alerts, routine logs) during these hours. <strong>Red Alerts always bypass quiet hours.</strong></p>
+    <div class="settings-grid">
+      <label>Enable Quiet Hours</label>
+      <input type="checkbox" id="setTgQuietEnabled">
+      <label>Quiet Start (Local)</label>
+      <input type="time" id="setTgQuietStart" value="22:00">
+      <label>Quiet End (Local)</label>
+      <input type="time" id="setTgQuietEnd" value="07:00">
+    </div>
+    <div class="settings-actions" style="margin-top:12px;">
       <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Telegram Settings</button>
       <button class="btn btn-sm" onclick="testTelegram()" id="testTgBtn">📨 Test Message</button>
+    </div>
+
+    <h4 style="margin-top:20px; border-top:1px solid var(--border); padding-top:15px; color:#ff4757;">🚨 Red Alert Telegram Channel (High Priority)</h4>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Dedicated secondary Telegram bot for critical alerts (persistent disbalance, rollback prompts) that bypass nighttime DND.</p>
+    <div class="settings-grid">
+      <label>Enabled</label>
+      <input type="checkbox" id="setTgRedEnabled">
+      <label>Bot Token</label>
+      <input type="password" id="setTgRedBotToken" placeholder="123456:ABC-DEF...">
+      <label>Chat ID</label>
+      <input type="text" id="setTgRedChatId" placeholder="-1001234567890">
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Red Alert Settings</button>
+      <button class="btn btn-sm" style="background:#ff4757;color:white;border:none;" onclick="testTelegramRedAlert()" id="testTgRedBtn">🚨 Test Red Alert</button>
     </div>
   </div>
 
@@ -12734,6 +13266,10 @@ body {
       <div class="form-group">
         <label>Diff to Close <span style="font-size:0.7rem;color:var(--text2)">(pts, 0=off)</span></label>
         <input type="number" id="eDiffToClose" min="0" step="1">
+      </div>
+      <div class="form-group">
+        <label>Close Limit <span style="font-size:0.7rem;color:var(--text2)">(CLOSE mode max positions, blank=all)</span></label>
+        <input type="number" id="eCloseCount" min="1" step="1" placeholder="No limit">
       </div>
       <div class="form-group">
         <label>Max Accum Lots <span style="font-size:0.7rem;color:var(--text2)">(0=off)</span></label>
@@ -16094,6 +16630,7 @@ function editSession(id) {
   document.getElementById('eComment').value = s.comment || '';
   document.getElementById('eDiffToOpen').value = s.diff_to_open != null ? s.diff_to_open : 0;
   document.getElementById('eDiffToClose').value = s.diff_to_close != null ? s.diff_to_close : 0;
+  document.getElementById('eCloseCount').value = (s.close_count != null && s.close_count !== '') ? s.close_count : '';
   document.getElementById('eMaxAccumLots').value = s.max_accum_lots != null ? s.max_accum_lots : 0;
   document.getElementById('eMaxAccumDeals').value = s.max_accum_deals != null ? s.max_accum_deals : 0;
 
@@ -16136,6 +16673,7 @@ async function saveEdit() {
     trade_pause: parseFloat(document.getElementById('eTradePause').value) || 0,
     diff_to_open: document.getElementById('eDiffToOpen').value === '' ? null : parseInt(document.getElementById('eDiffToOpen').value),
     diff_to_close: document.getElementById('eDiffToClose').value === '' ? null : parseInt(document.getElementById('eDiffToClose').value),
+    close_count: document.getElementById('eCloseCount').value === '' ? null : parseInt(document.getElementById('eCloseCount').value),
     max_accum_lots: parseFloat(document.getElementById('eMaxAccumLots').value) || 0,
     max_accum_deals: parseInt(document.getElementById('eMaxAccumDeals').value) || 0,
 
@@ -16186,10 +16724,10 @@ function renderSide(session, sideNum) {
       const srCount = (session.spread_rejects && session.spread_rejects[acc]) || 0;
       // Errors = red clickable badge; spread rejects = amber waiting indicator (not an error)
       const errLabel = errCount > 0
-        ? `<br><span style="font-size:0.7rem;color:var(--red);cursor:pointer;text-decoration:underline dotted" title="Click to clear errors" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>loadSessions())">err:${errCount} ✕</span>`
+        ? `<br><span style="font-size:0.7rem;color:var(--red);cursor:pointer;text-decoration:underline dotted" title="Click to clear errors" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>refreshData()).then(()=>renderInstrumentsTable())">err:${errCount} ✕</span>`
         : '';
       const srLabel = srCount > 0
-        ? `<br><span style="font-size:0.68rem;color:var(--orange)" title="Waiting for spread to narrow (${srCount} skipped)">⏳ spread</span>`
+        ? `<br><span style="font-size:0.68rem;color:var(--orange);cursor:pointer;text-decoration:underline dotted" title="Click to clear spread rejects (${srCount} skipped)" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>refreshData()).then(()=>renderInstrumentsTable())">⏳ spread (${srCount}) ✕</span>`
         : '';
       let count;
       if (action === 'close') {
@@ -16200,10 +16738,17 @@ function renderSide(session, sideNum) {
           const groupLabel = info.group ? ` | ${info.group}` : '';
           return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closedLots}/${filledLots} lots closed</span>${errLabel}${srLabel}`;
         }
-        count = (session.closed && session.closed[acc]) || 0;
-        const target = session.close_count != null ? session.close_count : session.total_positions;
+        const filled = (session.filled && session.filled[acc]) || 0;
+        const closed = (session.closed && session.closed[acc]) || 0;
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${target} closed</span>${errLabel}${srLabel}`;
+        if (session.close_count != null && session.close_count !== '') {
+          const startClosed = (session.close_start_closed && session.close_start_closed[acc]) || 0;
+          const done = Math.max(0, closed - startClosed);
+          const target = session.close_count;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${done}/${target} closed</span>${errLabel}${srLabel}`;
+        } else {
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closed}/${filled} closed</span>${errLabel}${srLabel}`;
+        }
       } else if (action.startsWith('cycle_')) {
         // Derive cycling account using side_number, not Object.keys() order
         const cycleSideNum = (action === 'cycle_acc1' || action === 'cycle_limit_acc1' || action === 'cycle_lm_acc1') ? 1 : 2;
@@ -16330,8 +16875,10 @@ function renderActions(session) {
   html += `<option value="cycle_lm_acc1"${mode==='cycle_lm_acc1'?' selected':''}>CYCLE-LM ${acc1Label}</option>`;
   html += `<option value="cycle_lm_acc2"${mode==='cycle_lm_acc2'?' selected':''}>CYCLE-LM ${acc2Label}</option>`;
   html += `</select> `;
-  // Cycle date input — only show when in cycle mode
-  if (mode.startsWith('cycle_') && !mode.startsWith('cycle_limit_') && !mode.startsWith('cycle_lm_')) {
+  if (mode === 'close') {
+    const closeCount = (session.close_count !== null && session.close_count !== undefined) ? session.close_count : '';
+    html += `<input type="number" min="1" step="1" placeholder="Limit" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${closeCount}" onchange="saveSessionField('${session.id}', 'close_count', this.value)" title="Max positions to close in this session (blank = no limit)"> `;
+  } else if (mode.startsWith('cycle_') && !mode.startsWith('cycle_limit_') && !mode.startsWith('cycle_lm_')) {
     const cycleDays = session.cycle_days ?? '';
     const progress = session.cycle_progress || {};
     html += `<input type="number" min="0" step="0.5" placeholder="Days" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${cycleDays}" onchange="saveSessionField('${session.id}', 'cycle_days', this.value)" title="Cycle positions older than X days"> `;
@@ -16388,9 +16935,10 @@ function renderActions(session) {
   }
   html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="cloneSession('${session.id}')" title="Clone">⧉</button> `;
   const totalErrors = Object.values(session.errors||{}).reduce((s,v)=>s+v.length,0);
-  // Only show reset-errors button for actual errors — spread rejects are expected waiting behavior
-  if (totalErrors > 0) {
-    html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--orange);border:1px solid var(--orange)" onclick="resetErrors('${session.id}')" title="Reset Errors">↺</button> `;
+  const totalSpreadRejects = Object.values(session.spread_rejects||{}).reduce((s,v)=>s+(v||0),0);
+  // Show reset-errors button for actual errors or spread rejects
+  if (totalErrors > 0 || totalSpreadRejects > 0) {
+    html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--orange);border:1px solid var(--orange)" onclick="resetErrors('${session.id}')" title="Reset Errors / Spread Rejects">↺</button> `;
   }
   const hasRollback = session.rollback_needed && Object.values(session.rollback_needed).some(v=>v>0);
   if (s === 'paused' && (totalErrors > 0 || hasRollback)) {
@@ -16862,7 +17410,8 @@ function renderGroupSummary(data) {
     rows.push('<tr data-parent="' + nameKey + '" data-grp-hg="' + hgKey + '" style="background:rgba(108,92,231,0.04);cursor:pointer;' + hgDisplay + '" onclick="toggleGrp(\'' + hgKey + '\')">' +
       '<td></td>' +
       '<td style="font-weight:600;padding-left:20px;"><span data-arrow="' + hgKey + '" style="display:inline-block;width:16px;font-size:0.8rem;color:var(--text2);">' + hgArrow + '</span> \ud83d\udd17 ' + hedgeNum + '</td>' +
-      '<td colspan="4" style="color:var(--text2);font-size:0.78rem;">' + numAccts + ' account' + (numAccts !== 1 ? 's' : '') + '</td>' +
+      '<td colspan="3" style="color:var(--text2);font-size:0.78rem;">' + numAccts + ' account' + (numAccts !== 1 ? 's' : '') + '</td>' +
+      '<td style="text-align:right;"><button class="btn btn-sm" style="padding:2px 8px;font-size:0.68rem;background:var(--accent);color:#fff;border:none;cursor:pointer;" onclick="event.stopPropagation();openPnlModal(\'' + name + '\', \'' + key + '\')" title="Run PnL report for subgroup ' + key + '">📊 PnL</button></td>' +
       '<td style="font-weight:600;">' + fmt(group.total_balance) + '</td>' +
       '<td style="font-weight:600;">' + fmt(group.total_equity) + '</td>' +
     '</tr>');
@@ -17373,6 +17922,16 @@ async function loadSettings() {
     document.getElementById('setTgEnabled').checked = s.telegram && s.telegram.enabled;
     document.getElementById('setTgBotToken').value = (s.telegram && s.telegram.bot_token) || '';
     document.getElementById('setTgChatId').value = (s.telegram && s.telegram.chat_id) || '';
+    if (document.getElementById('setTgQuietEnabled')) {
+        document.getElementById('setTgQuietEnabled').checked = s.telegram && s.telegram.quiet_hours_enabled;
+        document.getElementById('setTgQuietStart').value = (s.telegram && s.telegram.quiet_start) || '22:00';
+        document.getElementById('setTgQuietEnd').value = (s.telegram && s.telegram.quiet_end) || '07:00';
+    }
+    if (document.getElementById('setTgRedEnabled')) {
+        document.getElementById('setTgRedEnabled').checked = s.telegram_red_alert && s.telegram_red_alert.enabled;
+        document.getElementById('setTgRedBotToken').value = (s.telegram_red_alert && s.telegram_red_alert.bot_token) || '';
+        document.getElementById('setTgRedChatId').value = (s.telegram_red_alert && s.telegram_red_alert.chat_id) || '';
+    }
     _settingsLoaded = true;
     renderThresholds(s.fee_thresholds || {});
     // Margin alert threshold
@@ -17786,6 +18345,14 @@ async function saveSettings(silent) {
       enabled: document.getElementById('setTgEnabled').checked,
       bot_token: document.getElementById('setTgBotToken').value,
       chat_id: document.getElementById('setTgChatId').value,
+      quiet_hours_enabled: document.getElementById('setTgQuietEnabled') ? document.getElementById('setTgQuietEnabled').checked : false,
+      quiet_start: document.getElementById('setTgQuietStart') ? document.getElementById('setTgQuietStart').value : "22:00",
+      quiet_end: document.getElementById('setTgQuietEnd') ? document.getElementById('setTgQuietEnd').value : "07:00",
+    },
+    telegram_red_alert: {
+      enabled: document.getElementById('setTgRedEnabled') ? document.getElementById('setTgRedEnabled').checked : false,
+      bot_token: document.getElementById('setTgRedBotToken') ? document.getElementById('setTgRedBotToken').value : '',
+      chat_id: document.getElementById('setTgRedChatId') ? document.getElementById('setTgRedChatId').value : '',
     },
     fund_email_enabled: document.getElementById('setFundEmailEnabled') ? document.getElementById('setFundEmailEnabled').checked : true,
     fund_email_time: document.getElementById('setFundEmailTime') ? document.getElementById('setFundEmailTime').value : "08:00",
@@ -17825,6 +18392,18 @@ async function testTelegram() {
     if (!r.ok && r.error) alert('Telegram test failed: ' + r.error);
   } catch(e) { btn.textContent = '\u274c Error'; alert(e); }
   setTimeout(() => { btn.textContent = '\ud83d\udce8 Test Message'; }, 3000);
+}
+
+async function testTelegramRedAlert() {
+  const btn = document.getElementById('testTgRedBtn');
+  btn.textContent = 'Sending...';
+  try {
+    const res = await fetch('/api/settings/test_telegram_red_alert', { method: 'POST' });
+    const r = await res.json();
+    btn.textContent = r.ok ? '✅ Sent!' : '❌ Failed';
+    if (!r.ok && r.error) alert('Red Alert Telegram test failed: ' + r.error);
+  } catch(e) { btn.textContent = '❌ Error'; alert(e); }
+  setTimeout(() => { btn.textContent = '🚨 Test Red Alert'; }, 3000);
 }
 
 function renderThresholds(thresholds) {
@@ -20064,9 +20643,11 @@ let _pnlRequestId = '';
 let _pnlPollTimer = null;
 let _pnlLastData = null;  // cached last completed PnL response for pair breakdown popup
 
-function openPnlModal(name) {
+function openPnlModal(name, hedgeKey) {
   _pnlCurrentName = name;
-  document.getElementById('pnlModalTitle').textContent = '📊 PnL Report — ' + name;
+  _pnlCurrentHedgeKey = hedgeKey || '';
+  const label = hedgeKey ? ('🔗 ' + hedgeKey) : ('👤 ' + name);
+  document.getElementById('pnlModalTitle').textContent = '📊 PnL Report — ' + label;
   // Default dates: Sunday of current week to today
   const now = new Date();
   const sunday = new Date(now);
@@ -20401,6 +20982,7 @@ async function requestPnl() {
   try {
     const body = { name: _pnlCurrentName, from_date: fromDate, to_date: toDate,
                    exclude_balance: document.getElementById('pnlExcludeBalance').checked };
+    if (_pnlCurrentHedgeKey) body.hedge_key = _pnlCurrentHedgeKey;
     if (feeKw) body.fee_keywords = feeKw;
     const resp = await fetch('/api/pnl/request', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await resp.json();
@@ -20838,10 +21420,23 @@ if __name__ == '__main__':
                                 _save_sessions()
                                 return  # early-exit the report_result callback
                         # Normal (non-cycle) fill path
-                        # ── Deduplication Guard (same as EA bridge path) ──
+                        fill_price = data.get("fill_price")
+                        quote_price = data.get("quote_price")
                         existing_tickets = {str(f.get("ticket")) for f in session.get("fills", []) if f.get("account") == account}
                         if str(ticket) in existing_tickets:
-                            print(f"[MT-DIRECT] Suppressed duplicate fill report for ticket={ticket} on account={account}")
+                            for f in session.get("fills", []):
+                                if f.get("account") == account and str(f.get("ticket")) == str(ticket):
+                                    if fill_price and (not f.get("price") or float(f.get("price") or 0.0) == 0.0):
+                                        f["price"] = float(fill_price)
+                                        if quote_price:
+                                            f["quote_price"] = float(quote_price)
+                                        if spread:
+                                            f["spread"] = int(spread)
+                                        print(f"[MT-DIRECT] Updated fill price for auto-healed ticket={ticket} on account={account} to {fill_price}")
+                                        _save_sessions()
+                                    else:
+                                        print(f"[MT-DIRECT] Suppressed duplicate fill report for ticket={ticket} on account={account}")
+                                    break
                             _check_session_completion(session)
                             return
                         session["filled"][account] = session["filled"].get(account, 0) + 1

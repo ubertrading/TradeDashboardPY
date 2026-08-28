@@ -1,0 +1,40 @@
+Here is your step-by-step setup checklist for your Trade Dashboard and your Phone.
+
+Part 1: Trade Dashboard Setup
+Open Dashboard Settings:
+
+Go to the Settings tab in the Trade Dashboard UI.
+Configure Standard Telegram (Bot 1):
+
+Make sure Bot 1 Token and Chat ID are filled in under 📢 Telegram Notifications.
+Under 🌙 Standard Telegram Night Quiet Hours:
+Check Enable Quiet Hours.
+Set Quiet Start (e.g. 22:00 / 10:00 PM).
+Set Quiet End (e.g. 07:00 / 7:00 AM).
+Configure Red Alert Channel (Bot 2):
+
+Under 🚨 Red Alert Telegram Channel (High Priority):
+Check Enabled.
+Enter your Bot 2 Token and Chat ID.
+Click Save Settings.
+Click 🚨 Test Red Alert to verify the test message arrives on your phone!
+Part 2: Phone & Telegram App Setup
+Set Up Bot 1 (Standard Alerts):
+
+Open Telegram on your phone and open the chat with Bot 1.
+Tap Bot 1’s name at the top > Mute (or leave notification sounds quiet).
+(The Dashboard will automatically stop sending messages to Bot 1 during your Night Quiet Hours anyway!)
+Set Up Bot 2 (Red Alert Alarm Bot):
+
+Open the chat with Bot 2 in Telegram.
+Tap Bot 2’s name at the top > Notifications > Customize:
+Sound: Choose a loud, urgent alarm/siren tone (e.g. Beacon, Radar, or Alarm).
+Priority: Set to High / Urgent (so it turns on the screen and vibrates aggressively).
+Phone Do Not Disturb (DND) / Focus Mode:
+
+In your phone’s Do Not Disturb / Night Focus settings:
+Add Telegram to the "Allowed Apps" list.
+Because Bot 1 is muted during the night, only Bot 2’s loud alarm will break through DND and ring to wake you up!
+(Optional) Read Alerts Out Loud:
+
+Turn on Announce Notifications (iOS: Settings > Siri & Search > Announce Notifications) or Read Aloud (Android) for Telegram so Siri or Google Assistant reads out the exact message out loud (e.g. "Red Alert: Rebalance / Rollback Prompt on HU-01").

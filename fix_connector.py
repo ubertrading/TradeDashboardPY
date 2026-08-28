@@ -3660,11 +3660,49 @@ class FixAccountManager:
         if not should_issue:
             return
 
+        pending_open_cmds = {}  # session_id -> list of (fix_acct, session_id, pair, trade_side, op_lot_size, comment, account_id)
+        non_open_cmds = []
+
         with self.dd["lock"]:
             for session_id, session in self.dd["sessions"].items():
                 if session.get("status") not in ("active", "partial_close"):
                     continue
                 sides = session.get("sides", {})
+
+                action = session.get("action", "open")
+
+                # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
+                if action in ("open", "open_limit"):
+                    atomic_spread_ok = True
+                    for check_aid in sides:
+                        check_side = sides[check_aid]
+                        check_max_spread = check_side.get("max_spread") if check_side.get("max_spread") is not None else session.get("max_spread_points", 999)
+                        try:
+                            check_max_spread = float(check_max_spread) if check_max_spread is not None else 999
+                        except (ValueError, TypeError):
+                            check_max_spread = 999
+
+                        if check_max_spread < 999:
+                            cur_sp = None
+                            ea_info = self.dd["ea_account_info"].get(check_aid, {})
+                            try:
+                                cur_sp = float(ea_info.get("spread")) if ea_info.get("spread") is not None else None
+                            except (ValueError, TypeError):
+                                cur_sp = None
+
+                            if cur_sp is None:
+                                logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: no quote for session %s — blocking", check_aid, session_id[:8])
+                                atomic_spread_ok = False
+                                break
+                            if cur_sp > check_max_spread:
+                                logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: spread %.1f > max %s — blocking session %s", check_aid, cur_sp, check_max_spread, session_id[:8])
+                                session.setdefault("spread_rejects", {})[check_aid] = session.get("spread_rejects", {}).get(check_aid, 0) + 1
+                                atomic_spread_ok = False
+                                break
+                    if not atomic_spread_ok:
+                        continue  # Skip entire session — neither side fires!
+                # ───────────────────────────────────────────────────────────────
+
                 for account_id in sides:
                     # Only process FIX accounts
                     if account_id not in self.accounts:
@@ -3684,7 +3722,6 @@ class FixAccountManager:
                     if result is False:
                         continue
 
-                    action = session.get("action", "open")
                     side_info = sides[account_id]
                     pair = (side_info.get("pair") or session.get("pair", "")).upper()
                     lot_size = side_info.get("lot_size") or session.get("lot_size", 0.01)
@@ -3714,35 +3751,67 @@ class FixAccountManager:
                             continue  # No spread data — don't trade blind
                         if current_spread is not None and current_spread > max_spread:
                             # Spread too wide
-                            session["spread_rejects"][account_id] = session.get("spread_rejects", {}).get(account_id, 0) + 1
+                            session.setdefault("spread_rejects", {})[account_id] = session.get("spread_rejects", {}).get(account_id, 0) + 1
                             continue
 
                     # Mark in-flight
                     self.dd["in_flight_commands"][(session_id, account_id)] = time.time()
 
-                    if result == "rollback":
-                        # Rollback close — close the most recent position
-                        self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=True)
-                    elif result == "cycle_close":
-                        # Cycle close
-                        self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=False)
-                    elif action == "close":
-                        # Normal close
-                        self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=False)
-                    elif action == "open" or result is True:
-                        # Open new position
+                    if action == "open" and result not in ("rollback", "cycle_close"):
                         side_num = side_info.get("side_number", 1)
-                        # Determine buy/sell based on side_number convention
-                        # Side 1 = buy, Side 2 = sell (standard convention)
                         trade_side = side_info.get("action", "buy") if side_info.get("action") else ("buy" if side_num == 1 else "sell")
                         is_cycle_op = action.startswith("cycle_") or result is True
                         op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
                         if not op_lot_size:
                             op_lot_size = lot_size
-                        fix_acct.send_market_order(
-                            pair, trade_side, op_lot_size,
-                            session_id=session_id, comment=comment
-                        )
+                        pending_open_cmds.setdefault(session_id, []).append((
+                            fix_acct, session_id, pair, trade_side, op_lot_size, comment, account_id
+                        ))
+                    else:
+                        non_open_cmds.append((fix_acct, session, account_id, pair, lot_size, comment, result, action, side_info))
+
+        # Dispatch open orders in parallel per session
+        for sid, open_items in pending_open_cmds.items():
+            threads = []
+            def _exec_fix_open(facct, sid_val, pr, ts, ls, cm, aid_val):
+                try:
+                    logger.info("[%s] SIMULTANEOUS FIX OPEN: sending market order for %s %s %.2f lots", aid_val, ts.upper(), pr, ls)
+                    facct.send_market_order(pr, ts, ls, session_id=sid_val, comment=cm)
+                except Exception as ex:
+                    logger.error("[%s] SIMULTANEOUS FIX OPEN error: %s", aid_val, ex)
+                    self.dd["in_flight_commands"].pop((sid_val, aid_val), None)
+
+            for (facct, sid_val, pr, ts, ls, cm, aid_val) in open_items:
+                t = threading.Thread(target=_exec_fix_open, args=(facct, sid_val, pr, ts, ls, cm, aid_val))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+
+        # Process non-open commands
+        for (fix_acct, session, account_id, pair, lot_size, comment, result, action, side_info) in non_open_cmds:
+            if result == "rollback":
+                # Rollback close — close the most recent position
+                self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=True)
+            elif result == "cycle_close":
+                # Cycle close
+                self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=False)
+            elif action == "close":
+                # Normal close
+                self._send_close_command(fix_acct, session, account_id, pair, lot_size, comment, is_rollback=False)
+            elif result is True:
+                # Open new position (cycle reopen or single side)
+                side_num = side_info.get("side_number", 1)
+                trade_side = side_info.get("action", "buy") if side_info.get("action") else ("buy" if side_num == 1 else "sell")
+                is_cycle_op = action.startswith("cycle_") or result is True
+                op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                if not op_lot_size:
+                    op_lot_size = lot_size
+                fix_acct.send_market_order(
+                    pair, trade_side, op_lot_size,
+                    session_id=session.get("id", ""), comment=comment
+                )
 
     def _send_close_command(self, fix_acct, session, account_id, pair, lot_size, comment, is_rollback=False):
         """Send a close order for the oldest open position."""

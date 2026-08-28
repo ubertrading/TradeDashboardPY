@@ -1,0 +1,287 @@
+{
+  "manual_accounts": {
+    "EHERZOG-1-A-SQ-400223": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "EHERZOG-1-B-ICM-": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "GO-1-A-SQ651938": {
+      "alert_email": "gbguimaraes@outlook.pt",
+      "alert_telegram": "1754651516",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "GO-1-B-ICM7991931": {
+      "alert_email": "gbguimaraes@outlook.pt",
+      "alert_telegram": "1754651516",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "HUGO-1-A-SQ649159": {
+      "alert_email": "hugo_eekhout@hotmail.com",
+      "alert_telegram": "5574882772",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "HUGO-1-B-ICT11548824": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": "",
+      "is_hidden": true
+    },
+    "HUGO-1-B-ORB91033": {
+      "alert_email": "hugo_eekhout@hotmail.com",
+      "alert_telegram": "5574882772",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "HUGO-1-BORB": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": "",
+      "is_hidden": true
+    },
+    "JU-1-A-FXV-537755": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-1-A-SQ651189": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-1-B-FXV-537856": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-1-B-ICM11609373": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-1-B-ICM7905211": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": "",
+      "is_hidden": true
+    },
+    "JU-1-B-ICM7969844": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-1-B-ICM7992910": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": "",
+      "is_hidden": true
+    },
+    "JU-2-A-SQ651572": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": "2200530"
+    },
+    "JU-2-B-ICM8024646": {
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-3-A-DERIV80536168": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-3-A-MEX950059": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-4-A-MEX952372": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "JU-4-B-NOOR9434169": {
+      "alert_email": "juangecko@gmail.com",
+      "alert_telegram": "1216942883",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "MA-1-A-ICM-11596323": {
+      "alert_telegram": "7774693061",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "MA-1-A-SQ-2119864": {
+      "alert_telegram": "7774693061",
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "MLOCKEY-1-A-SQ-2002117": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "MLOCKEY-1-B-ICT-11644478": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    }
+  },
+  "strategies": {
+    "112c5e25-a13b-4d64-823d-34dec46c96e4": {
+      "account1": "JU-1-A-FXV-537755",
+      "account2": "JU-1-B-FXV-537856",
+      "created_at": "2026-08-05 10:27:11",
+      "enabled": true,
+      "id": "112c5e25-a13b-4d64-823d-34dec46c96e4",
+      "name": "JU-FXV",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "35c05d13-eff2-4139-bf99-9a9b38317cb7": {
+      "account1": "EHERZOG-1-A-SQ-400223",
+      "account2": "EHERZOG-1-B-ICM-",
+      "created_at": "2026-07-20 14:45:04",
+      "enabled": true,
+      "id": "35c05d13-eff2-4139-bf99-9a9b38317cb7",
+      "name": "EHERZOG",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "3f41f863-c738-479b-88d9-de14cdbcdf4f": {
+      "account1": "JU-4-A-MEX952372",
+      "account2": "JU-4-B-NOOR9434169",
+      "created_at": "2026-06-01 08:31:39",
+      "enabled": true,
+      "id": "3f41f863-c738-479b-88d9-de14cdbcdf4f",
+      "name": "JU-04",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "9f76e581-8a3f-4f2e-8edd-b79d5c5082c6": {
+      "account1": "MA-1-A-SQ-2119864",
+      "account2": "MA-1-A-ICM-11596323",
+      "created_at": "2026-07-20 13:41:30",
+      "enabled": true,
+      "id": "9f76e581-8a3f-4f2e-8edd-b79d5c5082c6",
+      "name": "MARCIN",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "aaeb589c-c07b-40b1-b5de-1518b376d9c1": {
+      "account1": "JU-3-A-MEX950059",
+      "account2": "JU-3-A-DERIV80536168",
+      "created_at": "2026-05-20 11:42:38",
+      "enabled": true,
+      "id": "aaeb589c-c07b-40b1-b5de-1518b376d9c1",
+      "name": "JU-03",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "cf680e78-e6fc-4e39-9ee6-69034f7e3fed": {
+      "account1": "MLOCKEY-1-A-SQ-2002117",
+      "account2": "MLOCKEY-1-B-ICT-11644478",
+      "created_at": "2026-08-12 09:08:26",
+      "enabled": true,
+      "id": "cf680e78-e6fc-4e39-9ee6-69034f7e3fed",
+      "name": "MLOCKEY-SQ-IC",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "d044bbb2-7b1e-4255-a520-a47369e1b450": {
+      "account1": "GO-1-A-SQ651938",
+      "account2": "GO-1-B-ICM7991931",
+      "created_at": "2026-07-13 12:12:20",
+      "enabled": true,
+      "id": "d044bbb2-7b1e-4255-a520-a47369e1b450",
+      "name": "GO",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "df645d76-0548-4cfd-b253-210b66176345": {
+      "account1": "HUGO-1-A-SQ649159",
+      "account2": "HUGO-1-B-ORB91033",
+      "created_at": "2026-05-11 10:00:33",
+      "enabled": true,
+      "id": "df645d76-0548-4cfd-b253-210b66176345",
+      "name": "HUGO-01",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    }
+  }
+}

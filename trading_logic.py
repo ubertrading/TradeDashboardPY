@@ -336,11 +336,25 @@ def _should_issue_command(session, account):
 
     elif action == "close":
         acct_filled = session["filled"].get(account, 0)
+        acct_closed = session["closed"].get(account, 0)
+
+        start_closed_dict = session.setdefault("close_start_closed", {})
+        if account not in start_closed_dict:
+            start_closed_dict[account] = acct_closed
+        start_closed = start_closed_dict[account]
+
         close_cap = session.get("close_count")
-        effective_target = min(close_cap, acct_filled) if close_cap is not None else acct_filled
-        current = session["closed"].get(account, 0)
-        if current >= effective_target:
-            return False
+        if close_cap is not None and close_cap != "":
+            target_closes = int(close_cap)
+            closes_done = max(0, acct_closed - start_closed)
+            net_open_at_start = max(0, acct_filled - start_closed)
+            effective_target = min(target_closes, net_open_at_start)
+            if closes_done >= effective_target:
+                return False
+        else:
+            effective_target = acct_filled
+            if acct_closed >= effective_target:
+                return False
 
         # Check if we are in the middle of an incomplete batch close.
         # This prevents the system from getting stuck with an unbalanced hedge
@@ -459,18 +473,22 @@ def _should_issue_command(session, account):
             progress["index"] = idx
             session["cycle_progress"] = progress
 
-        if idx >= total_to_cycle:
-            print(f"[CYCLE-DBG] acct={account}: All positions cycled/skipped (idx={idx} >= total={total_to_cycle})")
+        no_more_to_cycle = cycle_days > 0 and not found_old_enough
+        if idx >= total_to_cycle or no_more_to_cycle:
+            print(f"[CYCLE-DBG] acct={account}: All positions cycled/skipped (idx={idx} >= total={total_to_cycle}, no_more={no_more_to_cycle})")
             if session.get("action", "").startswith("cycle_"):
                 session["action"] = "monitor"
                 _save_sessions()
                 avg_spread = 0
                 total_sc = progress.get("total_spread_cost", 0)
-                if idx > 0:
-                    avg_spread = total_sc / idx
-                _log_event(session["id"], account, "cycle_complete",
-                           f"All {idx} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR")
-                print(f"[CYCLE] Complete: avg spread cost={avg_spread:.5f}, auto-switching to MONITOR")
+                cycled_count = progress.get("cycled", 0)
+                if cycled_count > 0:
+                    avg_spread = total_sc / cycled_count
+                    msg = f"All {cycled_count} positions processed — avg spread cost: {avg_spread:.5f} — switching to MONITOR"
+                else:
+                    msg = f"0 positions meet min AGE threshold of {cycle_days}d — cycle complete — switching to MONITOR"
+                _log_event(session["id"], account, "cycle_complete", msg)
+                print(f"[CYCLE] Complete: {cycled_count} cycled, {msg}")
             return False  # All positions cycled or skipped
 
         if phase == "close":
@@ -521,14 +539,26 @@ def _should_issue_command(session, account):
                 return session["filled"].get(other_account, 0) >= target
             return True
     elif action == "close":
-        close_count = session.get("close_count", 0) or 0
+        close_cap = session.get("close_count")
+        start_closed_dict = session.get("close_start_closed", {})
+        if close_cap is not None and close_cap != "":
+            target_closes = int(close_cap)
+            other_start = start_closed_dict.get(other_account, 0)
+            other_closed_done = max(0, session["closed"].get(other_account, 0) - other_start)
+            other_filled = session["filled"].get(other_account, 0)
+            other_net_start = max(0, other_filled - other_start)
+            effective_target = min(target_closes, other_net_start)
+            other_is_done = other_closed_done >= effective_target
+        else:
+            other_is_done = session["closed"].get(other_account, 0) >= session["filled"].get(other_account, 0)
+
         if exec_order == "side1_first":
             if my_side == 2:
-                return session["closed"].get(other_account, 0) >= close_count
+                return other_is_done
             return True
         elif exec_order == "side2_first":
             if my_side == 1:
-                return session["closed"].get(other_account, 0) >= close_count
+                return other_is_done
             return True
 
     return True
@@ -553,11 +583,21 @@ def _check_session_completion(session):
                 break
         elif action == "close":
             acct_filled = session["filled"].get(account, 0)
+            acct_closed = session["closed"].get(account, 0)
             close_cap = session.get("close_count")
-            effective = min(close_cap, acct_filled) if close_cap is not None else acct_filled
-            if session["closed"].get(account, 0) < effective:
-                all_done = False
-                break
+
+            if close_cap is not None and close_cap != "":
+                start_closed = session.get("close_start_closed", {}).get(account, 0)
+                closes_done = max(0, acct_closed - start_closed)
+                net_open_start = max(0, acct_filled - start_closed)
+                effective = min(int(close_cap), net_open_start)
+                if closes_done < effective:
+                    all_done = False
+                    break
+            else:
+                if acct_closed < acct_filled:
+                    all_done = False
+                    break
 
     if all_done and action == "close":
         # Safety check: if one side has 0 closes but another has > 0,
@@ -566,8 +606,15 @@ def _check_session_completion(session):
         active_close_counts = []
         for acc in session.get("sides", {}):
             acct_filled = session["filled"].get(acc, 0)
+            acct_closed = session["closed"].get(acc, 0)
             close_cap = session.get("close_count")
-            effective = min(close_cap, acct_filled) if close_cap is not None else acct_filled
+            if close_cap is not None and close_cap != "":
+                start_closed = session.get("close_start_closed", {}).get(acc, 0)
+                closes_done = max(0, acct_closed - start_closed)
+                net_open_start = max(0, acct_filled - start_closed)
+                effective = min(int(close_cap), net_open_start)
+            else:
+                effective = acct_filled
             if effective > 0:
                 active_close_counts.append(session["closed"].get(acc, 0))
         if active_close_counts and max(active_close_counts) > 0 and min(active_close_counts) == 0:
@@ -640,7 +687,11 @@ def _check_session_completion(session):
     elif action == "close":
         action = session.get("action", "open")
         if action == "close":
-            close_count = session.get("close_count", 0) or 0
+            close_count = session.get("close_count")
+            if close_count is not None and close_count != "":
+                close_count = int(close_count)
+            else:
+                close_count = 0
             sides = session.get("sides", {})
             if len(sides) >= 2:
                 done_accounts = []
@@ -719,9 +770,17 @@ def _run_hedge_monitor_all():
             sess_action = session.get("action", "")
             if sess_action == "close":
                 continue
-            # Cycle mode: skip hedge monitor entirely — cycle deliberately closes/reopens
+            # Cycle mode: allow hedge monitor ONLY when fully settled post-reopen
+            # (i.e. phase=="close", no close/reopen in-flight, and not waiting for reopen fill)
             if sess_action.startswith("cycle_"):
-                continue
+                cycle_prog = session.get("cycle_progress", {})
+                phase = cycle_prog.get("phase", "close")
+                flight_active = any(
+                    in_flight_commands.get((sid, a), 0) > 0 and (now_ts - in_flight_commands.get((sid, a), 0)) < 10
+                    for a in sides
+                )
+                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set"):
+                    continue
 
             # STARTUP COOLDOWN: Skip hedge monitor for the first 30s after session start
             hedge_start = session.get("hedge_monitor_start_ts", 0)

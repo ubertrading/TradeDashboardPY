@@ -1,0 +1,3742 @@
+{
+  "2de98c2f-49a4-45af-acc0-271f9f9f1904": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754823.9513018,
+        "cycle": true,
+        "price": 0.80787,
+        "ticket": 4448747270,
+        "ts": "2026-06-29 13:40:24",
+        "ts_epoch": 1782754824.271377
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754825.9562752,
+        "cycle": true,
+        "price": 0.80786,
+        "ticket": 4448678922,
+        "ts": "2026-06-29 13:40:26",
+        "ts_epoch": 1782754826.4531748
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754828.0971968,
+        "cycle": true,
+        "price": 0.80784,
+        "ticket": 4448678929,
+        "ts": "2026-06-29 13:40:28",
+        "ts_epoch": 1782754828.3478565
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754829.1503584,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448738622,
+        "ts": "2026-06-29 13:40:29",
+        "ts_epoch": 1782754829.3007572
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754829.8161705,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448738624,
+        "ts": "2026-06-29 13:40:29",
+        "ts_epoch": 1782754829.9719641
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754830.6048644,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448678941,
+        "ts": "2026-06-29 13:40:30",
+        "ts_epoch": 1782754830.7505836
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754831.3561316,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448738649,
+        "ts": "2026-06-29 13:40:31",
+        "ts_epoch": 1782754831.4974554
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754833.1830592,
+        "cycle": true,
+        "price": 0.80782,
+        "ticket": 4448678959,
+        "ts": "2026-06-29 13:40:33",
+        "ts_epoch": 1782754833.3455908
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754835.199003,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448738660,
+        "ts": "2026-06-29 13:40:35",
+        "ts_epoch": 1782754835.3546135
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754837.3297184,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448738673,
+        "ts": "2026-06-29 13:40:37",
+        "ts_epoch": 1782754837.4676938
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754839.199751,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448738679,
+        "ts": "2026-06-29 13:40:39",
+        "ts_epoch": 1782754839.351807
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754842.8089812,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448738693,
+        "ts": "2026-06-29 13:40:43",
+        "ts_epoch": 1782754843.0227206
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754843.7891498,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448746772,
+        "ts": "2026-06-29 13:40:43",
+        "ts_epoch": 1782754843.9528542
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754844.5688818,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448747387,
+        "ts": "2026-06-29 13:40:44",
+        "ts_epoch": 1782754844.700313
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754845.4252818,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448678847,
+        "ts": "2026-06-29 13:40:45",
+        "ts_epoch": 1782754845.5986042
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754846.8288622,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448747017,
+        "ts": "2026-06-29 13:40:46",
+        "ts_epoch": 1782754846.9651773
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754848.8143222,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448678876,
+        "ts": "2026-06-29 13:40:48",
+        "ts_epoch": 1782754848.9773953
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754850.8850894,
+        "cycle": true,
+        "price": 0.80782,
+        "ticket": 4448747045,
+        "ts": "2026-06-29 13:40:51",
+        "ts_epoch": 1782754851.0311856
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754852.719998,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448678883,
+        "ts": "2026-06-29 13:40:52",
+        "ts_epoch": 1782754852.8431988
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754854.7696395,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448747445,
+        "ts": "2026-06-29 13:40:54",
+        "ts_epoch": 1782754854.9129755
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754856.6111007,
+        "cycle": true,
+        "price": 0.80781,
+        "ticket": 4448747453,
+        "ts": "2026-06-29 13:40:56",
+        "ts_epoch": 1782754856.7616022
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754858.8618267,
+        "cycle": true,
+        "price": 0.80783,
+        "ticket": 4448746870,
+        "ts": "2026-06-29 13:40:59",
+        "ts_epoch": 1782754859.001037
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294343,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4981046
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294344,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4981492
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294345,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4981773
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294346,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4982047
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294347,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4982343
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294348,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4982655
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294349,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.498297
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085643,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4983497
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085644,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4983802
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085645,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4984088
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085646,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.498438
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085647,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4984689
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085648,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4984965
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294489,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.498619
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294490,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4988384
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294492,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4988654
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294493,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4988875
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294497,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4989092
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294503,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4989555
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294505,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.499004
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79294506,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.4990685
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79085561,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.499103
+      }
+    ],
+    "closed": {
+      "GO-1-A-SQ651938": 22,
+      "GO-1-B-ICM7991931": 0
+    },
+    "comment": "651938-7991931",
+    "created_at": "2026-06-29 13:39:30",
+    "cycle_account": "GO-1-B-ICM7991931",
+    "cycle_complete_ts": 1782754859.573748,
+    "cycle_days": 5,
+    "cycle_progress": {
+      "confirmed_closed_tickets": [
+        "4448747270",
+        "4448678922",
+        "4448678929",
+        "4448738622",
+        "4448738624",
+        "4448678941",
+        "4448738649",
+        "4448678959",
+        "4448738660",
+        "4448738673",
+        "4448738679",
+        "4448738693",
+        "4448746772",
+        "4448747387",
+        "4448678847",
+        "4448747017",
+        "4448678876",
+        "4448747045",
+        "4448678883",
+        "4448747445",
+        "4448747453",
+        "4448746870"
+      ],
+      "cycle_close_ts": 1782754859.0009809,
+      "cycle_total": 22,
+      "cycled": 22,
+      "index": 1,
+      "open_dispatched": true,
+      "open_fill_received": true,
+      "phase": "close",
+      "total_spread_cost": 0.00020000000000075513
+    },
+    "diff_to_close": 0,
+    "diff_to_open": null,
+    "errors": {
+      "GO-1-A-SQ651938": [],
+      "GO-1-B-ICM7991931": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "GO-1-A-SQ651938": 22,
+      "GO-1-B-ICM7991931": 22
+    },
+    "fills": [
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.81267,
+        "quote_price": 0.81267,
+        "spread": null,
+        "ticket": 79294489,
+        "ts": "2026-06-24T21:40:53.0000000",
+        "ts_epoch": 1782754770.281329
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754825.3866847,
+        "price": 0.80785,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704264,
+        "ts": "2026-06-29 13:40:25",
+        "ts_epoch": 1782754825.7970517
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.81263,
+        "quote_price": 0.81263,
+        "spread": null,
+        "ticket": 79294490,
+        "ts": "2026-06-24T21:41:15.0000000",
+        "ts_epoch": 1782754770.2813509
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754827.6148758,
+        "price": 0.80783,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704276,
+        "ts": "2026-06-29 13:40:27",
+        "ts_epoch": 1782754827.9981744
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 0.8127,
+        "quote_price": 0.8127,
+        "spread": null,
+        "ticket": 79294492,
+        "ts": "2026-06-24T21:41:53.0000000",
+        "ts_epoch": 1782754770.2813718
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754828.7207994,
+        "price": 0.80783,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704285,
+        "ts": "2026-06-29 13:40:29",
+        "ts_epoch": 1782754829.083213
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 0.81268,
+        "quote_price": 0.81268,
+        "spread": null,
+        "ticket": 79294493,
+        "ts": "2026-06-24T21:42:00.0000000",
+        "ts_epoch": 1782754770.2813904
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754829.384675,
+        "price": 0.80783,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704292,
+        "ts": "2026-06-29 13:40:29",
+        "ts_epoch": 1782754829.7267795
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 0.8127,
+        "quote_price": 0.8127,
+        "spread": null,
+        "ticket": 79294497,
+        "ts": "2026-06-24T21:42:25.0000000",
+        "ts_epoch": 1782754770.2814078
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754830.0955403,
+        "price": 0.80783,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704301,
+        "ts": "2026-06-29 13:40:30",
+        "ts_epoch": 1782754830.5496047
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 0.81269,
+        "quote_price": 0.81269,
+        "spread": null,
+        "ticket": 79294503,
+        "ts": "2026-06-24T21:42:41.0000000",
+        "ts_epoch": 1782754770.2814262
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754830.828957,
+        "price": 0.80783,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704308,
+        "ts": "2026-06-29 13:40:31",
+        "ts_epoch": 1782754831.206341
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 6,
+        "price": 0.81267,
+        "quote_price": 0.81267,
+        "spread": null,
+        "ticket": 79294505,
+        "ts": "2026-06-24T21:42:57.0000000",
+        "ts_epoch": 1782754770.281444
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754832.5740945,
+        "price": 0.80782,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704318,
+        "ts": "2026-06-29 13:40:32",
+        "ts_epoch": 1782754832.970646
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 7,
+        "price": 0.81268,
+        "quote_price": 0.81268,
+        "spread": null,
+        "ticket": 79294506,
+        "ts": "2026-06-24T21:42:59.0000000",
+        "ts_epoch": 1782754770.2814627
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754834.7385583,
+        "price": 0.80782,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704322,
+        "ts": "2026-06-29 13:40:35",
+        "ts_epoch": 1782754835.1040637
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 8,
+        "price": 0.81289,
+        "quote_price": 0.81289,
+        "spread": null,
+        "ticket": 79294343,
+        "ts": "2026-06-24T21:21:12.0000000",
+        "ts_epoch": 1782754770.281481
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754836.5825784,
+        "price": 0.80782,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704325,
+        "ts": "2026-06-29 13:40:36",
+        "ts_epoch": 1782754836.999383
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 9,
+        "price": 0.81289,
+        "quote_price": 0.81289,
+        "spread": null,
+        "ticket": 79294344,
+        "ts": "2026-06-24T21:21:12.0000000",
+        "ts_epoch": 1782754770.2814987
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754838.678245,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704332,
+        "ts": "2026-06-29 13:40:39",
+        "ts_epoch": 1782754839.0814097
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 10,
+        "price": 0.81288,
+        "quote_price": 0.81288,
+        "spread": null,
+        "ticket": 79294345,
+        "ts": "2026-06-24T21:21:15.0000000",
+        "ts_epoch": 1782754770.2815158
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754840.7799842,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704342,
+        "ts": "2026-06-29 13:40:41",
+        "ts_epoch": 1782754841.2519946
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 11,
+        "price": 0.81288,
+        "quote_price": 0.81288,
+        "spread": null,
+        "ticket": 79294346,
+        "ts": "2026-06-24T21:21:16.0000000",
+        "ts_epoch": 1782754770.2815337
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754843.3487775,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704350,
+        "ts": "2026-06-29 13:40:43",
+        "ts_epoch": 1782754843.6939592
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 12,
+        "price": 0.81289,
+        "quote_price": 0.81289,
+        "spread": null,
+        "ticket": 79294347,
+        "ts": "2026-06-24T21:21:18.0000000",
+        "ts_epoch": 1782754770.281552
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754844.0831406,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704353,
+        "ts": "2026-06-29 13:40:44",
+        "ts_epoch": 1782754844.4936898
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 13,
+        "price": 0.81288,
+        "quote_price": 0.81288,
+        "spread": null,
+        "ticket": 79294348,
+        "ts": "2026-06-24T21:21:19.0000000",
+        "ts_epoch": 1782754770.281572
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754844.7868075,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704356,
+        "ts": "2026-06-29 13:40:45",
+        "ts_epoch": 1782754845.1810448
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 14,
+        "price": 0.81289,
+        "quote_price": 0.81289,
+        "spread": null,
+        "ticket": 79294349,
+        "ts": "2026-06-24T21:21:21.0000000",
+        "ts_epoch": 1782754770.2815895
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754845.7642846,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704368,
+        "ts": "2026-06-29 13:40:46",
+        "ts_epoch": 1782754846.3822613
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 15,
+        "price": 0.79217,
+        "quote_price": 0.79217,
+        "spread": null,
+        "ticket": 79085561,
+        "ts": "2026-06-03T21:17:29.0000000",
+        "ts_epoch": 1782754770.2816076
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754848.0720773,
+        "price": 0.80781,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704374,
+        "ts": "2026-06-29 13:40:48",
+        "ts_epoch": 1782754848.639608
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 16,
+        "price": 0.7923,
+        "quote_price": 0.7923,
+        "spread": null,
+        "ticket": 79085643,
+        "ts": "2026-06-03T21:51:59.0000000",
+        "ts_epoch": 1782754770.2816253
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754850.083283,
+        "price": 0.80781,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704386,
+        "ts": "2026-06-29 13:40:50",
+        "ts_epoch": 1782754850.6978974
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 17,
+        "price": 0.7923,
+        "quote_price": 0.7923,
+        "spread": null,
+        "ticket": 79085644,
+        "ts": "2026-06-03T21:52:09.0000000",
+        "ts_epoch": 1782754770.2816448
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754852.165937,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704402,
+        "ts": "2026-06-29 13:40:52",
+        "ts_epoch": 1782754852.66122
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 18,
+        "price": 0.7923,
+        "quote_price": 0.7923,
+        "spread": null,
+        "ticket": 79085645,
+        "ts": "2026-06-03T21:52:10.0000000",
+        "ts_epoch": 1782754770.281663
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754853.9318104,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704409,
+        "ts": "2026-06-29 13:40:54",
+        "ts_epoch": 1782754854.6437418
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 19,
+        "price": 0.79231,
+        "quote_price": 0.79231,
+        "spread": null,
+        "ticket": 79085646,
+        "ts": "2026-06-03T21:52:34.0000000",
+        "ts_epoch": 1782754770.281681
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754856.0022101,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704413,
+        "ts": "2026-06-29 13:40:56",
+        "ts_epoch": 1782754856.5234933
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 20,
+        "price": 0.79232,
+        "quote_price": 0.79232,
+        "spread": null,
+        "ticket": 79085647,
+        "ts": "2026-06-03T21:52:35.0000000",
+        "ts_epoch": 1782754770.2816994
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754857.8460205,
+        "price": 0.8078,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704419,
+        "ts": "2026-06-29 13:40:58",
+        "ts_epoch": 1782754858.4157808
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 21,
+        "price": 0.79232,
+        "quote_price": 0.79232,
+        "spread": null,
+        "ticket": 79085648,
+        "ts": "2026-06-03T21:52:35.0000000",
+        "ts_epoch": 1782754770.2817183
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754859.190009,
+        "price": 0.80782,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704424,
+        "ts": "2026-06-29 13:40:59",
+        "ts_epoch": 1782754859.5701237
+      }
+    ],
+    "hedge_monitor_start_ts": 1782754789.1603093,
+    "id": "2de98c2f-49a4-45af-acc0-271f9f9f1904",
+    "imbalance_rebal_ts": 1782871227.816691,
+    "imported": true,
+    "last_trade_ts": {
+      "GO-1-B-ICM7991931": 1782754859.5713682
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "USDCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {
+      "GO-1-B-ICM7991931": 22
+    },
+    "rollback_tickets": {
+      "GO-1-B-ICM7991931": [
+        4450704264,
+        4450704276,
+        4450704285,
+        4450704292,
+        4450704301,
+        4450704308,
+        4450704318,
+        4450704322,
+        4450704325,
+        4450704332,
+        4450704342,
+        4450704350,
+        4450704353,
+        4450704356,
+        4450704368,
+        4450704374,
+        4450704386,
+        4450704402,
+        4450704409,
+        4450704413,
+        4450704419,
+        4450704424
+      ]
+    },
+    "side1_max_spread": 18,
+    "side2_max_spread": 1,
+    "sides": {
+      "GO-1-A-SQ651938": {
+        "action": "buy",
+        "comment": "651938-7991931",
+        "lot_size": 1,
+        "max_spread": 18,
+        "pair": "USDCHF",
+        "side_number": 1
+      },
+      "GO-1-B-ICM7991931": {
+        "action": "sell",
+        "comment": "651938-7991931",
+        "lot_size": 1,
+        "max_spread": 1,
+        "pair": "USDCHF",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "GO-1-A-SQ651938": 0,
+      "GO-1-B-ICM7991931": 0
+    },
+    "status": "active",
+    "strategy_id": "f15a27c5-bb29-4985-a318-0d5113a2280a",
+    "total_positions": 22,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-29 13:40:59"
+  },
+  "363acc33-1728-4467-85cb-63261eba033f": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755000.4610763,
+        "cycle": true,
+        "price": 0.80786,
+        "ticket": 109253641,
+        "ts": "2026-06-29 13:43:20",
+        "ts_epoch": 1782755000.5949686
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755040.9029093,
+        "cycle": true,
+        "price": 0.80785,
+        "ticket": 109233171,
+        "ts": "2026-06-29 13:44:01",
+        "ts_epoch": 1782755041.043708
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755041.2790546,
+        "cycle": true,
+        "price": 0.80792,
+        "ticket": 109233172,
+        "ts": "2026-06-29 13:44:01",
+        "ts_epoch": 1782755041.4227853
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755045.0369637,
+        "cycle": true,
+        "price": 0.80789,
+        "ticket": 109256848,
+        "ts": "2026-06-29 13:44:05",
+        "ts_epoch": 1782755045.174435
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755046.5136058,
+        "cycle": true,
+        "price": 0.80792,
+        "ticket": 109253555,
+        "ts": "2026-06-29 13:44:06",
+        "ts_epoch": 1782755046.8056774
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755048.001585,
+        "cycle": true,
+        "price": 0.80791,
+        "ticket": 109253646,
+        "ts": "2026-06-29 13:44:08",
+        "ts_epoch": 1782755048.120903
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755049.3170435,
+        "cycle": true,
+        "price": 0.80792,
+        "ticket": 109256941,
+        "ts": "2026-06-29 13:44:09",
+        "ts_epoch": 1782755049.516387
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755050.8620815,
+        "cycle": true,
+        "price": 0.8079,
+        "ticket": 109256950,
+        "ts": "2026-06-29 13:44:10",
+        "ts_epoch": 1782755050.9553952
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755052.3428524,
+        "cycle": true,
+        "price": 0.80791,
+        "ticket": 109253580,
+        "ts": "2026-06-29 13:44:12",
+        "ts_epoch": 1782755052.4456518
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755053.6624978,
+        "cycle": true,
+        "price": 0.80791,
+        "ticket": 109256964,
+        "ts": "2026-06-29 13:44:13",
+        "ts_epoch": 1782755053.7770543
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755054.7929518,
+        "cycle": true,
+        "price": 0.80793,
+        "ticket": 109253601,
+        "ts": "2026-06-29 13:44:14",
+        "ts_epoch": 1782755054.9429183
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755055.222069,
+        "cycle": true,
+        "price": 0.80793,
+        "ticket": 109233155,
+        "ts": "2026-06-29 13:44:15",
+        "ts_epoch": 1782755055.3941243
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755055.664427,
+        "cycle": true,
+        "price": 0.80789,
+        "ticket": 109256926,
+        "ts": "2026-06-29 13:44:15",
+        "ts_epoch": 1782755055.8282905
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755056.1462033,
+        "cycle": true,
+        "price": 0.80789,
+        "ticket": 109233164,
+        "ts": "2026-06-29 13:44:16",
+        "ts_epoch": 1782755056.3062236
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755057.6377769,
+        "cycle": true,
+        "price": 0.80792,
+        "ticket": 109253547,
+        "ts": "2026-06-29 13:44:17",
+        "ts_epoch": 1782755057.7996917
+      }
+    ],
+    "closed": {
+      "HUGO-1-A-SQ649159": 0,
+      "HUGO-1-B-ORB91033": 0
+    },
+    "comment": "649159-808723",
+    "created_at": "2026-06-28 18:46:46",
+    "cycle_account": "HUGO-1-B-ORB91033",
+    "cycle_complete_ts": 1782755059.1463406,
+    "cycle_days": 5,
+    "cycle_progress": {
+      "confirmed_closed_tickets": [
+        "109253641",
+        "109233171",
+        "109233172",
+        "109256848",
+        "109253555",
+        "109253646",
+        "109256941",
+        "109256950",
+        "109253580",
+        "109256964",
+        "109253601",
+        "109233155",
+        "109256926",
+        "109233164",
+        "109253547"
+      ],
+      "cycle_close_ts": 1782755057.7996373,
+      "cycle_total": 15,
+      "cycled": 15,
+      "index": 1,
+      "open_dispatched": true,
+      "open_fill_received": true,
+      "phase": "close",
+      "total_spread_cost": 0.003110000000000057
+    },
+    "diff_to_close": 0,
+    "diff_to_open": null,
+    "errors": {
+      "HUGO-1-A-SQ649159": [],
+      "HUGO-1-B-ORB91033": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "HUGO-1-A-SQ649159": 15,
+      "HUGO-1-B-ORB91033": 15
+    },
+    "fills": [
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.81285,
+        "quote_price": 0.81285,
+        "spread": null,
+        "ticket": 79293307,
+        "ts": "2026-06-24T19:51:22.0000000",
+        "ts_epoch": 1782686806.3441336
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755001.663291,
+        "price": 0.80771,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835081,
+        "ts": "2026-06-29 13:43:21",
+        "ts_epoch": 1782755001.8245366
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.81285,
+        "quote_price": 0.81285,
+        "spread": null,
+        "ticket": 79293309,
+        "ts": "2026-06-24T19:51:22.0000000",
+        "ts_epoch": 1782686806.3441494
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755041.0862284,
+        "price": 0.80772,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835121,
+        "ts": "2026-06-29 13:44:01",
+        "ts_epoch": 1782755041.235472
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 0.81265,
+        "quote_price": 0.81265,
+        "spread": null,
+        "ticket": 79294496,
+        "ts": "2026-06-24T21:42:16.0000000",
+        "ts_epoch": 1782686806.3441648
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755042.463897,
+        "price": 0.80772,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835131,
+        "ts": "2026-06-29 13:44:02",
+        "ts_epoch": 1782755042.7741632
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 0.81266,
+        "quote_price": 0.81266,
+        "spread": null,
+        "ticket": 79294498,
+        "ts": "2026-06-24T21:42:25.0000000",
+        "ts_epoch": 1782686806.34418
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755046.2157865,
+        "price": 0.80771,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835143,
+        "ts": "2026-06-29 13:44:06",
+        "ts_epoch": 1782755046.4449058
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 0.81265,
+        "quote_price": 0.81265,
+        "spread": null,
+        "ticket": 79294500,
+        "ts": "2026-06-24T21:42:26.0000000",
+        "ts_epoch": 1782686806.3441954
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755047.8327878,
+        "price": 0.8077,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835153,
+        "ts": "2026-06-29 13:44:07",
+        "ts_epoch": 1782755047.9625452
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 0.81265,
+        "quote_price": 0.81265,
+        "spread": null,
+        "ticket": 79294501,
+        "ts": "2026-06-24T21:42:27.0000000",
+        "ts_epoch": 1782686806.3442106
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755049.153647,
+        "price": 0.80768,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835163,
+        "ts": "2026-06-29 13:44:09",
+        "ts_epoch": 1782755049.2624502
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 6,
+        "price": 0.81265,
+        "quote_price": 0.81265,
+        "spread": null,
+        "ticket": 79294502,
+        "ts": "2026-06-24T21:42:29.0000000",
+        "ts_epoch": 1782686806.3442261
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755050.704527,
+        "price": 0.80768,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835173,
+        "ts": "2026-06-29 13:44:10",
+        "ts_epoch": 1782755050.8087656
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 7,
+        "price": 0.8128,
+        "quote_price": 0.8128,
+        "spread": null,
+        "ticket": 79294351,
+        "ts": "2026-06-24T21:24:03.0000000",
+        "ts_epoch": 1782686806.3442414
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755051.9876754,
+        "price": 0.80772,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835183,
+        "ts": "2026-06-29 13:44:12",
+        "ts_epoch": 1782755052.2418377
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 8,
+        "price": 0.81281,
+        "quote_price": 0.81281,
+        "spread": null,
+        "ticket": 79294352,
+        "ts": "2026-06-24T21:24:04.0000000",
+        "ts_epoch": 1782686806.3442569
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755053.4349442,
+        "price": 0.80767,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835195,
+        "ts": "2026-06-29 13:44:13",
+        "ts_epoch": 1782755053.6128364
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 9,
+        "price": 0.8128,
+        "quote_price": 0.8128,
+        "spread": null,
+        "ticket": 79294353,
+        "ts": "2026-06-24T21:24:08.0000000",
+        "ts_epoch": 1782686806.3442721
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755054.280229,
+        "price": 0.80772,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835205,
+        "ts": "2026-06-29 13:44:14",
+        "ts_epoch": 1782755054.460187
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 10,
+        "price": 0.8128,
+        "quote_price": 0.8128,
+        "spread": null,
+        "ticket": 79294354,
+        "ts": "2026-06-24T21:24:10.0000000",
+        "ts_epoch": 1782686806.3442886
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755054.997599,
+        "price": 0.80768,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835231,
+        "ts": "2026-06-29 13:44:15",
+        "ts_epoch": 1782755055.156037
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 11,
+        "price": 0.8128,
+        "quote_price": 0.8128,
+        "spread": null,
+        "ticket": 79294355,
+        "ts": "2026-06-24T21:24:18.0000000",
+        "ts_epoch": 1782686806.3443074
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755055.4424453,
+        "price": 0.80769,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835241,
+        "ts": "2026-06-29 13:44:15",
+        "ts_epoch": 1782755055.606123
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 12,
+        "price": 0.81279,
+        "quote_price": 0.81279,
+        "spread": null,
+        "ticket": 79294356,
+        "ts": "2026-06-24T21:24:18.0000000",
+        "ts_epoch": 1782686806.3443422
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755055.929513,
+        "price": 0.8077,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835251,
+        "ts": "2026-06-29 13:44:16",
+        "ts_epoch": 1782755056.076612
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 13,
+        "price": 0.8128,
+        "quote_price": 0.8128,
+        "spread": null,
+        "ticket": 79293299,
+        "ts": "2026-06-24T19:51:20.0000000",
+        "ts_epoch": 1782686806.3443606
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755057.3905659,
+        "price": 0.80767,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835262,
+        "ts": "2026-06-29 13:44:17",
+        "ts_epoch": 1782755057.5623274
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 14,
+        "price": 0.81283,
+        "quote_price": 0.81283,
+        "spread": null,
+        "ticket": 79293300,
+        "ts": "2026-06-24T19:51:21.0000000",
+        "ts_epoch": 1782686806.344378
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782755058.8297899,
+        "price": 0.80767,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109835315,
+        "ts": "2026-06-29 13:44:19",
+        "ts_epoch": 1782755059.1380472
+      }
+    ],
+    "hedge_monitor_start_ts": 1782686826.5993376,
+    "id": "363acc33-1728-4467-85cb-63261eba033f",
+    "imported": true,
+    "last_trade_ts": {
+      "HUGO-1-B-ORB91033": 1782755059.1456695
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "USDCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {},
+    "rollback_tickets": {},
+    "side2_max_spread": 2,
+    "sides": {
+      "HUGO-1-A-SQ649159": {
+        "action": "buy",
+        "comment": "649159-808723",
+        "lot_size": 1,
+        "max_spread": 0,
+        "pair": "USDCHF",
+        "side_number": 1
+      },
+      "HUGO-1-B-ORB91033": {
+        "action": "sell",
+        "comment": "649159-808723",
+        "lot_size": 1,
+        "max_spread": 2,
+        "pair": "USDCHF.",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "HUGO-1-A-SQ649159": 0,
+      "HUGO-1-B-ORB91033": 0
+    },
+    "status": "active",
+    "strategy_id": "df645d76-0548-4cfd-b253-210b66176345",
+    "total_positions": 15,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-29 13:44:19"
+  },
+  "432bcc49-a4c7-480c-a78b-be366d5248e1": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098948,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8919477
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098533,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8920152
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098920,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.89204
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439096588,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.892066
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098896,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8920896
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439094579,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.892115
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098933,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8925061
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098682,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8925645
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098940,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.89259
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "external": true,
+        "price": null,
+        "ticket": 439098910,
+        "ts": "2026-06-30 21:24:59",
+        "ts_epoch": 1782869099.8926175
+      }
+    ],
+    "closed": {
+      "JU-3-A-DERIV80536168": 0,
+      "JU-3-A-MEX950059": 10
+    },
+    "comment": "950059-80536168",
+    "created_at": "2026-06-22 14:04:16",
+    "diff_to_close": 0,
+    "diff_to_open": -13,
+    "errors": {
+      "JU-3-A-DERIV80536168": [],
+      "JU-3-A-MEX950059": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "JU-3-A-DERIV80536168": 10,
+      "JU-3-A-MEX950059": 10
+    },
+    "fills": [
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.80918,
+        "quote_price": 0.80918,
+        "spread": null,
+        "ticket": 439094579,
+        "ts": "2026-06-22T20:46:12.2480000",
+        "ts_epoch": 1782151456.2540703
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.80888,
+        "quote_price": 0.80888,
+        "spread": null,
+        "ticket": 5201077213,
+        "ts": "2026-06-22T17:54:40.0140000",
+        "ts_epoch": 1782151456.254081
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.80906,
+        "quote_price": 0.80906,
+        "spread": null,
+        "ticket": 439096588,
+        "ts": "2026-06-22T20:55:15.5370000",
+        "ts_epoch": 1782151456.2540925
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.80903,
+        "quote_price": 0.80903,
+        "spread": null,
+        "ticket": 5201075636,
+        "ts": "2026-06-22T17:45:03.6460000",
+        "ts_epoch": 1782151456.2541037
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151512.5391347,
+        "price": 0.80905,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098533,
+        "ts": "2026-06-22 14:05:12",
+        "ts_epoch": 1782151512.6866574
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151512.5799007,
+        "price": 0.80885,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201078923,
+        "ts": "2026-06-22 14:05:13",
+        "ts_epoch": 1782151513.184899
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151560.7346802,
+        "price": 0.80908,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098682,
+        "ts": "2026-06-22 14:06:01",
+        "ts_epoch": 1782151561.0157423
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151605.440762,
+        "price": 0.80881,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079114,
+        "ts": "2026-06-22 14:06:45",
+        "ts_epoch": 1782151605.6655347
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151613.4935405,
+        "price": 0.80902,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098896,
+        "ts": "2026-06-22 14:06:53",
+        "ts_epoch": 1782151613.6019368
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151613.512817,
+        "price": 0.80882,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079132,
+        "ts": "2026-06-22 14:06:53",
+        "ts_epoch": 1782151613.7899067
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151617.7369814,
+        "price": 0.80902,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098910,
+        "ts": "2026-06-22 14:06:57",
+        "ts_epoch": 1782151617.968238
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151617.767877,
+        "price": 0.80883,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079156,
+        "ts": "2026-06-22 14:06:58",
+        "ts_epoch": 1782151618.176505
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151619.2975323,
+        "price": 0.80902,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098920,
+        "ts": "2026-06-22 14:06:59",
+        "ts_epoch": 1782151619.475118
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151619.371863,
+        "price": 0.80883,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079161,
+        "ts": "2026-06-22 14:06:59",
+        "ts_epoch": 1782151619.7717311
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151622.1280973,
+        "price": 0.809,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098933,
+        "ts": "2026-06-22 14:07:02",
+        "ts_epoch": 1782151622.2380884
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151622.1591527,
+        "price": 0.80881,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079175,
+        "ts": "2026-06-22 14:07:02",
+        "ts_epoch": 1782151622.4746091
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151623.6302154,
+        "price": 0.809,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098940,
+        "ts": "2026-06-22 14:07:03",
+        "ts_epoch": 1782151623.770121
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151623.6801841,
+        "price": 0.80881,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079181,
+        "ts": "2026-06-22 14:07:04",
+        "ts_epoch": 1782151624.1101902
+      },
+      {
+        "account": "JU-3-A-MEX950059",
+        "cmd_ts": 1782151625.6077652,
+        "price": 0.80901,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439098948,
+        "ts": "2026-06-22 14:07:06",
+        "ts_epoch": 1782151626.1643271
+      },
+      {
+        "account": "JU-3-A-DERIV80536168",
+        "cmd_ts": 1782151625.7147782,
+        "price": 0.80882,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 5201079187,
+        "ts": "2026-06-22 14:07:06",
+        "ts_epoch": 1782151626.3976958
+      }
+    ],
+    "hedge_monitor_start_ts": 1782151584.115215,
+    "id": "432bcc49-a4c7-480c-a78b-be366d5248e1",
+    "imbalance_rebal_ts": 1782871229.7619195,
+    "imported": true,
+    "last_trade_ts": {
+      "JU-3-A-DERIV80536168": 1782151626.397496,
+      "JU-3-A-MEX950059": 1782151626.1642668
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "USDCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {
+      "JU-3-A-DERIV80536168": 10
+    },
+    "rollback_tickets": {
+      "JU-3-A-DERIV80536168": [
+        5201077213,
+        5201075636,
+        5201078923,
+        5201079114,
+        5201079132,
+        5201079156,
+        5201079161,
+        5201079175,
+        5201079181,
+        5201079187
+      ]
+    },
+    "side1_max_spread": 5,
+    "side2_max_spread": 22,
+    "sides": {
+      "JU-3-A-DERIV80536168": {
+        "action": "sell",
+        "comment": "950059-80536168",
+        "lot_size": 1.0,
+        "max_spread": 22,
+        "pair": "USDCHF",
+        "side_number": 2
+      },
+      "JU-3-A-MEX950059": {
+        "action": "buy",
+        "comment": "950059-80536168",
+        "lot_size": 1.0,
+        "max_spread": 5,
+        "pair": "USDCHF.ecn",
+        "side_number": 1
+      }
+    },
+    "spread_rejects": {
+      "JU-3-A-DERIV80536168": 0,
+      "JU-3-A-MEX950059": 0
+    },
+    "status": "active",
+    "strategy_id": "aaeb589c-c07b-40b1-b5de-1518b376d9c1",
+    "total_positions": 10,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-22 14:07:06"
+  },
+  "67432be0-f2c8-43bf-9c40-7c7c0c2556f7": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756804.4851384,
+        "cycle": true,
+        "price": 1.07044,
+        "ticket": 109233349,
+        "ts": "2026-06-29 14:13:24",
+        "ts_epoch": 1782756804.557179
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756813.3874686,
+        "cycle": true,
+        "price": 1.07045,
+        "ticket": 109257117,
+        "ts": "2026-06-29 14:13:33",
+        "ts_epoch": 1782756813.460076
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756814.9031558,
+        "cycle": true,
+        "price": 1.07052,
+        "ticket": 109233356,
+        "ts": "2026-06-29 14:13:35",
+        "ts_epoch": 1782756815.0212271
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756815.3813562,
+        "cycle": true,
+        "price": 1.07053,
+        "ticket": 109257125,
+        "ts": "2026-06-29 14:13:35",
+        "ts_epoch": 1782756815.5164711
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756819.0233805,
+        "cycle": true,
+        "price": 1.07052,
+        "ticket": 109257131,
+        "ts": "2026-06-29 14:13:39",
+        "ts_epoch": 1782756819.1235409
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756820.8057697,
+        "cycle": true,
+        "price": 1.07051,
+        "ticket": 109257224,
+        "ts": "2026-06-29 14:13:40",
+        "ts_epoch": 1782756820.8904295
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756822.2987967,
+        "cycle": true,
+        "price": 1.0705,
+        "ticket": 109257154,
+        "ts": "2026-06-29 14:13:42",
+        "ts_epoch": 1782756822.3813806
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756823.719554,
+        "cycle": true,
+        "price": 1.07052,
+        "ticket": 109235260,
+        "ts": "2026-06-29 14:13:43",
+        "ts_epoch": 1782756823.8490696
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756828.665231,
+        "cycle": true,
+        "price": 1.0705,
+        "ticket": 109257159,
+        "ts": "2026-06-29 14:13:48",
+        "ts_epoch": 1782756828.7543595
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756830.0249722,
+        "cycle": true,
+        "price": 1.07051,
+        "ticket": 109257164,
+        "ts": "2026-06-29 14:13:50",
+        "ts_epoch": 1782756830.3050528
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756834.1059232,
+        "cycle": true,
+        "price": 1.07053,
+        "ticket": 109233313,
+        "ts": "2026-06-29 14:13:54",
+        "ts_epoch": 1782756834.384764
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756871.2219458,
+        "cycle": true,
+        "price": 1.07047,
+        "ticket": 109245071,
+        "ts": "2026-06-29 14:14:31",
+        "ts_epoch": 1782756871.30966
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756873.738342,
+        "cycle": true,
+        "price": 1.07051,
+        "ticket": 109235284,
+        "ts": "2026-06-29 14:14:33",
+        "ts_epoch": 1782756873.7991965
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756875.0282075,
+        "cycle": true,
+        "price": 1.07052,
+        "ticket": 109245078,
+        "ts": "2026-06-29 14:14:35",
+        "ts_epoch": 1782756875.109952
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756875.3194864,
+        "cycle": true,
+        "price": 1.07052,
+        "ticket": 109245083,
+        "ts": "2026-06-29 14:14:35",
+        "ts_epoch": 1782756875.4220002
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756876.7028406,
+        "cycle": true,
+        "price": 1.07053,
+        "ticket": 109257102,
+        "ts": "2026-06-29 14:14:36",
+        "ts_epoch": 1782756876.8018243
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756878.023369,
+        "cycle": true,
+        "price": 1.07055,
+        "ticket": 109233339,
+        "ts": "2026-06-29 14:14:38",
+        "ts_epoch": 1782756878.2319424
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756879.4689925,
+        "cycle": true,
+        "price": 1.07053,
+        "ticket": 109257103,
+        "ts": "2026-06-29 14:14:39",
+        "ts_epoch": 1782756879.589415
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756881.0390112,
+        "cycle": true,
+        "price": 1.0705,
+        "ticket": 109233344,
+        "ts": "2026-06-29 14:14:41",
+        "ts_epoch": 1782756881.1363494
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756882.7561507,
+        "cycle": true,
+        "price": 1.07053,
+        "ticket": 109257109,
+        "ts": "2026-06-29 14:14:42",
+        "ts_epoch": 1782756882.844802
+      }
+    ],
+    "closed": {
+      "HUGO-1-A-SQ649159": 0,
+      "HUGO-1-B-ORB91033": 0
+    },
+    "comment": "649159-808723",
+    "created_at": "2026-06-28 18:46:56",
+    "cycle_account": "HUGO-1-B-ORB91033",
+    "cycle_complete_ts": 1782756884.0418591,
+    "cycle_days": 5,
+    "cycle_progress": {
+      "confirmed_closed_tickets": [
+        "109233349",
+        "109257117",
+        "109233356",
+        "109257125",
+        "109257131",
+        "109257224",
+        "109257154",
+        "109235260",
+        "109257159",
+        "109257164",
+        "109233313",
+        "109245071",
+        "109235284",
+        "109245078",
+        "109245083",
+        "109257102",
+        "109233339",
+        "109257103",
+        "109233344",
+        "109257109"
+      ],
+      "cycle_close_ts": 1782756882.8447454,
+      "cycle_total": 20,
+      "cycled": 20,
+      "index": 1,
+      "open_dispatched": true,
+      "open_fill_received": true,
+      "phase": "close",
+      "total_spread_cost": 0.005549999999999278
+    },
+    "diff_to_close": 0,
+    "diff_to_open": null,
+    "errors": {
+      "HUGO-1-A-SQ649159": [],
+      "HUGO-1-B-ORB91033": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "HUGO-1-A-SQ649159": 20,
+      "HUGO-1-B-ORB91033": 20
+    },
+    "fills": [
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 1.06934,
+        "quote_price": 1.06934,
+        "spread": null,
+        "ticket": 79293322,
+        "ts": "2026-06-24T19:52:04.0000000",
+        "ts_epoch": 1782686816.0830202
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756805.5969718,
+        "price": 1.0702,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837721,
+        "ts": "2026-06-29 14:13:25",
+        "ts_epoch": 1782756805.6888936
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 1.06934,
+        "quote_price": 1.06934,
+        "spread": null,
+        "ticket": 79293324,
+        "ts": "2026-06-24T19:52:15.0000000",
+        "ts_epoch": 1782686816.083039
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756814.5278745,
+        "price": 1.07024,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837759,
+        "ts": "2026-06-29 14:13:34",
+        "ts_epoch": 1782756814.6313643
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 1.06933,
+        "quote_price": 1.06933,
+        "spread": null,
+        "ticket": 79293325,
+        "ts": "2026-06-24T19:52:16.0000000",
+        "ts_epoch": 1782686816.0830545
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756815.108458,
+        "price": 1.0702,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837770,
+        "ts": "2026-06-29 14:13:35",
+        "ts_epoch": 1782756815.2881052
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 1.06933,
+        "quote_price": 1.06933,
+        "spread": null,
+        "ticket": 79293326,
+        "ts": "2026-06-24T19:52:17.0000000",
+        "ts_epoch": 1782686816.0830731
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756816.6333938,
+        "price": 1.07024,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837780,
+        "ts": "2026-06-29 14:13:36",
+        "ts_epoch": 1782756816.8702853
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 1.06933,
+        "quote_price": 1.06933,
+        "spread": null,
+        "ticket": 79293327,
+        "ts": "2026-06-24T19:52:19.0000000",
+        "ts_epoch": 1782686816.0830958
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756820.507481,
+        "price": 1.0702,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837801,
+        "ts": "2026-06-29 14:13:40",
+        "ts_epoch": 1782756820.725282
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 1.06958,
+        "quote_price": 1.06958,
+        "spread": null,
+        "ticket": 79293419,
+        "ts": "2026-06-24T19:58:51.0000000",
+        "ts_epoch": 1782686816.083113
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756821.9558523,
+        "price": 1.07023,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837816,
+        "ts": "2026-06-29 14:13:42",
+        "ts_epoch": 1782756822.0410862
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 6,
+        "price": 1.06953,
+        "quote_price": 1.06953,
+        "spread": null,
+        "ticket": 79293425,
+        "ts": "2026-06-24T19:58:55.0000000",
+        "ts_epoch": 1782686816.0831301
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756823.5051515,
+        "price": 1.07023,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837830,
+        "ts": "2026-06-29 14:13:43",
+        "ts_epoch": 1782756823.621501
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 7,
+        "price": 1.06951,
+        "quote_price": 1.06951,
+        "spread": null,
+        "ticket": 79294507,
+        "ts": "2026-06-24T21:44:06.0000000",
+        "ts_epoch": 1782686816.0831475
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756824.940757,
+        "price": 1.07024,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837842,
+        "ts": "2026-06-29 14:13:45",
+        "ts_epoch": 1782756825.1173415
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 8,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294508,
+        "ts": "2026-06-24T21:44:07.0000000",
+        "ts_epoch": 1782686816.0831654
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756829.8136976,
+        "price": 1.07024,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837938,
+        "ts": "2026-06-29 14:13:49",
+        "ts_epoch": 1782756829.9218805
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 9,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294509,
+        "ts": "2026-06-24T21:44:07.0000000",
+        "ts_epoch": 1782686816.0831814
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756830.4758923,
+        "price": 1.07022,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837951,
+        "ts": "2026-06-29 14:13:50",
+        "ts_epoch": 1782756830.6059515
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 10,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294510,
+        "ts": "2026-06-24T21:44:10.0000000",
+        "ts_epoch": 1782686816.0831964
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756835.5662131,
+        "price": 1.07021,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109837966,
+        "ts": "2026-06-29 14:13:56",
+        "ts_epoch": 1782756836.0853024
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 11,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294511,
+        "ts": "2026-06-24T21:44:11.0000000",
+        "ts_epoch": 1782686816.0832114
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756872.4993205,
+        "price": 1.07026,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838008,
+        "ts": "2026-06-29 14:14:32",
+        "ts_epoch": 1782756872.5812683
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 12,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294512,
+        "ts": "2026-06-24T21:44:11.0000000",
+        "ts_epoch": 1782686816.083227
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756874.8594396,
+        "price": 1.07025,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838021,
+        "ts": "2026-06-29 14:14:34",
+        "ts_epoch": 1782756874.974507
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 13,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294513,
+        "ts": "2026-06-24T21:44:19.0000000",
+        "ts_epoch": 1782686816.0832484
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756875.162332,
+        "price": 1.07027,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838031,
+        "ts": "2026-06-29 14:14:35",
+        "ts_epoch": 1782756875.2485023
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 14,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294514,
+        "ts": "2026-06-24T21:44:20.0000000",
+        "ts_epoch": 1782686816.083265
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756876.5618145,
+        "price": 1.07027,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838041,
+        "ts": "2026-06-29 14:14:36",
+        "ts_epoch": 1782756876.6529288
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 15,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294515,
+        "ts": "2026-06-24T21:44:20.0000000",
+        "ts_epoch": 1782686816.0832884
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756877.8954997,
+        "price": 1.07023,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838054,
+        "ts": "2026-06-29 14:14:37",
+        "ts_epoch": 1782756877.9648252
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 16,
+        "price": 1.06952,
+        "quote_price": 1.06952,
+        "spread": null,
+        "ticket": 79294516,
+        "ts": "2026-06-24T21:44:35.0000000",
+        "ts_epoch": 1782686816.0833058
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756879.311372,
+        "price": 1.07025,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838064,
+        "ts": "2026-06-29 14:14:39",
+        "ts_epoch": 1782756879.3988616
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 17,
+        "price": 1.0696,
+        "quote_price": 1.0696,
+        "spread": null,
+        "ticket": 79294186,
+        "ts": "2026-06-24T20:38:17.0000000",
+        "ts_epoch": 1782686816.0833232
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756880.7834384,
+        "price": 1.07022,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838075,
+        "ts": "2026-06-29 14:14:40",
+        "ts_epoch": 1782756880.923175
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 18,
+        "price": 1.06961,
+        "quote_price": 1.06961,
+        "spread": null,
+        "ticket": 79294187,
+        "ts": "2026-06-24T20:38:17.0000000",
+        "ts_epoch": 1782686816.083341
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756882.5771465,
+        "price": 1.07022,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838085,
+        "ts": "2026-06-29 14:14:42",
+        "ts_epoch": 1782756882.6882265
+      },
+      {
+        "account": "HUGO-1-A-SQ649159",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 19,
+        "price": 1.06961,
+        "quote_price": 1.06961,
+        "spread": null,
+        "ticket": 79294188,
+        "ts": "2026-06-24T20:38:17.0000000",
+        "ts_epoch": 1782686816.0833564
+      },
+      {
+        "account": "HUGO-1-B-ORB91033",
+        "cmd_ts": 1782756883.921974,
+        "price": 1.07022,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 109838095,
+        "ts": "2026-06-29 14:14:44",
+        "ts_epoch": 1782756884.0305734
+      }
+    ],
+    "hedge_monitor_start_ts": 1782686822.9709196,
+    "id": "67432be0-f2c8-43bf-9c40-7c7c0c2556f7",
+    "imported": true,
+    "last_trade_ts": {
+      "HUGO-1-B-ORB91033": 1782756884.0316958
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "GBPCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {},
+    "rollback_tickets": {},
+    "side2_max_spread": 8,
+    "sides": {
+      "HUGO-1-A-SQ649159": {
+        "action": "buy",
+        "comment": "649159-808723",
+        "lot_size": 1,
+        "max_spread": 0,
+        "pair": "GBPCHF",
+        "side_number": 1
+      },
+      "HUGO-1-B-ORB91033": {
+        "action": "sell",
+        "comment": "649159-808723",
+        "lot_size": 1,
+        "max_spread": 8,
+        "pair": "GBPCHF.",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "HUGO-1-A-SQ649159": 0,
+      "HUGO-1-B-ORB91033": 0
+    },
+    "status": "active",
+    "strategy_id": "df645d76-0548-4cfd-b253-210b66176345",
+    "total_positions": 20,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-29 14:14:46"
+  },
+  "8d61a2e8-01b5-405f-bf92-bed032f73864": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439086129,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3319323
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439091526,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3321197
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439091494,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3321612
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439081306,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3321924
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439091517,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3325858
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "external": true,
+        "price": null,
+        "ticket": 439091357,
+        "ts": "2026-06-30 20:58:57",
+        "ts_epoch": 1782867537.3326242
+      }
+    ],
+    "closed": {
+      "JU-4-A-MEX952372": 6,
+      "JU-4-B-NOOR9434169": 0
+    },
+    "comment": "952372-9434169",
+    "created_at": "2026-06-22 13:34:08",
+    "diff_to_close": 0,
+    "diff_to_open": -8,
+    "errors": {
+      "JU-4-A-MEX952372": [],
+      "JU-4-B-NOOR9434169": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "JU-4-A-MEX952372": 10,
+      "JU-4-B-NOOR9434169": 10
+    },
+    "fills": [
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.78715,
+        "quote_price": 0.78715,
+        "spread": null,
+        "ticket": 432411905,
+        "ts": "2026-05-27T18:52:29.0290000",
+        "ts_epoch": 1782149648.198791
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 0.80727,
+        "quote_price": 0.80727,
+        "spread": null,
+        "ticket": 102552213,
+        "ts": "2026-06-19T18:10:13.0000000",
+        "ts_epoch": 1782149648.1988018
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.80901,
+        "quote_price": 0.80901,
+        "spread": null,
+        "ticket": 439081306,
+        "ts": "2026-06-22T20:03:20.8930000",
+        "ts_epoch": 1782149648.1988125
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 0.8072800000000001,
+        "quote_price": 0.8072800000000001,
+        "spread": null,
+        "ticket": 102552215,
+        "ts": "2026-06-19T18:10:33.0000000",
+        "ts_epoch": 1782149648.1988225
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 0.78717,
+        "quote_price": 0.78717,
+        "spread": null,
+        "ticket": 432413244,
+        "ts": "2026-05-27T19:00:02.7980000",
+        "ts_epoch": 1782149648.198831
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 0.8073,
+        "quote_price": 0.8073,
+        "spread": null,
+        "ticket": 102552217,
+        "ts": "2026-06-19T18:10:37.0000000",
+        "ts_epoch": 1782149648.19884
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 0.78717,
+        "quote_price": 0.78717,
+        "spread": null,
+        "ticket": 432412025,
+        "ts": "2026-05-27T18:53:22.4170000",
+        "ts_epoch": 1782149648.1988487
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 0.8072900000000001,
+        "quote_price": 0.8072900000000001,
+        "spread": null,
+        "ticket": 102552219,
+        "ts": "2026-06-19T18:10:39.0000000",
+        "ts_epoch": 1782149648.1988573
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 0.78734,
+        "quote_price": 0.78734,
+        "spread": null,
+        "ticket": 432413990,
+        "ts": "2026-05-27T19:03:16.3730000",
+        "ts_epoch": 1782149648.1988661
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 0.8091700000000001,
+        "quote_price": 0.8091700000000001,
+        "spread": null,
+        "ticket": 102563692,
+        "ts": "2026-06-22T18:33:22.0000000",
+        "ts_epoch": 1782149648.1988752
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 0.80907,
+        "quote_price": 0.80907,
+        "spread": null,
+        "ticket": 439086129,
+        "ts": "2026-06-22T20:20:04.8730000",
+        "ts_epoch": 1782149648.1988835
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 0.80893,
+        "quote_price": 0.80893,
+        "spread": null,
+        "ticket": 102563511,
+        "ts": "2026-06-22T18:03:21.0000000",
+        "ts_epoch": 1782149648.1988924
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": 1782149714.5128577,
+        "price": 0.80937,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439091357,
+        "ts": "2026-06-22 13:35:14",
+        "ts_epoch": 1782149714.6570375
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": 1782149714.5600145,
+        "price": 0.8093,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 102563704,
+        "ts": "2026-06-22 13:35:14",
+        "ts_epoch": 1782149714.959448
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": 1782149737.6106958,
+        "price": 0.80938,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439091494,
+        "ts": "2026-06-22 13:35:37",
+        "ts_epoch": 1782149737.882868
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": 1782149739.2474477,
+        "price": 0.8093100000000001,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 102563707,
+        "ts": "2026-06-22 13:35:39",
+        "ts_epoch": 1782149739.4369693
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": 1782149740.8784604,
+        "price": 0.80937,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439091517,
+        "ts": "2026-06-22 13:35:41",
+        "ts_epoch": 1782149741.363168
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": 1782149740.9283297,
+        "price": 0.8093100000000001,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 102563708,
+        "ts": "2026-06-22 13:35:41",
+        "ts_epoch": 1782149741.9723973
+      },
+      {
+        "account": "JU-4-A-MEX952372",
+        "cmd_ts": 1782149743.187668,
+        "price": 0.80938,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 439091526,
+        "ts": "2026-06-22 13:35:43",
+        "ts_epoch": 1782149743.3066328
+      },
+      {
+        "account": "JU-4-B-NOOR9434169",
+        "cmd_ts": 1782149743.2059307,
+        "price": 0.8093100000000001,
+        "quote_price": null,
+        "spread": null,
+        "ticket": 102563709,
+        "ts": "2026-06-22 13:35:43",
+        "ts_epoch": 1782149743.544309
+      }
+    ],
+    "hedge_monitor_start_ts": 1782149704.3096924,
+    "id": "8d61a2e8-01b5-405f-bf92-bed032f73864",
+    "imbalance_rebal_ts": 1782871232.440007,
+    "imported": true,
+    "last_trade_ts": {
+      "JU-4-A-MEX952372": 1782149743.3064861,
+      "JU-4-B-NOOR9434169": 1782149743.5442326
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "USDCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {
+      "JU-4-B-NOOR9434169": 6
+    },
+    "rollback_tickets": {
+      "JU-4-B-NOOR9434169": [
+        102563692,
+        102563511,
+        102563704,
+        102563707,
+        102563708,
+        102563709
+      ]
+    },
+    "side1_max_spread": 8,
+    "side2_max_spread": 8,
+    "sides": {
+      "JU-4-A-MEX952372": {
+        "action": "buy",
+        "comment": "952372-9434169",
+        "lot_size": 1.0,
+        "max_spread": 8,
+        "pair": "USDCHF...",
+        "side_number": 1
+      },
+      "JU-4-B-NOOR9434169": {
+        "action": "sell",
+        "comment": "952372-9434169",
+        "lot_size": 1.0,
+        "max_spread": 8,
+        "pair": "USDCHF+",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "JU-4-A-MEX952372": 0,
+      "JU-4-B-NOOR9434169": 0
+    },
+    "status": "active",
+    "strategy_id": "3f41f863-c738-479b-88d9-de14cdbcdf4f",
+    "total_positions": 10,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-22 13:35:43"
+  },
+  "b39b04de-68c5-485a-a63c-e08b2438c807": {
+    "action": "monitor",
+    "avoid_news": false,
+    "close_count": null,
+    "close_fills": [
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754880.6773458,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448679112,
+        "ts": "2026-06-29 13:41:20",
+        "ts_epoch": 1782754880.8089705
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754882.7361398,
+        "cycle": true,
+        "price": 1.0707,
+        "ticket": 4448679127,
+        "ts": "2026-06-29 13:41:22",
+        "ts_epoch": 1782754882.861106
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754884.6320758,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448679155,
+        "ts": "2026-06-29 13:41:24",
+        "ts_epoch": 1782754884.7754045
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754886.6177344,
+        "cycle": true,
+        "price": 1.0707,
+        "ticket": 4448699250,
+        "ts": "2026-06-29 13:41:26",
+        "ts_epoch": 1782754886.9515357
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754894.7731912,
+        "cycle": true,
+        "price": 1.07069,
+        "ticket": 4448679167,
+        "ts": "2026-06-29 13:41:34",
+        "ts_epoch": 1782754894.9040802
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754904.1756175,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448699656,
+        "ts": "2026-06-29 13:41:44",
+        "ts_epoch": 1782754904.4027505
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754905.1110826,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448699860,
+        "ts": "2026-06-29 13:41:45",
+        "ts_epoch": 1782754905.241039
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754905.8077734,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448679202,
+        "ts": "2026-06-29 13:41:45",
+        "ts_epoch": 1782754905.9442964
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754906.5964942,
+        "cycle": true,
+        "price": 1.07068,
+        "ticket": 4448701273,
+        "ts": "2026-06-29 13:41:46",
+        "ts_epoch": 1782754906.7291203
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754908.2882736,
+        "cycle": true,
+        "price": 1.07065,
+        "ticket": 4448679217,
+        "ts": "2026-06-29 13:41:48",
+        "ts_epoch": 1782754908.4338765
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754910.1025946,
+        "cycle": true,
+        "price": 1.07063,
+        "ticket": 4448699930,
+        "ts": "2026-06-29 13:41:50",
+        "ts_epoch": 1782754910.3894932
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754924.732912,
+        "cycle": true,
+        "price": 1.0706,
+        "ticket": 4448679069,
+        "ts": "2026-06-29 13:42:04",
+        "ts_epoch": 1782754924.8800642
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754933.42097,
+        "cycle": true,
+        "price": 1.07058,
+        "ticket": 4448679078,
+        "ts": "2026-06-29 13:42:13",
+        "ts_epoch": 1782754933.8039389
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754934.4061196,
+        "cycle": true,
+        "price": 1.07058,
+        "ticket": 4448679091,
+        "ts": "2026-06-29 13:42:14",
+        "ts_epoch": 1782754934.537233
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754935.072994,
+        "cycle": true,
+        "price": 1.07058,
+        "ticket": 4448679105,
+        "ts": "2026-06-29 13:42:15",
+        "ts_epoch": 1782754935.1989484
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79293665,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5855844
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79293667,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5858219
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054953,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.585854
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054954,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.586081
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054956,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5861158
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79293645,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5861444
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054958,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5870135
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054961,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5870981
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054964,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.587125
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79293657,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.587181
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054970,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.587235
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054972,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.587281
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054973,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5875044
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79054974,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5875428
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "external": true,
+        "price": null,
+        "ticket": 79293695,
+        "ts": "2026-06-30 21:29:31",
+        "ts_epoch": 1782869371.5875728
+      }
+    ],
+    "closed": {
+      "GO-1-A-SQ651938": 15,
+      "GO-1-B-ICM7991931": 0
+    },
+    "comment": "651938-7991931",
+    "created_at": "2026-06-29 13:39:42",
+    "cycle_account": "GO-1-B-ICM7991931",
+    "cycle_complete_ts": 1782754935.7445202,
+    "cycle_days": 5,
+    "cycle_progress": {
+      "confirmed_closed_tickets": [
+        "4448679112",
+        "4448679127",
+        "4448679155",
+        "4448699250",
+        "4448679167",
+        "4448699656",
+        "4448699860",
+        "4448679202",
+        "4448701273",
+        "4448679217",
+        "4448699930",
+        "4448679069",
+        "4448679078",
+        "4448679091",
+        "4448679105"
+      ],
+      "cycle_close_ts": 1782754935.1988914,
+      "cycle_total": 15,
+      "cycled": 15,
+      "index": 1,
+      "open_dispatched": true,
+      "open_fill_received": true,
+      "phase": "close",
+      "total_spread_cost": 0.0006500000000004835
+    },
+    "diff_to_close": 0,
+    "diff_to_open": null,
+    "errors": {
+      "GO-1-A-SQ651938": [],
+      "GO-1-B-ICM7991931": []
+    },
+    "execution_order": "simultaneous",
+    "filled": {
+      "GO-1-A-SQ651938": 15,
+      "GO-1-B-ICM7991931": 15
+    },
+    "fills": [
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 0,
+        "price": 1.06956,
+        "quote_price": 1.06956,
+        "spread": null,
+        "ticket": 79293695,
+        "ts": "2026-06-24T20:10:00.0000000",
+        "ts_epoch": 1782754782.0801513
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754881.9100497,
+        "price": 1.07063,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704534,
+        "ts": "2026-06-29 13:41:22",
+        "ts_epoch": 1782754882.676396
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 1,
+        "price": 1.0548,
+        "quote_price": 1.0548,
+        "spread": null,
+        "ticket": 79054953,
+        "ts": "2026-05-28T16:51:33.0000000",
+        "ts_epoch": 1782754782.080175
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754883.9265473,
+        "price": 1.07064,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704545,
+        "ts": "2026-06-29 13:41:24",
+        "ts_epoch": 1782754884.4494045
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 2,
+        "price": 1.05468,
+        "quote_price": 1.05468,
+        "spread": null,
+        "ticket": 79054954,
+        "ts": "2026-05-28T16:51:39.0000000",
+        "ts_epoch": 1782754782.080193
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754885.9446027,
+        "price": 1.07063,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704552,
+        "ts": "2026-06-29 13:41:26",
+        "ts_epoch": 1782754886.5212102
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 3,
+        "price": 1.05465,
+        "quote_price": 1.05465,
+        "spread": null,
+        "ticket": 79054956,
+        "ts": "2026-05-28T16:51:43.0000000",
+        "ts_epoch": 1782754782.0802114
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754888.074999,
+        "price": 1.07064,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704558,
+        "ts": "2026-06-29 13:41:28",
+        "ts_epoch": 1782754888.5344167
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 4,
+        "price": 1.05467,
+        "quote_price": 1.05467,
+        "spread": null,
+        "ticket": 79054958,
+        "ts": "2026-05-28T16:51:47.0000000",
+        "ts_epoch": 1782754782.08023
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754896.018025,
+        "price": 1.07063,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704577,
+        "ts": "2026-06-29 13:41:36",
+        "ts_epoch": 1782754896.5768075
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 5,
+        "price": 1.0547,
+        "quote_price": 1.0547,
+        "spread": null,
+        "ticket": 79054961,
+        "ts": "2026-05-28T16:51:51.0000000",
+        "ts_epoch": 1782754782.0802462
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754904.4935644,
+        "price": 1.07065,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704596,
+        "ts": "2026-06-29 13:41:44",
+        "ts_epoch": 1782754904.940974
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 6,
+        "price": 1.05469,
+        "quote_price": 1.05469,
+        "spread": null,
+        "ticket": 79054964,
+        "ts": "2026-05-28T16:51:55.0000000",
+        "ts_epoch": 1782754782.080263
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754905.3721285,
+        "price": 1.07065,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704598,
+        "ts": "2026-06-29 13:41:45",
+        "ts_epoch": 1782754905.71765
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 7,
+        "price": 1.05466,
+        "quote_price": 1.05466,
+        "spread": null,
+        "ticket": 79054970,
+        "ts": "2026-05-28T16:51:59.0000000",
+        "ts_epoch": 1782754782.0802798
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754906.0503988,
+        "price": 1.07065,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704601,
+        "ts": "2026-06-29 13:41:46",
+        "ts_epoch": 1782754906.418133
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 8,
+        "price": 1.05467,
+        "quote_price": 1.05467,
+        "spread": null,
+        "ticket": 79054972,
+        "ts": "2026-05-28T16:52:04.0000000",
+        "ts_epoch": 1782754782.080299
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754907.814152,
+        "price": 1.07065,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704604,
+        "ts": "2026-06-29 13:41:48",
+        "ts_epoch": 1782754908.2155132
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 9,
+        "price": 1.05459,
+        "quote_price": 1.05459,
+        "spread": null,
+        "ticket": 79054973,
+        "ts": "2026-05-28T16:52:08.0000000",
+        "ts_epoch": 1782754782.0803218
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754909.5729833,
+        "price": 1.07059,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704620,
+        "ts": "2026-06-29 13:41:49",
+        "ts_epoch": 1782754909.950062
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 10,
+        "price": 1.05474,
+        "quote_price": 1.05474,
+        "spread": null,
+        "ticket": 79054974,
+        "ts": "2026-05-28T16:52:12.0000000",
+        "ts_epoch": 1782754782.0803392
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754911.4798744,
+        "price": 1.07058,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704632,
+        "ts": "2026-06-29 13:41:51",
+        "ts_epoch": 1782754911.8264174
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 11,
+        "price": 1.06951,
+        "quote_price": 1.06951,
+        "spread": null,
+        "ticket": 79293645,
+        "ts": "2026-06-24T20:07:20.0000000",
+        "ts_epoch": 1782754782.080356
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754926.060179,
+        "price": 1.07054,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704727,
+        "ts": "2026-06-29 13:42:06",
+        "ts_epoch": 1782754926.523757
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 12,
+        "price": 1.0695,
+        "quote_price": 1.0695,
+        "spread": null,
+        "ticket": 79293657,
+        "ts": "2026-06-24T20:08:02.0000000",
+        "ts_epoch": 1782754782.08039
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754933.884036,
+        "price": 1.07055,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704779,
+        "ts": "2026-06-29 13:42:14",
+        "ts_epoch": 1782754934.299226
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 13,
+        "price": 1.06965,
+        "quote_price": 1.06965,
+        "spread": null,
+        "ticket": 79293665,
+        "ts": "2026-06-24T20:08:22.0000000",
+        "ts_epoch": 1782754782.0804074
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754934.6315,
+        "price": 1.07055,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704787,
+        "ts": "2026-06-29 13:42:14",
+        "ts_epoch": 1782754934.9657545
+      },
+      {
+        "account": "GO-1-A-SQ651938",
+        "cmd_ts": null,
+        "imported": true,
+        "pair_index": 14,
+        "price": 1.06962,
+        "quote_price": 1.06962,
+        "spread": null,
+        "ticket": 79293667,
+        "ts": "2026-06-24T20:08:28.0000000",
+        "ts_epoch": 1782754782.0804229
+      },
+      {
+        "account": "GO-1-B-ICM7991931",
+        "cmd_ts": 1782754935.2920346,
+        "price": 1.07056,
+        "quote_price": 0.0,
+        "spread": null,
+        "ticket": 4450704795,
+        "ts": "2026-06-29 13:42:15",
+        "ts_epoch": 1782754935.739867
+      }
+    ],
+    "hedge_monitor_start_ts": 1782754799.3785229,
+    "id": "b39b04de-68c5-485a-a63c-e08b2438c807",
+    "imbalance_rebal_ts": 1782871232.440007,
+    "imported": true,
+    "last_trade_ts": {
+      "GO-1-B-ICM7991931": 1782754935.7423441
+    },
+    "lot_size": 1.0,
+    "match_mode": "ticket",
+    "max_accum_deals": 0,
+    "max_accum_lots": 0.0,
+    "max_errors": 1,
+    "max_price_jump": 0.0,
+    "max_spread_points": 0,
+    "max_ticks_per_5s": 0,
+    "pair": "GBPCHF",
+    "require_diff_skew_close": "",
+    "require_diff_skew_open": "",
+    "rollback_needed": {
+      "GO-1-B-ICM7991931": 15
+    },
+    "rollback_tickets": {
+      "GO-1-B-ICM7991931": [
+        4450704534,
+        4450704545,
+        4450704552,
+        4450704558,
+        4450704577,
+        4450704596,
+        4450704598,
+        4450704601,
+        4450704604,
+        4450704620,
+        4450704632,
+        4450704727,
+        4450704779,
+        4450704787,
+        4450704795
+      ]
+    },
+    "side2_max_spread": 3,
+    "sides": {
+      "GO-1-A-SQ651938": {
+        "action": "buy",
+        "comment": "651938-7991931",
+        "lot_size": 1,
+        "max_spread": 0,
+        "pair": "GBPCHF",
+        "side_number": 1
+      },
+      "GO-1-B-ICM7991931": {
+        "action": "sell",
+        "comment": "651938-7991931",
+        "lot_size": 1,
+        "max_spread": 3,
+        "pair": "GBPCHF",
+        "side_number": 2
+      }
+    },
+    "spread_rejects": {
+      "GO-1-A-SQ651938": 0,
+      "GO-1-B-ICM7991931": 0
+    },
+    "status": "active",
+    "strategy_id": "f15a27c5-bb29-4985-a318-0d5113a2280a",
+    "total_positions": 15,
+    "trade_pause": 0.0,
+    "updated_at": "2026-06-29 13:42:15"
+  }
+}

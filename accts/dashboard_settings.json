@@ -35,7 +35,15 @@
   "telegram": {
     "bot_token": "8774851852:AAErEzzinXp9GJ4H12ICnOltp0LNys5jeeA",
     "chat_id": "6838817529",
-    "enabled": true
+    "enabled": true,
+    "quiet_hours_enabled": false,
+    "quiet_start": "22:00",
+    "quiet_end": "07:00"
+  },
+  "telegram_red_alert": {
+    "bot_token": "",
+    "chat_id": "",
+    "enabled": false
   },
   "theme_colors": {}
 }
