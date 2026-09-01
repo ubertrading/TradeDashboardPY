@@ -1086,8 +1086,101 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
     return results
 
 
+def _is_account_swapfree(account_id):
+    """Return True if account is marked as swapfree, False otherwise."""
+    try:
+        with lock:
+            if account_id in manual_accounts and manual_accounts[account_id].get("swapfree"):
+                return True
+            if account_id in ea_account_info and ea_account_info[account_id].get("swapfree"):
+                return True
+        if fix_manager and account_id in fix_manager.accounts:
+            if fix_manager.accounts[account_id].config.get("swapfree"):
+                return True
+        if mt_direct_manager and account_id in mt_direct_manager.accounts:
+            if mt_direct_manager.accounts[account_id].config.get("swapfree"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _check_missing_swap_alerts():
+    """Check if any non-swapfree accounts received NO daily swap after rollover
+    while other non-swapfree accounts DID receive daily swap.
+    """
+    if dashboard_settings.get("swap_missing_alert_enabled") is False:
+        logger.info("[SWAP-MISSING-ALERT] Missing swap alert disabled in settings")
+        return
+
+    deltas = _compute_swap_deltas_live()
+    if not deltas:
+        logger.info("[SWAP-MISSING-ALERT] No swap deltas computed yet")
+        return
+
+    all_accounts = set()
+    with lock:
+        all_accounts.update(ea_account_info.keys())
+        all_accounts.update(manual_accounts.keys())
+    if fix_manager:
+        all_accounts.update(fix_manager.accounts.keys())
+    if mt_direct_manager:
+        all_accounts.update(mt_direct_manager.accounts.keys())
+
+    non_swapfree_paid = {}
+    non_swapfree_missing = []
+
+    for aid in sorted(all_accounts):
+        if _is_account_swapfree(aid):
+            continue
+
+        delta_val = deltas.get(aid)
+        if delta_val is not None and abs(delta_val) > 0.0001:
+            non_swapfree_paid[aid] = delta_val
+        else:
+            non_swapfree_missing.append(aid)
+
+    logger.info("[SWAP-MISSING-ALERT] Evaluation complete. Paid: %d accounts %s | Missing: %d accounts %s",
+                len(non_swapfree_paid), list(non_swapfree_paid.keys()),
+                len(non_swapfree_missing), non_swapfree_missing)
+
+    if non_swapfree_paid and non_swapfree_missing:
+        paid_str = ", ".join([f"{aid}: ${val:+.2f}" for aid, val in non_swapfree_paid.items()])
+        missing_str = ", ".join(non_swapfree_missing)
+
+        logger.warning("[SWAP-MISSING-ALERT] Missing swap on non-swapfree account(s): %s | Accounts that paid swap: %s",
+                       missing_str, paid_str)
+
+        subject = f"⚠️ Missing Swap Alert: {missing_str}"
+        body = (
+            f"Missing Swap Alert:\n\n"
+            f"The following non-swapfree account(s) received NO daily swap (Δ SWAP is blank/zero) after the 5:00 PM rollover:\n"
+            f"  - {missing_str}\n\n"
+            f"Meanwhile, other non-swapfree account(s) DID receive swap:\n"
+            f"  - {paid_str}\n\n"
+            f"Please verify broker execution and swap settings for the affected account(s)."
+        )
+
+        tg_msg = (
+            f"<b>⚠️ Missing Swap Alert</b>\n\n"
+            f"<b>No Swap Paid:</b> <code>{missing_str}</code>\n"
+            f"<b>Paid Swap:</b> {paid_str}\n\n"
+            f"<i>Non-swapfree account(s) received no swap after 5 PM rollover.</i>"
+        )
+
+        def _send():
+            ok_e, _ = _send_email(subject, body)
+            ok_t, _ = _send_telegram(tg_msg)
+            if ok_e or ok_t:
+                logger.info("[SWAP-MISSING-ALERT] Notifications sent for %s", missing_str)
+
+        threading.Thread(target=_send, daemon=True, name="SwapMissingAlertSend").start()
+        _log_event(None, missing_str, "swap_missing_alert", f"Paid accounts: {paid_str}")
+
+
 def _swap_delta_loop():
-    """Background thread: snapshot swap at 4:58 PM ET daily (pre-rollover)."""
+    """Background thread: snapshot swap at 4:58 PM ET daily (pre-rollover),
+    and check for missing swap on non-swapfree accounts at ~5:05 PM ET."""
     while True:
         try:
             now = datetime.now(NY_TZ)
@@ -1117,6 +1210,17 @@ def _swap_delta_loop():
             logger.info("[SWAP-DELTA] Pre-rollover snapshot taken: %d accounts on %s | values: %s",
                         len(snap), snap_date,
                         {k: v for k, v in list(snap.items())[:5]})  # Log first 5 for diagnostics
+
+            # Wait ~7 minutes until 5:05 PM ET (5 mins post 5 PM rollover) to run missing swap check
+            post_now = datetime.now(NY_TZ)
+            post_target = post_now.replace(hour=17, minute=5, second=0, microsecond=0)
+            if post_target <= post_now:
+                post_target += timedelta(days=1)
+            wait_post = (post_target - post_now).total_seconds()
+            if 0 < wait_post < 900:
+                logger.info("[SWAP-DELTA] Waiting %.0fs until 5:05 PM ET for missing swap check", wait_post)
+                time.sleep(wait_post)
+                _check_missing_swap_alerts()
 
         except Exception as e:
             logger.error("[SWAP-DELTA] Loop error: %s", e, exc_info=True)
@@ -2070,6 +2174,8 @@ _DEFAULT_SETTINGS = {
     "position_change_telegram": True,
     "swap_alert_instruments": "",  # comma-separated instruments to track swaps (e.g. "USDJPY,USDCHF,XAUUSD")
     "swap_alert_enabled": False,  # enable/disable swap change alerts
+    "swap_missing_alert_enabled": True,  # enable/disable missing swap alerts for non-swapfree accounts
+    "swap_negative_alert_enabled": True,  # alert when a non-swapfree account has negative total swap on open positions
     "swap_alert_pct": 10,  # percentage change threshold to trigger swap alert
     "swap_alert_interval_min": 60,  # how often to check swap rates (minutes)
     "theme_colors": {},  # CSS variable overrides for dashboard theme
@@ -3072,6 +3178,209 @@ def _disbalance_alert_loop():
 threading.Thread(target=_disbalance_alert_loop, daemon=True, name="DisbalanceAlert").start()
 
 
+# ─── Missing Swap Alert ──────────────────────────────────────────────────────
+def _is_account_swapfree(account_id):
+    """Return True if account is flagged as Swap Free across any connector configuration."""
+    if not account_id:
+        return False
+    if fix_manager and account_id in fix_manager.accounts:
+        if fix_manager.accounts[account_id].config.get("swapfree"):
+            return True
+    if mt_direct_manager and account_id in mt_direct_manager.accounts:
+        if mt_direct_manager.accounts[account_id].config.get("swapfree"):
+            return True
+    if account_id in manual_accounts:
+        if manual_accounts[account_id].get("swapfree"):
+            return True
+    if account_id in ea_account_info:
+        if ea_account_info[account_id].get("swapfree"):
+            return True
+    return False
+
+def _check_missing_swap_alerts():
+    """Evaluate non-swapfree accounts to verify swap payments are credited post-rollover."""
+    if not dashboard_settings.get("swap_missing_alert_enabled", True):
+        app.logger.info("[SWAP-MISSING-ALERT] Missing swap alerts disabled in settings.")
+        return
+
+    all_accounts = {}
+    with lock:
+        for acct_id, info in ea_account_info.items():
+            all_accounts[acct_id] = dict(info)
+    for acct_id, info in manual_accounts.items():
+        if acct_id not in all_accounts:
+            all_accounts[acct_id] = dict(info)
+
+    flagged_accounts = []
+
+    for acct_id, info in all_accounts.items():
+        # Skip if account is marked swapfree
+        if _is_account_swapfree(acct_id):
+            continue
+
+        pos_val = info.get("position_details") or []
+        pos_dict = info.get("positions") or {}
+        pos_count = info.get("positions", 0)
+        has_positions = bool(pos_val) or bool(pos_dict) or (isinstance(pos_count, (int, float)) and pos_count > 0)
+
+        if not has_positions:
+            continue
+
+        # Check total swap on open positions
+        total_pos_swap = 0.0
+        if isinstance(pos_val, list):
+            for p in pos_val:
+                total_pos_swap += float(p.get("swap", 0.0) or 0.0)
+        elif isinstance(pos_dict, dict):
+            for p in pos_dict.values():
+                total_pos_swap += float(p.get("swap", 0.0) or 0.0)
+
+        # Non-swapfree account with open positions post-rollover showing 0 swap
+        if abs(total_pos_swap) < 0.0001:
+            grp = (manual_accounts.get(acct_id, {}).get("group_label") or
+                   info.get("group_label", ""))
+            count_display = len(pos_val) if isinstance(pos_val, list) else (len(pos_dict) if isinstance(pos_dict, dict) else pos_count)
+            flagged_accounts.append({
+                "account_id": acct_id,
+                "group_label": grp,
+                "pos_count": count_display,
+                "total_swap": total_pos_swap
+            })
+
+    if not flagged_accounts:
+        app.logger.info("[SWAP-MISSING-ALERT] Evaluation completed: All non-swapfree accounts have recorded swap or no open positions.")
+        return
+
+    # Dispatch alerts for flagged accounts
+    for item in flagged_accounts:
+        acct = item["account_id"]
+        grp = item["group_label"]
+        pos_cnt = item["pos_count"]
+
+        subject = f"⚠️ Missing Swap Alert: {acct}"
+        body = (f"Missing Swap Payment Alert for Non-Swapfree Account\n"
+                f"Account: {acct}\n"
+                f"Group: {grp}\n"
+                f"Open Positions: {pos_cnt}\n"
+                f"Recorded Swap: $0.00\n\n"
+                f"This account is NOT marked 'Swap Free', but has open positions post-rollover without recorded swap charges/credits.")
+
+        tg_msg = (f"<b>⚠️ Missing Swap Alert</b>\n"
+                  f"Account: <code>{acct}</code>\n"
+                  f"Group: {grp}\n"
+                  f"Open Positions: <b>{pos_cnt}</b>\n"
+                  f"Recorded Swap: <b>$0.00</b>\n"
+                  f"<i>Account is non-swapfree but zero swap was credited post-rollover.</i>")
+
+        _send_email(subject, body, account_id=acct)
+        _send_telegram(tg_msg, account_id=acct)
+        app.logger.warning("[SWAP-MISSING-ALERT] Alert dispatched for %s (non-swapfree, 0 swap)", acct)
+
+
+# ─── Negative Swap Alert ─────────────────────────────────────────────────────
+_negative_swap_alert_cooldowns = {}  # account_id -> last alert timestamp
+_NEGATIVE_SWAP_ALERT_COOLDOWN_SEC = 3600  # maximum 1 alert per hour per account
+
+def _check_negative_swap_alerts():
+    """Alert when a non-swapfree account has a net negative total swap on open positions.
+
+    Runs periodically (called from _swap_monitor_loop or manually via test endpoint).
+    Swapfree-marked accounts are always excluded.
+    A 1-hour cooldown per account prevents repeated alerts.
+    """
+    if not dashboard_settings.get("swap_negative_alert_enabled", True):
+        app.logger.info("[SWAP-NEG-ALERT] Negative swap alerts disabled in settings.")
+        return
+
+    all_accounts = {}
+    with lock:
+        for acct_id, info in ea_account_info.items():
+            all_accounts[acct_id] = dict(info)
+    for acct_id, info in manual_accounts.items():
+        if acct_id not in all_accounts:
+            all_accounts[acct_id] = dict(info)
+
+    now = time.time()
+
+    for acct_id, info in all_accounts.items():
+        if _is_account_swapfree(acct_id):
+            continue
+
+        pos_val  = info.get("position_details") or []
+        pos_dict = info.get("positions") or {}
+
+        # Tally total swap across all open positions
+        total_swap = 0.0
+        counted = 0
+        if isinstance(pos_val, list) and pos_val:
+            for p in pos_val:
+                total_swap += float(p.get("swap", 0.0) or 0.0)
+                counted += 1
+        elif isinstance(pos_dict, dict) and pos_dict:
+            for p in pos_dict.values():
+                total_swap += float(p.get("swap", 0.0) or 0.0)
+                counted += 1
+
+        if counted == 0:
+            continue  # no open positions
+
+        if total_swap >= 0:
+            continue  # not negative — all good
+
+        # Cooldown gate
+        last_alert = _negative_swap_alert_cooldowns.get(acct_id, 0)
+        if now - last_alert < _NEGATIVE_SWAP_ALERT_COOLDOWN_SEC:
+            continue
+
+        grp = (manual_accounts.get(acct_id, {}).get("group_label") or
+               info.get("group_label", ""))
+
+        subject = f"⚠️ Negative Swap Alert: {acct_id}"
+        body = (f"Negative Swap Alert — Non-Swapfree Account\n"
+                f"Account: {acct_id}\n"
+                f"Group: {grp}\n"
+                f"Open Positions: {counted}\n"
+                f"Total Swap: ${total_swap:,.2f}\n\n"
+                f"This account has a net negative swap on its open positions. "
+                f"Verify that the correct swap rate is applied and review broker statements.")
+
+        tg_msg = (f"<b>⚠️ Negative Swap Alert</b>\n"
+                  f"Account: <code>{acct_id}</code>\n"
+                  f"Group: {grp}\n"
+                  f"Open Positions: <b>{counted}</b>\n"
+                  f"Total Swap: <b>${total_swap:,.2f}</b>\n"
+                  f"<i>Net negative swap detected on a non-swapfree account.</i>")
+
+        _negative_swap_alert_cooldowns[acct_id] = now
+        _send_email(subject, body, account_id=acct_id)
+        _send_telegram(tg_msg, account_id=acct_id)
+        app.logger.warning(
+            "[SWAP-NEG-ALERT] Dispatched for %s — total swap=%.2f over %d positions",
+            acct_id, total_swap, counted
+        )
+
+
+def _missing_swap_alert_loop():
+    """Background thread: run missing swap check daily at 5:05 PM ET (17:05 ET)."""
+    import time as _time
+    _time.sleep(15)  # Uptime delay
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=17, minute=5, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            sleep_sec = (target - now).total_seconds()
+            _time.sleep(sleep_sec)
+            _check_missing_swap_alerts()
+        except Exception as e:
+            app.logger.error("[SWAP-MISSING-LOOP] Error in missing swap loop: %s", e)
+            _time.sleep(60)
+
+threading.Thread(target=_missing_swap_alert_loop, daemon=True, name="MissingSwapAlertLoop").start()
+
+
+
 def _log_event(session_id, account, event, detail=""):
     entry = {
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3167,6 +3476,68 @@ def _get_live_position_count(account, session):
         print(f"[LIVE-POS-CHECK] Query error for {account}: {e}")
 
     return None
+
+# ─── Cycle executed-price helpers ───────────────────────────────────────────
+def _get_executed_close_price(account, ticket, symbol, fallback=None):
+    """Query broker deal history for the actual executed CLOSE price for a ticket.
+    Returns the real fill price, or fallback if not found (e.g. TP/limit target).
+    Works for MT4/MT5 direct accounts."""
+    if mt_direct_manager and ticket is not None:
+        acct_obj = mt_direct_manager.accounts.get(account)
+        if acct_obj and hasattr(acct_obj, 'get_ticket_executed_prices'):
+            try:
+                _, close_p = acct_obj.get_ticket_executed_prices(ticket, symbol=symbol or "")
+                if close_p and float(close_p) > 0:
+                    print(f"[CYCLE-EXEC-PRICE] Close ticket={ticket} acct={account}: executed={close_p:.5f} (was fallback={fallback})")
+                    return float(close_p)
+            except Exception as e:
+                print(f"[CYCLE-EXEC-PRICE] get_ticket_executed_prices error for {account} ticket={ticket}: {e}")
+        elif acct_obj and hasattr(acct_obj, 'get_closed_ticket_price'):
+            # Backwards compat: older method only returns close price
+            try:
+                close_p = acct_obj.get_closed_ticket_price(ticket, symbol=symbol or "")
+                if close_p and float(close_p) > 0:
+                    print(f"[CYCLE-EXEC-PRICE] Close ticket={ticket} acct={account}: executed={close_p:.5f} (compat) (was fallback={fallback})")
+                    return float(close_p)
+            except Exception as e:
+                print(f"[CYCLE-EXEC-PRICE] get_closed_ticket_price error for {account} ticket={ticket}: {e}")
+    if fallback is not None:
+        print(f"[CYCLE-EXEC-PRICE] Close ticket={ticket} acct={account}: using fallback={fallback} (broker not queried or no result)")
+    return fallback
+
+
+def _get_executed_open_price(account, ticket, symbol, fallback=None):
+    """Query broker deal history for the actual executed OPEN price for a newly opened position.
+    Returns the real fill price, or fallback if not found.
+    Works for MT4/MT5 direct accounts; for EA accounts it checks ea_account_info open positions."""
+    if mt_direct_manager and ticket is not None:
+        acct_obj = mt_direct_manager.accounts.get(account)
+        if acct_obj and hasattr(acct_obj, 'get_ticket_executed_prices'):
+            try:
+                open_p, _ = acct_obj.get_ticket_executed_prices(ticket, symbol=symbol or "")
+                if open_p and float(open_p) > 0:
+                    print(f"[CYCLE-EXEC-PRICE] Open ticket={ticket} acct={account}: executed={open_p:.5f} (was fallback={fallback})")
+                    return float(open_p)
+            except Exception as e:
+                print(f"[CYCLE-EXEC-PRICE] get_ticket_executed_prices(open) error for {account} ticket={ticket}: {e}")
+    # EA fallback: look up OpenPrice from ea_account_info open positions
+    if ticket is not None:
+        try:
+            ea_info = ea_account_info.get(account, {})
+            open_positions = ea_info.get("open_positions") or []
+            for pos in open_positions:
+                pos_ticket = _normalize_ticket(pos.get("Ticket") or pos.get("ticket") or 0)
+                if pos_ticket == _normalize_ticket(ticket):
+                    op = pos.get("OpenPrice") or pos.get("open_price")
+                    if op and float(op) > 0:
+                        print(f"[CYCLE-EXEC-PRICE] Open ticket={ticket} acct={account}: ea_info={op:.5f} (was fallback={fallback})")
+                        return float(op)
+        except Exception as e:
+            print(f"[CYCLE-EXEC-PRICE] ea_account_info open pos lookup error for {account} ticket={ticket}: {e}")
+    if fallback is not None:
+        print(f"[CYCLE-EXEC-PRICE] Open ticket={ticket} acct={account}: using fallback={fallback} (no executed price found)")
+    return fallback
+
 
 # ─── Shared cycle state machine helpers ─────────────────────────────────────
 def _cycle_get_account(session, account):
@@ -3438,8 +3809,22 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
             acct_obj = mt_direct_manager.accounts.get(account)
             if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
                 acct_obj._claimed_fill_tickets.clear()
-    reopen_price = float(fill_price) if fill_price is not None else None
+    # ── Use actual broker-executed open price, not limit target ──
+    pair = session.get("pair", "")
+    reopen_price_raw = float(fill_price) if fill_price is not None else None
+    reopen_price = _get_executed_open_price(account, ticket, pair, fallback=reopen_price_raw)
+    # ── Use actual broker-executed close price for the matched closed ticket ──
     cycle_close_price = progress.get("last_close_price")
+    # Try to reconcile the close price from broker history for the closed ticket in this batch
+    matched_closed_ticket = new_fill.get("_matched_closed")
+    if matched_closed_ticket is not None:
+        reconciled_close = _get_executed_close_price(
+            account, matched_closed_ticket, pair,
+            fallback=cycle_close_price
+        )
+        if reconciled_close is not None:
+            cycle_close_price = reconciled_close
+            progress["last_close_price"] = reconciled_close
     if reopen_price is not None and cycle_close_price is not None:
         progress["sum_close_price"] = progress.get("sum_close_price", 0.0) + cycle_close_price
         progress["sum_reopen_price"] = progress.get("sum_reopen_price", 0.0) + reopen_price
@@ -4399,10 +4784,17 @@ def _trail_limit_orders(sid, session):
                     if ticket_in_open and not ticket_still_pending:
                         # Limit filled — heal the missed fill callback
                         print(f"[CYCLE-LIMIT] Missed-fill heal: ticket {t} is now open on {cycle_account}. Calling _cycle_handle_fill.")
+                        # Use actual executed open price from broker rather than limit target
+                        heal_pair = session.get("pair", "")
+                        limit_target_price = ol_fill.get("price")
+                        executed_open = _get_executed_open_price(
+                            cycle_account, ol_fill.get("ticket"), heal_pair,
+                            fallback=limit_target_price
+                        )
                         heal_data = {
                             "ticket": ol_fill.get("ticket"),
-                            "fill_price": ol_fill.get("price"),
-                            "quote_price": ol_fill.get("price"),
+                            "fill_price": executed_open,
+                            "quote_price": executed_open,
                             "spread": 0,
                         }
                         _cycle_handle_fill(session, cycle_account, heal_data, ol_fill.get("ts_epoch", time.time()), sid)
@@ -6633,7 +7025,6 @@ def _should_issue_command(session, account):
                                 progress["closed_tickets_this_reopen"] = newly_closed
                                 progress["phase"] = "open"
                                 progress["cycle_close_ts"] = time.time()
-                                progress["last_close_price"] = progress.get("close_tp_price")
                                 progress.pop("open_dispatched", None)
                                 progress.pop("open_fill_received", None)
 
@@ -6641,16 +7032,29 @@ def _should_issue_command(session, account):
                                 if len(progress["reopened_tickets_in_batch"]) >= len(target_tickets):
                                     print(f"[CYCLE-LM] All {len(target_tickets)} tickets in batch fully cycled on {account}.")
 
-                                # Record newly closed tickets as close fills so idx advances
+                                # Record newly closed tickets as close fills with actual executed prices
+                                lm_pair = session.get("pair", "")
+                                close_prices_this_batch = []
                                 for target_ticket in newly_closed:
+                                    exec_close = _get_executed_close_price(
+                                        account, target_ticket, lm_pair,
+                                        fallback=progress.get("close_tp_price")
+                                    )
+                                    close_prices_this_batch.append(exec_close)
                                     session.setdefault("close_fills", []).append({
                                         "account": account,
                                         "ticket": target_ticket,
-                                        "price": progress.get("close_tp_price"),
+                                        "price": exec_close,
                                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "ts_epoch": time.time(),
                                         "external": True,
                                     })
+                                # Set last_close_price to average of actual executed close prices
+                                valid_closes = [p for p in close_prices_this_batch if p is not None]
+                                if valid_closes:
+                                    progress["last_close_price"] = sum(valid_closes) / len(valid_closes)
+                                else:
+                                    progress["last_close_price"] = progress.get("close_tp_price")
                                 if mt_direct_manager:
                                     acct_obj = mt_direct_manager.accounts.get(account)
                                     if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
@@ -7152,10 +7556,9 @@ def _should_issue_command(session, account):
 
                             if not tickets_still_open and target_tickets:
                                 # ALL TPs were hit! Transition close → open
-                                print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase\u2192open.")
+                                print(f"[CYCLE-LIMIT] TP HIT detected via watchdog: ALL {len(target_tickets)} tickets no longer open on {account}. Advancing phase→open.")
                                 progress["phase"] = "open"
                                 progress["cycle_close_ts"] = time.time()
-                                progress["last_close_price"] = progress.get("close_tp_price")
                                 progress.pop("close_tp_set", None)
                                 progress.pop("close_tp_set_ts", None)
                                 progress.pop("close_tp_confirmed", None)
@@ -7173,18 +7576,31 @@ def _should_issue_command(session, account):
                                     acct_obj = mt_direct_manager.accounts.get(account)
                                     if acct_obj and hasattr(acct_obj, '_claimed_fill_tickets'):
                                         acct_obj._claimed_fill_tickets.clear()
-                                # Record these as close fills so idx advances on next cycle
+                                # Record these as close fills with actual executed prices
+                                cl_pair = session.get("pair", "")
+                                close_prices_batch = []
                                 for target_ticket in target_tickets:
+                                    exec_close = _get_executed_close_price(
+                                        account, target_ticket, cl_pair,
+                                        fallback=progress.get("close_tp_price")
+                                    )
+                                    close_prices_batch.append(exec_close)
                                     session.setdefault("close_fills", []).append({
                                         "account": account,
                                         "ticket": target_ticket,
-                                        "price": progress.get("close_tp_price"),
+                                        "price": exec_close,
                                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "ts_epoch": time.time(),
                                         "external": False,
                                         "cycle": True,
                                         "verified": True,
                                     })
+                                # Set last_close_price to average of actual executed close prices
+                                valid_closes = [p for p in close_prices_batch if p is not None]
+                                if valid_closes:
+                                    progress["last_close_price"] = sum(valid_closes) / len(valid_closes)
+                                else:
+                                    progress["last_close_price"] = progress.get("close_tp_price")
                                 session["cycle_progress"] = progress
                                 _save_sessions()
                                 # Phase is now "open" — update local variable and fall through to open-phase dispatch
@@ -9370,6 +9786,7 @@ def api_status():
                 "ask": info.get("ask"),
                 "spread": info.get("spread"),
                 "symbol": info.get("symbol", ""),
+                "swapfree": _is_account_swapfree(acc),
                 "stats_log": acc in dashboard_settings.get("stats_log_accounts", []),
             }
 
@@ -9500,6 +9917,7 @@ def api_status():
                 return
             try:
                 for acct_id, entry in accts.items():
+                    entry["swapfree"] = _is_account_swapfree(acct_id)
                     acct = manager.accounts.get(acct_id)
                     if not acct or not hasattr(acct, 'config'):
                         continue
@@ -9837,6 +10255,7 @@ def add_account():
                 "group_label": group_label,
                 "balance": data.get("balance"),
                 "equity": data.get("equity"),
+                "swapfree": bool(data.get("swapfree", False)),
             }
         _log_event(None, name, "account_added", f"type={conn_type}")
         _save_strategies()
@@ -9857,6 +10276,8 @@ def update_account(account_name):
                 manual_accounts[account_name] = acct
             if "group_label" in data:
                 acct["group_label"] = str(data["group_label"]).strip()
+            if "swapfree" in data:
+                acct["swapfree"] = bool(data["swapfree"])
             if "stop_out_level" in data:
                 try:
                     acct["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
@@ -9916,6 +10337,9 @@ def update_account(account_name):
                 if "group_label" in data:
                     fix_acct.config["group_label"] = str(data["group_label"]).strip()
                     changed = True
+                if "swapfree" in data:
+                    fix_acct.config["swapfree"] = bool(data["swapfree"])
+                    changed = True
                 if "stop_out_level" in data:
                     try:
                         fix_acct.config["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
@@ -9927,6 +10351,34 @@ def update_account(account_name):
                     changed = True
                 if "alert_telegram" in data:
                     fix_acct.config["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
+                    changed = True
+                if "auto_connect_start" in data:
+                    fix_acct.config["auto_connect_start"] = bool(data["auto_connect_start"])
+                    changed = True
+                if changed:
+                    fix_manager.save_config()
+
+            # Sync to MT Direct accounts config if it exists
+            if mt_direct_manager and account_name in mt_direct_manager.accounts:
+                mt_acct = mt_direct_manager.accounts[account_name]
+                changed = False
+                if "group_label" in data:
+                    mt_acct.config["group_label"] = str(data["group_label"]).strip()
+                    changed = True
+                if "swapfree" in data:
+                    mt_acct.config["swapfree"] = bool(data["swapfree"])
+                    changed = True
+                if "stop_out_level" in data:
+                    try:
+                        mt_acct.config["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
+                        changed = True
+                    except (ValueError, TypeError):
+                        pass
+                if "alert_email" in data:
+                    mt_acct.config["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
+                    changed = True
+                if "alert_telegram" in data:
+                    mt_acct.config["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
                     changed = True
                 if "auto_connect_start" in data:
                     fix_acct.config["auto_connect_start"] = bool(data["auto_connect_start"])
@@ -10256,7 +10708,7 @@ def update_fix_account(account_id):
                      'auto_connect_start', 'cycle_reminder_enabled',
                      'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
                      'day_schedule', 'day_schedule_template',
-                     'group_label', 'margin_alert_threshold', 'alert_email', 'alert_telegram', 'notes']:
+                     'group_label', 'swapfree', 'margin_alert_threshold', 'alert_email', 'alert_telegram', 'notes']:
             if key in data:
                 if key == "day_schedule":
                     acct.config[key] = _normalize_day_schedule(data[key])
@@ -10333,6 +10785,7 @@ def add_mt_direct_account():
             "slippage": int(data.get("slippage", 3)),
             "magic_number": int(data.get("magic_number", 777888)),
             "auto_connect_start": auto_connect,
+            "swapfree": bool(data.get("swapfree", False)),
             "cycle_reminder_enabled": data.get("cycle_reminder_enabled", False),
             "cycle_reminder_days": data.get("cycle_reminder_days"),
             "cycle_max_days": data.get("cycle_max_days"),
@@ -10413,7 +10866,7 @@ def update_mt_direct_account(account_id):
         for key in ['login', 'server', 'port', 'label', 'slippage', 'magic_number', 'type', 'stop_out_level',
                      'auto_connect_start', 'cycle_reminder_enabled', 'cycle_reminder_days',
                      'cycle_max_days', 'auto_cycle_enabled', 'day_schedule', 'day_schedule_template',
-                     'alert_email', 'alert_telegram', 'notes']:
+                     'alert_email', 'alert_telegram', 'swapfree', 'notes']:
             if key in data:
                 if key == "day_schedule":
                     acct.config[key] = _normalize_day_schedule(data[key])
@@ -11933,6 +12386,10 @@ def api_update_settings():
             dashboard_settings["swap_alert_instruments"] = str(data["swap_alert_instruments"]).strip()
         if "swap_alert_enabled" in data:
             dashboard_settings["swap_alert_enabled"] = bool(data["swap_alert_enabled"])
+        if "swap_missing_alert_enabled" in data:
+            dashboard_settings["swap_missing_alert_enabled"] = bool(data["swap_missing_alert_enabled"])
+        if "swap_negative_alert_enabled" in data:
+            dashboard_settings["swap_negative_alert_enabled"] = bool(data["swap_negative_alert_enabled"])
         if "swap_alert_pct" in data:
             try:
                 dashboard_settings["swap_alert_pct"] = max(0, float(data["swap_alert_pct"]))
@@ -12076,6 +12533,22 @@ def test_telegram_red_alert():
     """Send a test Red Alert Telegram message."""
     ok, err = _send_telegram("🚨 <b>Trade Dashboard — RED ALERT TEST</b>\nThis is a test notification from your Red Alert Bot.", red_alert=True)
     return jsonify({"ok": ok, "error": err})
+
+
+@app.route('/api/settings/test_missing_swap_check', methods=['POST'])
+def test_missing_swap_check():
+    """Trigger missing swap alert evaluation manually."""
+    threading.Thread(target=_check_missing_swap_alerts, daemon=True, name="ManualMissingSwapCheck").start()
+    return jsonify({"ok": True, "message": "Missing swap evaluation triggered"})
+
+
+@app.route('/api/settings/test_negative_swap_check', methods=['POST'])
+def test_negative_swap_check():
+    """Trigger negative swap alert evaluation manually (bypasses cooldown)."""
+    global _negative_swap_alert_cooldowns
+    _negative_swap_alert_cooldowns = {}  # clear cooldowns so test always fires
+    threading.Thread(target=_check_negative_swap_alerts, daemon=True, name="ManualNegativeSwapCheck").start()
+    return jsonify({"ok": True, "message": "Negative swap evaluation triggered"})
 
 
 # ─── Dashboard UI ───────────────────────────────────────────────────────────
@@ -12695,7 +13168,9 @@ body {
             <th data-acol="0" style="padding:2px 4px;"><input type="text" id="accountNameFilterInput" placeholder="NAME" value="" oninput="window._accountNameFilter = this.value; if (window._lastRenderAccountsArgs) renderAccounts.apply(null, window._lastRenderAccountsArgs);" onkeydown="if(event.key==='Escape'){this.value='';window._accountNameFilter='';if(window._lastRenderAccountsArgs)renderAccounts.apply(null,window._lastRenderAccountsArgs);}" title="Type to filter accounts by name (Esc to clear)"></th>
             <th data-acol="1">Group</th>
             <th data-acol="2">Connection</th>
+            <th data-acol="26" title="Effective Leverage: how much dollar loss will I take if the market moves 1% against me?">NOP/Eqty</th>
             <th data-acol="3" title="Net Open Positions (Notional) / Free Margin Cash">NOP/FM</th>
+            <th data-acol="16" title="Gives proximity of margin call">Margin Level</th>
             <th data-acol="4" title="Pips of runway before margin call. Based on equity, margin used, stop-out level, and total lots open.">Pips to MC</th>
             <th data-acol="5" title="Oldest position age (rollover days)">Age</th>
             <th data-acol="6">Balance</th>
@@ -12708,19 +13183,20 @@ body {
             <th data-acol="13">Pos.</th>
             <th data-acol="14">Lots</th>
             <th data-acol="15">Margin Use</th>
-            <th data-acol="16" title="Margin alert threshold (%)">Marg.Alrt%</th>
-            <th data-acol="17">Swap</th>
-            <th data-acol="18" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
-            <th data-acol="19">Last Poll</th>
-            <th data-acol="20" title="Auto connect account at start">Auto Conn</th>
-            <th data-acol="21" title="Alert Email(s) Override">Email Alert</th>
-            <th data-acol="22" title="Alert Telegram ID(s) Override">Telegram Alert</th>
-            <th data-acol="23" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
-            <th data-acol="24"></th>
+
+            <th data-acol="17" title="Margin alert threshold (%)">Marg.Alrt%</th>
+            <th data-acol="18">Swap</th>
+            <th data-acol="19" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
+            <th data-acol="20">Last Poll</th>
+            <th data-acol="21" title="Auto connect account at start">Auto Conn</th>
+            <th data-acol="22" title="Alert Email(s) Override">Email Alert</th>
+            <th data-acol="23" title="Alert Telegram ID(s) Override">Telegram Alert</th>
+            <th data-acol="24" title="Log market stats (spread, ticks, bid/ask) to CSV">📊</th>
+            <th data-acol="25"></th>
           </tr>
         </thead>
         <tbody id="accountsBody">
-          <tr><td colspan="24" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
+          <tr><td colspan="26" style="text-align:center;color:var(--text2);padding:30px;">No accounts yet</td></tr>
         </tbody>
       </table>
     </div>
@@ -13152,6 +13628,26 @@ body {
         <input type="number" id="setSwapAlertInterval" value="60" min="1" max="1440" step="1" style="width:70px;text-align:center;" onchange="saveSwapAlertSetting('swap_alert_interval_min', parseFloat(this.value) || 60)">
         <span style="font-size:0.8rem;color:var(--text2);">minutes</span>
       </div>
+      <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:10px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;cursor:pointer;margin-bottom:6px;">
+          <input type="checkbox" id="setSwapMissingAlertEnabled" onchange="saveSwapAlertSetting('swap_missing_alert_enabled', this.checked)">
+          <span>Enable missing swap alerts for non-swapfree accounts (5:05 PM ET)</span>
+        </label>
+        <p style="font-size:0.78rem;color:var(--text2);margin:0 0 8px 24px;">Alerts if a non-swapfree account received no swap payment after rollover while other non-swapfree accounts did.</p>
+        <div style="margin-left:24px;">
+          <button class="btn btn-sm btn-secondary" onclick="testMissingSwapAlert()" style="font-size:0.75rem;padding:3px 10px;">🧪 Test Missing Swap Alert</button>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:10px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;cursor:pointer;margin-bottom:6px;">
+          <input type="checkbox" id="setSwapNegativeAlertEnabled" onchange="saveSwapAlertSetting('swap_negative_alert_enabled', this.checked)">
+          <span>Enable negative swap alerts for non-swapfree accounts</span>
+        </label>
+        <p style="font-size:0.78rem;color:var(--text2);margin:0 0 8px 24px;">Alerts when a non-swapfree account has a net negative total swap on its open positions (1-hour cooldown per account).</p>
+        <div style="margin-left:24px;">
+          <button class="btn btn-sm btn-secondary" onclick="testNegativeSwapAlert()" style="font-size:0.75rem;padding:3px 10px;">🧪 Test Negative Swap Alert</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -13509,6 +14005,9 @@ body {
     <div style="margin-top:8px; display: none;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="fxAutoConnect" checked> Auto Connect at Start</label>
     </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="fxSwapFree"> Swap Free</label>
+    </div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="fxCycleReminder"> Cycle Reminder</label>
       <label style="font-size:0.78rem;color:var(--text2);">Remind <input type="number" id="fxCycleRemindDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
@@ -13622,6 +14121,9 @@ body {
     <div style="margin-top:8px; display: none;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="mtdAutoConnect" checked> Auto Connect at Start</label>
     </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="mtdSwapFree"> Swap Free</label>
+    </div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="mtdCycleReminder"> Cycle Reminder</label>
       <label style="font-size:0.78rem;color:var(--text2);">Remind <input type="number" id="mtdCycleRemindDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
@@ -13716,6 +14218,12 @@ body {
       <div class="form-group">
         <label>Stop Out Level (%)</label>
         <input type="number" id="eeaStopOutLevel" step="0.1" min="0" max="100" placeholder="e.g. 50">
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;margin-top:18px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;">
+          <input type="checkbox" id="eeaSwapFree">
+          <span>Swap Free</span>
+        </label>
       </div>
       <div class="form-group" style="grid-column: 1 / -1; margin-top: 8px; display: none;">
         <label>Alert Email(s) Override <span style="font-size:0.7rem;color:var(--text2)">(comma-separated; optional)</span></label>
@@ -13826,6 +14334,9 @@ body {
     </div>
     <div style="margin-top:8px; display: none;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="emtdAutoConnect"> Auto Connect at Start</label>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="emtdSwapFree"> Swap Free</label>
     </div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="emtdCycleReminder"> Cycle Reminder</label>
@@ -14027,6 +14538,9 @@ body {
     </details>
     <div style="margin-top:8px; display: none;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="efxAutoConnect" checked> Auto Connect at Start</label>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="efxSwapFree"> Swap Free</label>
     </div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="efxCycleReminder"> Cycle Reminder</label>
@@ -14748,14 +15262,15 @@ function toggleGroupView(enabled) {
 let hiddenAcctCols = JSON.parse(localStorage.getItem('acctHiddenCols') || '["21", "22"]');
 const ACCT_COLUMNS = [
   {idx:'-1', name:'Hide'}, {idx:'0', name:'Name'}, {idx:'1', name:'Group'}, {idx:'2', name:'Connection'},
-  {idx:'3', name:'NOP/FM'}, {idx:'4', name:'Pips to MC'}, {idx:'5', name:'Age'},
+  {idx:'26', name:'NOP/Eqty'}, {idx:'3', name:'NOP/FM'}, {idx:'16', name:'Margin Level'},
+  {idx:'4', name:'Pips to MC'}, {idx:'5', name:'Age'},
   {idx:'6', name:'Balance'}, {idx:'7', name:'Equity'},
   {idx:'8', name:'Opt Eq'}, {idx:'9', name:'Shift'}, {idx:'10', name:'TGT Lots'},
   {idx:'11', name:'PnL'}, {idx:'12', name:'Leverage'}, {idx:'13', name:'Pos.'}, {idx:'14', name:'Lots'},
-  {idx:'15', name:'Margin Use'}, {idx:'16', name:'Marg.Alrt%'},
-  {idx:'17', name:'Swap'}, {idx:'18', name:'Δ Swap'}, {idx:'19', name:'Last Poll'},
-  {idx:'20', name:'Auto Conn'}, {idx:'21', name:'Email Alert'}, {idx:'22', name:'Telegram Alert'},
-  {idx:'23', name:'Stats'}, {idx:'24', name:'Actions'},
+  {idx:'15', name:'Margin Use'}, {idx:'17', name:'Marg.Alrt%'},
+  {idx:'18', name:'Swap'}, {idx:'19', name:'Δ Swap'}, {idx:'20', name:'Last Poll'},
+  {idx:'21', name:'Auto Conn'}, {idx:'22', name:'Email Alert'}, {idx:'23', name:'Telegram Alert'},
+  {idx:'24', name:'Stats'}, {idx:'25', name:'Actions'},
 ];
 function initAcctColToggleMenu() {
   const menu = document.getElementById('acctColToggleMenu');
@@ -17976,6 +18491,12 @@ async function loadSettings() {
     // Swap change alert
     document.getElementById('setSwapAlertInstruments').value = s.swap_alert_instruments || '';
     document.getElementById('setSwapAlertEnabled').checked = !!s.swap_alert_enabled;
+    if (document.getElementById('setSwapMissingAlertEnabled')) {
+        document.getElementById('setSwapMissingAlertEnabled').checked = s.swap_missing_alert_enabled !== false;
+    }
+    if (document.getElementById('setSwapNegativeAlertEnabled')) {
+        document.getElementById('setSwapNegativeAlertEnabled').checked = s.swap_negative_alert_enabled !== false;
+    }
     document.getElementById('setSwapAlertPct').value = s.swap_alert_pct != null ? s.swap_alert_pct : 10;
     document.getElementById('setSwapAlertInterval').value = s.swap_alert_interval_min != null ? s.swap_alert_interval_min : 60;
     // Theme colors
@@ -18236,6 +18757,29 @@ async function saveSwapAlertSetting(key, value) {
       body: JSON.stringify(payload)
     });
   } catch(e) { console.error('Failed to save swap alert setting:', e); }
+}
+
+async function testMissingSwapAlert() {
+  try {
+    const res = await fetch('/api/settings/test_missing_swap_check', {method: 'POST'});
+    const data = await res.json();
+    alert(data.message || 'Missing swap check triggered');
+  } catch(e) {
+    alert('Failed to trigger missing swap test: ' + e);
+  }
+}
+
+async function testNegativeSwapAlert() {
+  try {
+    const btn = event && event.target;
+    if (btn) { btn.textContent = 'Running...'; btn.disabled = true; }
+    const res = await fetch('/api/settings/test_negative_swap_check', {method: 'POST'});
+    const data = await res.json();
+    if (btn) { btn.textContent = '🧪 Test Negative Swap Alert'; btn.disabled = false; }
+    alert(data.message || 'Negative swap check triggered');
+  } catch(e) {
+    alert('Failed to trigger negative swap test: ' + e);
+  }
 }
 
 // ── Rollback confirmation polling & popup ────────────────────────────────────
@@ -18608,7 +19152,30 @@ function _nopFmCell(ratioStr) {
   </td>`;
 }
 
+// Styled NOP/Eqty cell (Notional / Equity)
+function _nopEqCell(ratioStr) {
+  if (ratioStr === '-' || ratioStr == null) return '<td style="font-weight:600;color:var(--text2);text-align:center;">-</td>';
+  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);"><span style="color:#ef4444;font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="No equity!">MAX</span></td>';
+
+  const val = parseFloat(ratioStr);
+  if (isNaN(val)) return `<td style="font-weight:600;color:var(--text2);text-align:center;">${ratioStr}</td>`;
+
+  let barColor, textColor = '#fff', weight = '600';
+  if      (val < 100) { barColor = '#3b82f6'; } // blue (0-100)
+  else if (val < 150) { barColor = '#22c55e'; } // green (100-150)
+  else if (val < 200) { barColor = '#eab308'; textColor = '#1a1a1a'; } // yellow (150-200)
+  else if (val < 250) { barColor = '#f97316'; textColor = '#1a1a1a'; } // orange (200-250)
+  else                { barColor = '#ef4444'; textColor = '#1a1a1a'; weight = '700'; } // red (>250)
+
+  return `<td style="padding:0;" title="Effective Leverage: how much dollar loss will I take if the market moves 1% against me?">
+    <div style="background:${barColor};color:${textColor};border-radius:3px;margin:2px 4px;padding:2px 4px;text-align:center;font-weight:${weight};font-size:0.75rem;white-space:nowrap;">
+      ${val.toFixed(0)}x
+    </div>
+  </td>`;
+}
+
 function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta) {
+
   window._hideHiddenAccounts = document.getElementById('hideHiddenAccountsToggle') ? document.getElementById('hideHiddenAccountsToggle').checked : true;
   const filterInputEl = document.getElementById('accountNameFilterInput');
   const nameFilter = (filterInputEl ? filterInputEl.value : (window._accountNameFilter || '')).trim().toLowerCase();
@@ -18745,8 +19312,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const lev = info.leverage ? ('1:' + info.leverage) : '-';
       const rawMargin1 = info.margin != null ? info.margin : (eaInfo && eaInfo.margin != null ? eaInfo.margin : null);
       const mu1 = (rawEq > 0 && rawMargin1 != null) ? ((rawMargin1 / rawEq) * 100).toFixed(1) + '%' : '-';
+      const ml1 = (rawMargin1 > 0 && rawEq != null) ? ((rawEq / rawMargin1) * 100).toFixed(1) + '%' : '-';
       const fm1 = rawMargin1 != null ? (rawEq - rawMargin1) : 0;
       const notional1 = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normNopEq1 = notional1 > 0 ? (rawEq > 0 ? (notional1 / rawEq).toFixed(0) + 'x' : 'MAX') : '-';
       const normMu1 = notional1 > 0 ? (fm1 > 0 ? (notional1 / fm1).toFixed(0) + 'x' : 'MAX') : '-';
       const pnl1 = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
       const pnl1Style = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -18765,7 +19334,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><a href="#" onclick="editFixAccount('${id}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${id}</a></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveFixGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopEqCell(normNopEq1)}
         ${_nopFmCell(normMu1)}
+        <td title="Gives proximity of margin call">${ml1}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, id)}
         <td>${bal}</td>
@@ -18821,8 +19392,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const rawMarginMt = info.margin != null ? info.margin : (eaInfo && eaInfo.margin != null ? eaInfo.margin : null);
       const muMtVal = (rawEq > 0 && rawMarginMt != null) ? (rawMarginMt / rawEq) : null;
       const muMt = muMtVal != null ? (muMtVal * 100).toFixed(1) + '%' : '-';
+      const mlMt = (rawMarginMt > 0 && rawEq > 0) ? ((rawEq / rawMarginMt) * 100).toFixed(1) + '%' : '-';
       const fmMt = rawMarginMt != null ? (rawEq - rawMarginMt) : 0;
       const notionalMt = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normNopEqMt = notionalMt > 0 ? (rawEq > 0 ? (notionalMt / rawEq).toFixed(0) + 'x' : 'MAX') : '-';
       const normMuMt = notionalMt > 0 ? (fmMt > 0 ? (notionalMt / fmMt).toFixed(0) + 'x' : 'MAX') : '-';
       const pnlMt = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
       const pnlMtStyle = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -18841,7 +19414,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><a href="#" onclick="editMTDirect('${id}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${displayName}</a></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopEqCell(normNopEqMt)}
         ${_nopFmCell(normMuMt)}
+        <td title="Gives proximity of margin call">${mlMt}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, id)}
         <td>${bal}</td>
@@ -18905,9 +19480,11 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const rawEqM = eaInfo && eaInfo.equity != null ? parseFloat(eaInfo.equity) : (info.equity != null ? parseFloat(info.equity) : 0);
       const muMVal = (rawEqM > 0 && rawMarginM != null) ? (rawMarginM / rawEqM) : null;
       const muM = muMVal != null ? (muMVal * 100).toFixed(1) + '%' : '-';
+      const mlM = (rawMarginM > 0 && rawEqM > 0) ? ((rawEqM / rawMarginM) * 100).toFixed(1) + '%' : '-';
       const aLevM = eaInfo && eaInfo.leverage ? eaInfo.leverage : (info.leverage ? info.leverage : null);
       const fmM = rawMarginM != null ? (rawEqM - rawMarginM) : 0;
       const notionalM = (eaInfo && eaInfo.total_lots != null) ? Math.abs(parseFloat(eaInfo.total_lots)) * 100000 : (info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0);
+      const normNopEqM = notionalM > 0 ? (rawEqM > 0 ? (notionalM / rawEqM).toFixed(0) + 'x' : 'MAX') : '-';
       const normMuM = notionalM > 0 ? (fmM > 0 ? (notionalM / fmM).toFixed(0) + 'x' : 'MAX') : '-';
       const distM = fundDists[name] || {};
       const optEqM = distM.optimal_equity != null ? distM.optimal_equity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
@@ -18919,7 +19496,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><strong>${name}</strong></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${name}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopEqCell(normNopEqM)}
         ${_nopFmCell(normMuM)}
+        <td title="Gives proximity of margin call">${mlM}</td>
         ${_pipsToMcCell(eaInfo || info)}
         ${_ageCell(null, name)}
         <td>${bal}</td>
@@ -18965,9 +19544,11 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       const rawEqE = info.equity != null ? parseFloat(info.equity) : 0;
       const muEVal = (rawEqE > 0 && rawMarginE != null) ? (rawMarginE / rawEqE) : null;
       const muE = muEVal != null ? (muEVal * 100).toFixed(1) + '%' : '-';
+      const mlE = (rawMarginE > 0 && rawEqE > 0) ? ((rawEqE / rawMarginE) * 100).toFixed(1) + '%' : '-';
       const aLevE = info.leverage ? info.leverage : null;
       const fmE = rawMarginE != null ? (rawEqE - rawMarginE) : 0;
       const notionalE = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normNopEqE = notionalE > 0 ? (rawEqE > 0 ? (notionalE / rawEqE).toFixed(0) + 'x' : 'MAX') : '-';
       const normMuE = notionalE > 0 ? (fmE > 0 ? (notionalE / fmE).toFixed(0) + 'x' : 'MAX') : '-';
 
       const distE = fundDists[acc] || {};
@@ -18980,7 +19561,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><a href="#" onclick="editEAAccount('${acc}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${acc}</a></td>
         <td><input class="inl" style="width:80px;" value="${mConfig.group_label || ''}" onchange="saveGroupLabel('${acc}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td>${connDot}</td>
+        ${_nopEqCell(normNopEqE)}
         ${_nopFmCell(normMuE)}
+        <td title="Gives proximity of margin call">${mlE}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, acc)}
         <td>${bal}</td>
@@ -19015,6 +19598,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     let totOptEq = 0, totShift = 0;
     let totMargin = 0;
     let maxNormMu = null; // Track worst NOP/FM
+    let maxNormNopEq = null; // Track worst NOP/Eqty
     let hasBal = false, hasEq = false, hasPnl = false, hasLots = false, hasSwap = false;
     let hasOptEq = false, hasShift = false;
     const _seen = new Set();
@@ -19044,6 +19628,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         const aEq = !isNaN(re) ? re : 0;
         const aFm = aEq - rMargin;
         if (aNotional > 0) {
+          if (aEq <= 0) {
+            maxNormNopEq = 'MAX';
+          } else if (maxNormNopEq !== 'MAX') {
+            const eqRatio = aNotional / aEq;
+            if (maxNormNopEq === null || eqRatio > maxNormNopEq) maxNormNopEq = eqRatio;
+          }
           if (aFm <= 0) {
             maxNormMu = 'MAX';
           } else if (maxNormMu !== 'MAX') {
@@ -19076,7 +19666,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const shiftStyle = hasShift ? (totShift >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
     
     const totFm = totEq - totMargin;
+    const fmtMarginLevel = (totMargin > 0 && totEq > 0) ? ((totEq / totMargin) * 100).toFixed(1) + '%' : '-';
     const fmtNormMu = maxNormMu === 'MAX' ? 'MAX' : (maxNormMu !== null ? maxNormMu.toFixed(0) + 'x' : '-');
+    const fmtNormNopEq = maxNormNopEq === 'MAX' ? 'MAX' : (maxNormNopEq !== null ? maxNormNopEq.toFixed(0) + 'x' : '-');
 
     // Sum swap deltas
     let totSwapDelta = 0; let hasSwapDelta = false;
@@ -19099,7 +19691,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       <td></td>
       <td>TOTALS</td>
       <td></td><td></td>
+      ${_nopEqCell(fmtNormNopEq)}
       ${_nopFmCell(fmtNormMu)}
+      <td title="Gives proximity of margin call">${fmtMarginLevel}</td>
       <td></td><td></td>
       <td>${fmtBal}</td>
       <td>${fmtEq}</td>
@@ -19178,6 +19772,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   let gMaxMu = null;
   let gNotional = 0;
   let gMaxNormMu = null; // Track global highest NOP/FM
+  let gMaxNormNopEq = null; // Track global highest NOP/Eqty
   let gMargin = 0;
   let gMinPtmc = null;   // lowest pips-to-MC across all groups (worst risk)
   let gOptEq = 0, gShift = 0;
@@ -19194,6 +19789,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let maxMuLev = null;  // leverage of the account with highest margin use
     let sumNotional = 0;
     let maxNormMu = null; // Track group highest NOP/FM
+    let maxNormNopEq = null; // Track group highest NOP/Eqty
     let sumMargin = 0;
     let maxAge = null;
     let minPtmc = null;  // lowest pips-to-MC in this group
@@ -19255,9 +19851,21 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
         sumNotional += aNotional;
         sumMargin += rawMargin;
         
-        // Track NOP/FM (max per group and max globally)
+        // Track NOP/FM and NOP/Eqty (max per group and max globally)
         const aFm = rawEqMu - rawMargin;
         if (aNotional > 0) {
+          if (rawEqMu <= 0) {
+            maxNormNopEq = 'MAX';
+            gMaxNormNopEq = 'MAX';
+          } else {
+            const eqRatio = aNotional / rawEqMu;
+            if (maxNormNopEq !== 'MAX') {
+              if (maxNormNopEq === null || eqRatio > maxNormNopEq) maxNormNopEq = eqRatio;
+            }
+            if (gMaxNormNopEq !== 'MAX') {
+              if (gMaxNormNopEq === null || eqRatio > gMaxNormNopEq) gMaxNormNopEq = eqRatio;
+            }
+          }
           if (aFm <= 0) {
             maxNormMu = 'MAX';
             gMaxNormMu = 'MAX';
@@ -19328,7 +19936,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     const lotsBreak = hasLots ? `<br><span style="font-size:0.7rem;font-weight:400;color:var(--text2);">(${sumPosLots.toFixed(2)} / ${sumNegLots.toFixed(2)})</span>` : '';
     const fMu = maxMu !== null ? maxMu.toFixed(1) + '%' : '-';
     const sumFm = sumEq - sumMargin;
+    const fMarginLevel = (sumMargin > 0 && sumEq > 0) ? ((sumEq / sumMargin) * 100).toFixed(1) + '%' : '-';
     const fNormMu = maxNormMu === 'MAX' ? 'MAX' : (maxNormMu !== null ? maxNormMu.toFixed(0) + 'x' : '-');
+    const fNormNopEq = maxNormNopEq === 'MAX' ? 'MAX' : (maxNormNopEq !== null ? maxNormNopEq.toFixed(0) + 'x' : '-');
     const fSwap = hasSwap ? sumSwap.toFixed(2) : '-';
     const fSwapDelta = hasSwapDelta ? ((sumSwapDelta > 0 ? '+' : '') + sumSwapDelta.toFixed(2)) : '-';
     const sdColor = hasSwapDelta ? (sumSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -19382,7 +19992,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       <td></td>
       <td><strong title="${memberList}">${prefix}</strong> <span style="font-size:0.68rem;color:var(--text2);">(${memberCount})</span></td>
       <td></td><td>${connLabel}</td>
+      ${_nopEqCell(fNormNopEq)}
       ${_nopFmCell(fNormMu)}
+      <td title="Gives proximity of margin call">${fMarginLevel}</td>
       ${(function(){
         if (minPtmc == null) return '<td style="color:var(--text2);font-size:0.82rem">-</td>';
         if (minPtmc <= 0) return '<td><span style="color:var(--red);font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;">\u26a0 MC!</span></td>';
@@ -19403,6 +20015,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       ${groupLotsCell}
       <td>${fMu}</td>
       <td></td>
+      <td></td>
       <td>${fSwap}</td>
       ${groupSwapDeltaCell}
       <td></td><td></td><td></td><td></td><td></td><td></td>
@@ -19418,6 +20031,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   const gLotsStyle = gHasLots ? (gLots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
   const gLotsBreak = gHasLots ? `<div style="font-size:0.65rem;font-weight:400;color:#e2e8f0;letter-spacing:-0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;"><a href="#" onclick="showLotsBreakdown();return false;" style="color:inherit;text-decoration:underline;cursor:pointer;">(${gPosLots.toFixed(2)}/${gNegLots.toFixed(2)})</a></div>` : '';
   const gFm = gEq - gMargin;
+  const fGMarginLevel = (gMargin > 0 && gEq > 0) ? ((gEq / gMargin) * 100).toFixed(1) + '%' : '-';
   const fGNormMu = gMaxNormMu === 'MAX' ? 'MAX' : (gMaxNormMu !== null ? gMaxNormMu.toFixed(0) + 'x' : '-');
   const fGSwap = gHasSwap ? gSwap.toFixed(2) : '-';
   const fGSwapDelta = gHasSwapDelta ? ((gSwapDelta > 0 ? '+' : '') + gSwapDelta.toFixed(2)) : '-';
@@ -19435,7 +20049,9 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     <td></td>
     <td>TOTALS</td>
     <td></td><td></td>
+    ${_nopEqCell(fGNormNopEq)}
     ${_nopFmCell(fGNormMu)}
+    <td title="Gives proximity of margin call">${fGMarginLevel}</td>
     <td></td><td></td>
     <td>${fGBal}</td>
     <td>${fGEq}</td>
@@ -20098,6 +20714,7 @@ async function editFixAccount(id) {
     document.getElementById('efxAlertEmails').value = cfg.alert_email || '';
     document.getElementById('efxAlertTelegramIds').value = cfg.alert_telegram || '';
     document.getElementById('efxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    if (document.getElementById('efxSwapFree')) document.getElementById('efxSwapFree').checked = !!cfg.swapfree;
     document.getElementById('editFixAccountModal').classList.add('active');
     toggleFixFields('efx');
   } catch(e) { alert('Failed to load config: ' + e); }
@@ -20142,6 +20759,7 @@ async function saveFixAccountEdit() {
     alert_email: document.getElementById('efxAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('efxAlertTelegramIds').value.trim() || null,
     stop_out_level: document.getElementById('efxStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('efxStopOutLevel').value) : null,
+    swapfree: document.getElementById('efxSwapFree') ? document.getElementById('efxSwapFree').checked : false,
     notes: document.getElementById('efxNotes').value
   };
   try {
@@ -20180,6 +20798,7 @@ async function showAddFixAccountModal() {
   document.getElementById('fxAlertEmails').value = '';
   document.getElementById('fxAlertTelegramIds').value = '';
   document.getElementById('fxStopOutLevel').value = '';
+  if (document.getElementById('fxSwapFree')) document.getElementById('fxSwapFree').checked = false;
   setDayScheduleInputs('fx', DEFAULT_DAY_SCHEDULE);
   document.getElementById('addFixAccountModal').classList.add('active');
 }
@@ -20226,7 +20845,8 @@ async function addFixAccount(autoConnect = true) {
     auto_connect: autoConnect,
     alert_email: document.getElementById('fxAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('fxAlertTelegramIds').value.trim() || null,
-    stop_out_level: document.getElementById('fxStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('fxStopOutLevel').value) : null
+    stop_out_level: document.getElementById('fxStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('fxStopOutLevel').value) : null,
+    swapfree: document.getElementById('fxSwapFree') ? document.getElementById('fxSwapFree').checked : false
   };
   try {
     const res = await fetch('/api/fix_accounts', {
@@ -20292,6 +20912,9 @@ function editEAAccount(name) {
 
   document.getElementById('eeaAlertEmails').value = info.alert_email || '';
   document.getElementById('eeaAlertTelegramIds').value = info.alert_telegram || '';
+  if (document.getElementById('eeaSwapFree')) {
+    document.getElementById('eeaSwapFree').checked = !!(info.swapfree || eaInfo.swapfree || mtInfo?.swapfree);
+  }
   toggleEADirectFields();
   document.getElementById('editEAAccountModal').classList.add('active');
 }
@@ -20308,6 +20931,7 @@ async function saveEAAccountEdit() {
     alert_email: document.getElementById('eeaAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('eeaAlertTelegramIds').value.trim() || null,
     stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
+    swapfree: document.getElementById('eeaSwapFree') ? document.getElementById('eeaSwapFree').checked : false,
     notes: document.getElementById('eeaNotes').value
   };
   const fee = document.getElementById('eeaFeeThreshold').value.trim();
@@ -20334,7 +20958,8 @@ async function saveEAAccountEdit() {
       label: document.getElementById('eeaDirectLabel').value.trim(),
       alert_email: document.getElementById('eeaAlertEmails').value.trim() || null,
       alert_telegram: document.getElementById('eeaAlertTelegramIds').value.trim() || null,
-      stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null
+      stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
+      swapfree: payload.swapfree
     };
   }
 
@@ -20370,6 +20995,7 @@ function showAddMTDirectModal() {
   document.getElementById('mtdAlertEmails').value = '';
   document.getElementById('mtdAlertTelegramIds').value = '';
   document.getElementById('mtdStopOutLevel').value = '';
+  if (document.getElementById('mtdSwapFree')) document.getElementById('mtdSwapFree').checked = false;
   document.getElementById('addMTDirectModal').classList.add('active');
 }
 function closeAddMTDirectModal() {
@@ -20401,7 +21027,8 @@ async function addMTDirectAccount(autoConnect = true) {
     auto_connect: autoConnect,
     alert_email: document.getElementById('mtdAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('mtdAlertTelegramIds').value.trim() || null,
-    stop_out_level: document.getElementById('mtdStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('mtdStopOutLevel').value) : null
+    stop_out_level: document.getElementById('mtdStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('mtdStopOutLevel').value) : null,
+    swapfree: document.getElementById('mtdSwapFree') ? document.getElementById('mtdSwapFree').checked : false
   };
   try {
     const res = await fetch('/api/mt_direct_accounts', {
@@ -20474,6 +21101,7 @@ async function editMTDirect(id) {
     document.getElementById('emtdAlertEmails').value = cfg.alert_email || '';
     document.getElementById('emtdAlertTelegramIds').value = cfg.alert_telegram || '';
     document.getElementById('emtdStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    if (document.getElementById('emtdSwapFree')) document.getElementById('emtdSwapFree').checked = !!cfg.swapfree;
     document.getElementById('editMTDirectModal').classList.add('active');
   } catch(e) { alert('Failed to load MT Direct config: ' + e); }
 }
@@ -20501,6 +21129,7 @@ async function saveMTDirectEdit() {
     alert_email: document.getElementById('emtdAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('emtdAlertTelegramIds').value.trim() || null,
     stop_out_level: document.getElementById('emtdStopOutLevel').value.trim() !== '' ? parseFloat(document.getElementById('emtdStopOutLevel').value) : null,
+    swapfree: document.getElementById('emtdSwapFree') ? document.getElementById('emtdSwapFree').checked : false,
     notes: document.getElementById('emtdNotes').value
   };
   try {

@@ -1461,6 +1461,43 @@ class MT4DirectAccount:
             logger.debug("[%s] MT4 get_closed_ticket_price error for %s: %s", self.account_id, ticket, e)
         return None
 
+    def get_ticket_executed_prices(self, ticket, symbol=""):
+        """Return (open_price, close_price) actual execution prices for a ticket from broker history.
+        Either value may be None if not found. Prefers closed order history; falls back to open positions."""
+        open_price = None
+        close_price = None
+        if not self._connected or not self._order_client:
+            return open_price, close_price
+        try:
+            with _clr_lock:
+                orders = self._order_client.GetClosedOrders(symbol) if hasattr(self._order_client, 'GetClosedOrders') else None
+                if orders:
+                    for o in orders:
+                        t = getattr(o, 'Ticket', 0)
+                        if int(t) == int(ticket):
+                            op = getattr(o, 'OpenPrice', None)
+                            cp = getattr(o, 'ClosePrice', None)
+                            if op is not None and float(op) > 0:
+                                open_price = float(op)
+                            if cp is not None and float(cp) > 0:
+                                close_price = float(cp)
+                            break
+        except Exception as e:
+            logger.debug("[%s] MT4 get_ticket_executed_prices error for %s: %s", self.account_id, ticket, e)
+        # If close_price not found in history, check open positions for open_price
+        if open_price is None:
+            try:
+                open_orders = self._get_open_orders() or []
+                for o in open_orders:
+                    if int(o.get('Ticket', 0)) == int(ticket):
+                        op = o.get('OpenPrice')
+                        if op and float(op) > 0:
+                            open_price = float(op)
+                        break
+            except Exception as e:
+                logger.debug("[%s] MT4 get_ticket_executed_prices (open pos) error for %s: %s", self.account_id, ticket, e)
+        return open_price, close_price
+
     def send_limit_order(self, symbol, side, lots, price, limit_type, session_id="", comment=""):
         """Send a pending limit order (BuyLimit/SellLimit).
         Used by OPEN-LIMIT mode."""
@@ -2895,6 +2932,62 @@ class MT5DirectAccount:
         except Exception as e:
             logger.debug("[%s] MT5 get_closed_ticket_price error for %s: %s", self.account_id, ticket, e)
         return None
+
+    def get_ticket_executed_prices(self, ticket, symbol=""):
+        """Return (open_price, close_price) actual execution prices for a ticket from broker history.
+        Either value may be None if not found. Uses DownloadOrderHistory for MT5 deal/order records."""
+        open_price = None
+        close_price = None
+        if not self._connected or not self._client:
+            return open_price, close_price
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            net_from = now - timedelta(days=2)
+            net_to = now + timedelta(hours=2)
+            with _clr_lock:
+                if hasattr(self._client, 'DownloadOrderHistoryTimeout'):
+                    try:
+                        self._client.DownloadOrderHistoryTimeout = 10000
+                    except Exception:
+                        pass
+                result = self._client.DownloadOrderHistory(net_from, net_to)
+                raw_orders = list(result.Orders) if (result and hasattr(result, 'Orders') and result.Orders) else []
+                target_t = int(ticket)
+                for o in raw_orders:
+                    t = _normalize_ticket(getattr(o, 'Ticket', getattr(o, 'Id', 0)))
+                    pos_id = _normalize_ticket(getattr(o, 'PositionId', 0))
+                    if t == target_t or pos_id == target_t:
+                        op = getattr(o, 'OpenPrice', getattr(o, 'PriceOpen', None))
+                        cp = getattr(o, 'ClosePrice', getattr(o, 'PriceClose', getattr(o, 'Price', None)))
+                        if op is not None:
+                            try:
+                                if float(op) > 0:
+                                    open_price = float(op)
+                            except (TypeError, ValueError):
+                                pass
+                        if cp is not None:
+                            try:
+                                if float(cp) > 0:
+                                    close_price = float(cp)
+                            except (TypeError, ValueError):
+                                pass
+                        break
+        except Exception as e:
+            logger.debug("[%s] MT5 get_ticket_executed_prices error for %s: %s", self.account_id, ticket, e)
+        # If open_price still not found, check live open positions
+        if open_price is None:
+            try:
+                open_orders = self._get_open_orders() or []
+                for o in open_orders:
+                    if int(o.get('Ticket', 0)) == int(ticket):
+                        op = o.get('OpenPrice')
+                        if op and float(op) > 0:
+                            open_price = float(op)
+                        break
+            except Exception as e:
+                logger.debug("[%s] MT5 get_ticket_executed_prices (open pos) error for %s: %s", self.account_id, ticket, e)
+        return open_price, close_price
 
     def _on_quote(self, quote):
         """Handle incoming quote from MT5 server."""

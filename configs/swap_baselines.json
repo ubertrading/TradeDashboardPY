@@ -1,10 +1,10 @@
 {
   "DEMO-MT4-1218954455:AUDCHF": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 10.583097424566734,
-    "swap_short": -14.101988675597294,
+    "swap_long": 10.815339436863017,
+    "swap_short": -13.887401316357732,
     "symbol": "AUDCHF",
-    "ts": 1787919675.3465817
+    "ts": 1788227467.7667685
   },
   "DEMO-MT4-1218954455:AUDJPY": {
     "account": "DEMO-MT4-1218954455",
@@ -15,17 +15,17 @@
   },
   "DEMO-MT4-1218954455:GBPCHF": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": -1.5003702924853484,
-    "swap_short": -1.5004526045333602,
+    "swap_long": 9.077372796199873,
+    "swap_short": -12.517242954368976,
     "symbol": "GBPCHF",
-    "ts": 1787919675.3465817
+    "ts": 1788227467.7667685
   },
   "DEMO-MT4-1218954455:GBPJPY": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": -1.5,
-    "swap_short": -1.5000023080509433,
+    "swap_long": 6.1096107765041126,
+    "swap_short": -9.364437947289776,
     "symbol": "GBPJPY",
-    "ts": 1787919675.3465817
+    "ts": 1788227467.7667685
   },
   "DEMO-MT4-1218954455:USDCHF": {
     "account": "DEMO-MT4-1218954455",
@@ -71,16 +71,16 @@
   },
   "DEMO-MT5-52769010:USDCHF": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 5.986,
-    "swap_short": -12.902,
+    "swap_long": 5.509,
+    "swap_short": -12.319,
     "symbol": "USDCHF",
-    "ts": 1787845981.7205327
+    "ts": 1787937676.5068076
   },
   "DEMO-MT5-52769010:USDJPY": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 8.815,
-    "swap_short": -17.783,
+    "swap_long": 8.176,
+    "swap_short": -16.947,
     "symbol": "USDJPY",
-    "ts": 1787845981.7205327
+    "ts": 1787937676.5068076
   }
 }
