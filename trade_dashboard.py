@@ -1086,37 +1086,154 @@ def _calculate_optimal_fund_distributions(all_accounts_info):
     return results
 
 
+def _is_account_connected(aid):
+    """Return True if account `aid` is currently connected (online), False otherwise."""
+    if not aid:
+        return False
+    try:
+        if mt_direct_manager:
+            if aid in mt_direct_manager.accounts:
+                acct = mt_direct_manager.accounts[aid]
+                if getattr(acct, "connected", False) or getattr(acct, "_connected", False):
+                    return True
+                st = mt_direct_manager.get_status().get(aid, {})
+                if st.get("connected"):
+                    return True
+            for k, acct in mt_direct_manager.accounts.items():
+                c = acct.config
+                if c.get("label") == aid or str(c.get("login")) == str(aid):
+                    if getattr(acct, "connected", False) or getattr(acct, "_connected", False):
+                        return True
+                    st = mt_direct_manager.get_status().get(k, {})
+                    if st.get("connected"):
+                        return True
+
+        if fix_manager:
+            if aid in fix_manager.accounts:
+                acct = fix_manager.accounts[aid]
+                if getattr(acct, "connected", False):
+                    return True
+                st = fix_manager.get_status().get(aid, {})
+                if st.get("connected") or (st.get("trade_connected") and st.get("quote_connected")):
+                    return True
+            for k, acct in fix_manager.accounts.items():
+                c = acct.config
+                if c.get("group_label") == aid or c.get("label") == aid:
+                    if getattr(acct, "connected", False):
+                        return True
+                    st = fix_manager.get_status().get(k, {})
+                    if st.get("connected") or (st.get("trade_connected") and st.get("quote_connected")):
+                        return True
+
+        with lock:
+            if aid in ea_account_info:
+                info = ea_account_info[aid]
+                if info.get("online") or info.get("connected"):
+                    return True
+                ts_epoch = info.get("ts_epoch") or info.get("ts")
+                if ts_epoch:
+                    try:
+                        if time.time() - float(ts_epoch) < 120:
+                            return True
+                    except Exception:
+                        pass
+            if aid in manual_accounts:
+                info = manual_accounts[aid]
+                if info.get("online") or info.get("connected"):
+                    return True
+    except Exception as e:
+        logger.error("[CONN-CHECK] Error checking connection for %s: %s", aid, e)
+    return False
+
+
+def _account_has_positions(aid):
+    """Return True if account `aid` currently has open trading positions (lots > 0)."""
+    if not aid:
+        return False
+    try:
+        # MT Direct manager status
+        if mt_direct_manager and aid in mt_direct_manager.accounts:
+            st = mt_direct_manager.get_status().get(aid, {})
+            tot_lots = st.get("total_lots")
+            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                return True
+            pos = st.get("positions") or st.get("position_details")
+            if isinstance(pos, (list, dict)) and len(pos) > 0:
+                return True
+
+        # FIX manager status
+        if fix_manager and aid in fix_manager.accounts:
+            st = fix_manager.get_status().get(aid, {})
+            tot_lots = st.get("total_lots")
+            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                return True
+            pos = st.get("positions") or st.get("position_details")
+            if isinstance(pos, (list, dict)) and len(pos) > 0:
+                return True
+
+        # EA account info / manual accounts
+        with lock:
+            info = ea_account_info.get(aid, {})
+            tot_lots = info.get("total_lots")
+            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                return True
+            pos = info.get("position_details") or info.get("positions")
+            if isinstance(pos, (list, dict)) and len(pos) > 0:
+                return True
+            open_tickets = info.get("open_tickets") or []
+            if len(open_tickets) > 0:
+                return True
+            lbi = info.get("lots_by_instrument", {})
+            for sym, vals in lbi.items():
+                if abs(float(vals.get("buy", 0))) > 0.0001 or abs(float(vals.get("sell", 0))) > 0.0001:
+                    return True
+    except Exception as e:
+        logger.error("[POS-CHECK] Error checking positions for %s: %s", aid, e)
+    return False
+
+
 def _is_account_swapfree(account_id):
     """Return True if account is marked as swapfree, False otherwise."""
+    if not account_id:
+        return False
     try:
+        cfg = _get_account_config(account_id)
+        if cfg and cfg.get("swapfree"):
+            return True
+
         with lock:
             if account_id in manual_accounts and manual_accounts[account_id].get("swapfree"):
                 return True
             if account_id in ea_account_info and ea_account_info[account_id].get("swapfree"):
                 return True
-        if fix_manager and account_id in fix_manager.accounts:
-            if fix_manager.accounts[account_id].config.get("swapfree"):
-                return True
-        if mt_direct_manager and account_id in mt_direct_manager.accounts:
-            if mt_direct_manager.accounts[account_id].config.get("swapfree"):
-                return True
+
+        if mt_direct_manager:
+            for aid, acct in mt_direct_manager.accounts.items():
+                c = acct.config
+                if aid == account_id or c.get("label") == account_id or str(c.get("login")) == str(account_id):
+                    if c.get("swapfree"):
+                        return True
+
+        if fix_manager:
+            for aid, acct in fix_manager.accounts.items():
+                c = acct.config
+                if aid == account_id or c.get("group_label") == account_id or c.get("label") == account_id:
+                    if c.get("swapfree"):
+                        return True
     except Exception:
         pass
     return False
 
 
 def _check_missing_swap_alerts():
-    """Check if any non-swapfree accounts received NO daily swap after rollover
-    while other non-swapfree accounts DID receive daily swap.
+    """Check if any active, connected non-swapfree accounts WITH open positions
+    received NO daily swap after rollover while other non-swapfree accounts DID receive daily swap.
     """
     if dashboard_settings.get("swap_missing_alert_enabled") is False:
         logger.info("[SWAP-MISSING-ALERT] Missing swap alert disabled in settings")
         return
 
     deltas = _compute_swap_deltas_live()
-    if not deltas:
-        logger.info("[SWAP-MISSING-ALERT] No swap deltas computed yet")
-        return
 
     all_accounts = set()
     with lock:
@@ -1131,30 +1248,44 @@ def _check_missing_swap_alerts():
     non_swapfree_missing = []
 
     for aid in sorted(all_accounts):
+        # 1. Skip swapfree accounts
         if _is_account_swapfree(aid):
+            logger.debug("[SWAP-MISSING-ALERT] Skipping %s (swapfree)", aid)
             continue
 
+        # 2. Skip disconnected accounts
+        if not _is_account_connected(aid):
+            logger.info("[SWAP-MISSING-ALERT] Skipping %s (disconnected/offline)", aid)
+            continue
+
+        # 3. Skip accounts with no open positions
+        if not _account_has_positions(aid):
+            logger.info("[SWAP-MISSING-ALERT] Skipping %s (no open positions / 0 lots)", aid)
+            continue
+
+        # 4. Check swap delta value
         delta_val = deltas.get(aid)
+        label = get_account_label(aid)
         if delta_val is not None and abs(delta_val) > 0.0001:
-            non_swapfree_paid[aid] = delta_val
+            non_swapfree_paid[label] = delta_val
         else:
-            non_swapfree_missing.append(aid)
+            non_swapfree_missing.append(label)
 
     logger.info("[SWAP-MISSING-ALERT] Evaluation complete. Paid: %d accounts %s | Missing: %d accounts %s",
                 len(non_swapfree_paid), list(non_swapfree_paid.keys()),
                 len(non_swapfree_missing), non_swapfree_missing)
 
     if non_swapfree_paid and non_swapfree_missing:
-        paid_str = ", ".join([f"{aid}: ${val:+.2f}" for aid, val in non_swapfree_paid.items()])
+        paid_str = ", ".join([f"{lbl}: ${val:+.2f}" for lbl, val in non_swapfree_paid.items()])
         missing_str = ", ".join(non_swapfree_missing)
 
-        logger.warning("[SWAP-MISSING-ALERT] Missing swap on non-swapfree account(s): %s | Accounts that paid swap: %s",
+        logger.warning("[SWAP-MISSING-ALERT] Missing swap on active non-swapfree account(s): %s | Accounts that paid swap: %s",
                        missing_str, paid_str)
 
         subject = f"⚠️ Missing Swap Alert: {missing_str}"
         body = (
             f"Missing Swap Alert:\n\n"
-            f"The following non-swapfree account(s) received NO daily swap (Δ SWAP is blank/zero) after the 5:00 PM rollover:\n"
+            f"The following active, connected non-swapfree account(s) with open positions received NO daily swap (Δ SWAP is blank/zero) after the 5:00 PM rollover:\n"
             f"  - {missing_str}\n\n"
             f"Meanwhile, other non-swapfree account(s) DID receive swap:\n"
             f"  - {paid_str}\n\n"
@@ -1165,7 +1296,7 @@ def _check_missing_swap_alerts():
             f"<b>⚠️ Missing Swap Alert</b>\n\n"
             f"<b>No Swap Paid:</b> <code>{missing_str}</code>\n"
             f"<b>Paid Swap:</b> {paid_str}\n\n"
-            f"<i>Non-swapfree account(s) received no swap after 5 PM rollover.</i>"
+            f"<i>Non-swapfree account(s) with active positions received no swap after 5 PM rollover.</i>"
         )
 
         def _send():
@@ -1176,6 +1307,7 @@ def _check_missing_swap_alerts():
 
         threading.Thread(target=_send, daemon=True, name="SwapMissingAlertSend").start()
         _log_event(None, missing_str, "swap_missing_alert", f"Paid accounts: {paid_str}")
+
 
 
 def _swap_delta_loop():
@@ -3178,103 +3310,7 @@ def _disbalance_alert_loop():
 threading.Thread(target=_disbalance_alert_loop, daemon=True, name="DisbalanceAlert").start()
 
 
-# ─── Missing Swap Alert ──────────────────────────────────────────────────────
-def _is_account_swapfree(account_id):
-    """Return True if account is flagged as Swap Free across any connector configuration."""
-    if not account_id:
-        return False
-    if fix_manager and account_id in fix_manager.accounts:
-        if fix_manager.accounts[account_id].config.get("swapfree"):
-            return True
-    if mt_direct_manager and account_id in mt_direct_manager.accounts:
-        if mt_direct_manager.accounts[account_id].config.get("swapfree"):
-            return True
-    if account_id in manual_accounts:
-        if manual_accounts[account_id].get("swapfree"):
-            return True
-    if account_id in ea_account_info:
-        if ea_account_info[account_id].get("swapfree"):
-            return True
-    return False
 
-def _check_missing_swap_alerts():
-    """Evaluate non-swapfree accounts to verify swap payments are credited post-rollover."""
-    if not dashboard_settings.get("swap_missing_alert_enabled", True):
-        app.logger.info("[SWAP-MISSING-ALERT] Missing swap alerts disabled in settings.")
-        return
-
-    all_accounts = {}
-    with lock:
-        for acct_id, info in ea_account_info.items():
-            all_accounts[acct_id] = dict(info)
-    for acct_id, info in manual_accounts.items():
-        if acct_id not in all_accounts:
-            all_accounts[acct_id] = dict(info)
-
-    flagged_accounts = []
-
-    for acct_id, info in all_accounts.items():
-        # Skip if account is marked swapfree
-        if _is_account_swapfree(acct_id):
-            continue
-
-        pos_val = info.get("position_details") or []
-        pos_dict = info.get("positions") or {}
-        pos_count = info.get("positions", 0)
-        has_positions = bool(pos_val) or bool(pos_dict) or (isinstance(pos_count, (int, float)) and pos_count > 0)
-
-        if not has_positions:
-            continue
-
-        # Check total swap on open positions
-        total_pos_swap = 0.0
-        if isinstance(pos_val, list):
-            for p in pos_val:
-                total_pos_swap += float(p.get("swap", 0.0) or 0.0)
-        elif isinstance(pos_dict, dict):
-            for p in pos_dict.values():
-                total_pos_swap += float(p.get("swap", 0.0) or 0.0)
-
-        # Non-swapfree account with open positions post-rollover showing 0 swap
-        if abs(total_pos_swap) < 0.0001:
-            grp = (manual_accounts.get(acct_id, {}).get("group_label") or
-                   info.get("group_label", ""))
-            count_display = len(pos_val) if isinstance(pos_val, list) else (len(pos_dict) if isinstance(pos_dict, dict) else pos_count)
-            flagged_accounts.append({
-                "account_id": acct_id,
-                "group_label": grp,
-                "pos_count": count_display,
-                "total_swap": total_pos_swap
-            })
-
-    if not flagged_accounts:
-        app.logger.info("[SWAP-MISSING-ALERT] Evaluation completed: All non-swapfree accounts have recorded swap or no open positions.")
-        return
-
-    # Dispatch alerts for flagged accounts
-    for item in flagged_accounts:
-        acct = item["account_id"]
-        grp = item["group_label"]
-        pos_cnt = item["pos_count"]
-
-        subject = f"⚠️ Missing Swap Alert: {acct}"
-        body = (f"Missing Swap Payment Alert for Non-Swapfree Account\n"
-                f"Account: {acct}\n"
-                f"Group: {grp}\n"
-                f"Open Positions: {pos_cnt}\n"
-                f"Recorded Swap: $0.00\n\n"
-                f"This account is NOT marked 'Swap Free', but has open positions post-rollover without recorded swap charges/credits.")
-
-        tg_msg = (f"<b>⚠️ Missing Swap Alert</b>\n"
-                  f"Account: <code>{acct}</code>\n"
-                  f"Group: {grp}\n"
-                  f"Open Positions: <b>{pos_cnt}</b>\n"
-                  f"Recorded Swap: <b>$0.00</b>\n"
-                  f"<i>Account is non-swapfree but zero swap was credited post-rollover.</i>")
-
-        _send_email(subject, body, account_id=acct)
-        _send_telegram(tg_msg, account_id=acct)
-        app.logger.warning("[SWAP-MISSING-ALERT] Alert dispatched for %s (non-swapfree, 0 swap)", acct)
 
 
 # ─── Negative Swap Alert ─────────────────────────────────────────────────────
@@ -3304,6 +3340,10 @@ def _check_negative_swap_alerts():
 
     for acct_id, info in all_accounts.items():
         if _is_account_swapfree(acct_id):
+            continue
+        if not _is_account_connected(acct_id):
+            continue
+        if not _account_has_positions(acct_id):
             continue
 
         pos_val  = info.get("position_details") or []
@@ -3358,26 +3398,6 @@ def _check_negative_swap_alerts():
             "[SWAP-NEG-ALERT] Dispatched for %s — total swap=%.2f over %d positions",
             acct_id, total_swap, counted
         )
-
-
-def _missing_swap_alert_loop():
-    """Background thread: run missing swap check daily at 5:05 PM ET (17:05 ET)."""
-    import time as _time
-    _time.sleep(15)  # Uptime delay
-    while True:
-        try:
-            now = datetime.now()
-            target = now.replace(hour=17, minute=5, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            sleep_sec = (target - now).total_seconds()
-            _time.sleep(sleep_sec)
-            _check_missing_swap_alerts()
-        except Exception as e:
-            app.logger.error("[SWAP-MISSING-LOOP] Error in missing swap loop: %s", e)
-            _time.sleep(60)
-
-threading.Thread(target=_missing_swap_alert_loop, daemon=True, name="MissingSwapAlertLoop").start()
 
 
 
@@ -3642,6 +3662,7 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
         "ts_epoch": time.time(),
         "cmd_ts": cmd_sent_ts,
         "cycle": True,
+        "verified": True,
     })
     # Record this ticket as confirmed-closed so any delayed duplicate close
     # confirmation (from a retried close command) is rejected by the guard above.
@@ -5207,14 +5228,18 @@ def _run_hedge_monitor_all():
                                 if tickets_to_close:
                                     # ── IMBALANCE PERSISTENCE DEBOUNCE (3-second buffer) ──
                                     # Require imbalance to persist for >= 3 seconds to absorb transient snapshot drops on all account types
-                                    imbalance_start = session.get("_imbalance_first_seen_ts", 0)
-                                    if imbalance_start == 0:
-                                        session["_imbalance_first_seen_ts"] = now_ts
-                                        print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} (excess={excess}) — waiting 3.0s for persistence...")
-                                        tickets_to_close = []
-                                    elif (now_ts - imbalance_start) < 3.0:
-                                        print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} ({now_ts - imbalance_start:.1f}s / 3.0s)...")
-                                        tickets_to_close = []
+                                    # BUT if closed tickets have been verified in broker deal history, bypass debounce!
+                                    if not has_verified:
+                                        imbalance_start = session.get("_imbalance_first_seen_ts", 0)
+                                        if imbalance_start == 0:
+                                            session["_imbalance_first_seen_ts"] = now_ts
+                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} (excess={excess}) — waiting 3.0s for persistence...")
+                                            tickets_to_close = []
+                                        elif (now_ts - imbalance_start) < 3.0:
+                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} ({now_ts - imbalance_start:.1f}s / 3.0s)...")
+                                            tickets_to_close = []
+                                    else:
+                                        print(f"[HEDGE-REBAL] Imbalance on {max_acc} verified in deal history — bypassing 3s debounce!")
 
                                 if tickets_to_close:
                                     # Skip if user already rejected a rollback for this account.
@@ -5747,11 +5772,35 @@ def _run_hedge_monitor_all():
                       f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
                       f"missing={len(missing_tickets)}")
 
-                # Debounce to survive transient sync gaps during reconnects.
-                # When broker reports 0 positions, wait 10 cycles (~5.0s) before acting.
-                # When broker reports SOME positions but some tickets are missing,
-                # require 8 confirmation cycles (~4.0s) to filter broker reconnect partial-list artifacts.
-                if len(ea_open_tickets) == 0:
+                # Check deal history confirmation: if broker explicitly confirms any missing ticket as closed,
+                # bypass the multi-cycle debounce window and trigger rebalance IMMEDIATELY (threshold = 0).
+                has_history_confirmation = False
+                if missing_tickets and mt_direct_manager:
+                    acct_obj = mt_direct_manager.accounts.get(account)
+                    if acct_obj and getattr(acct_obj, 'connected', False):
+                        check_tickets = [t for t in missing_tickets if not str(t).startswith("MISSING_IMPORT")]
+                        if check_tickets:
+                            if hasattr(acct_obj, '_confirm_closed_tickets'):
+                                try:
+                                    if acct_obj._confirm_closed_tickets(check_tickets):
+                                        has_history_confirmation = True
+                                except Exception as _e:
+                                    print(f"[HEDGE-REBAL] acct={account}: _confirm_closed_tickets warning: {_e}")
+                            if not has_history_confirmation and hasattr(acct_obj, 'get_deal_history'):
+                                try:
+                                    dh = acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True)
+                                    if dh and isinstance(dh, dict):
+                                        deals = dh.get("deals") or dh.get("orders") or []
+                                        deal_tickets = {str(d.get("ticket") or d.get("order") or d.get("position")) for d in deals if (d.get("ticket") or d.get("order") or d.get("position"))}
+                                        if any(str(ct) in deal_tickets for ct in check_tickets):
+                                            has_history_confirmation = True
+                                except Exception as _e:
+                                    print(f"[HEDGE-REBAL] acct={account}: get_deal_history warning: {_e}")
+
+                if has_history_confirmation:
+                    print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: missing ticket(s) CONFIRMED CLOSED in broker deal history — bypassing debounce!")
+                    threshold = 0
+                elif len(ea_open_tickets) == 0:
                     threshold = 10
                 elif _cycle_get_account(session, account):
                     # Zero debounce for cycling accounts on partial mismatch
@@ -9398,6 +9447,7 @@ def trade_result():
                         "open_price": orig_fill.get("price") if orig_fill else None,
                         "open_ts": orig_fill.get("ts") if orig_fill else None,
                         "open_ts_epoch": orig_fill.get("ts_epoch") if orig_fill else None,
+                        "verified": True,
                     })
 
                     _log_event(session_id, account, "rollback_closed",
@@ -9437,6 +9487,7 @@ def trade_result():
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "ts_epoch": time.time(),
                         "cmd_ts": cmd_sent_ts,
+                        "verified": True,
                     })
                     _log_event(session_id, account, "position_closed",
                                f"ticket={ticket} price={close_price} closed={session['closed'][account]}/{session.get('close_count','?')}")
@@ -10367,31 +10418,6 @@ def update_account(account_name):
                     changed = True
                 if "swapfree" in data:
                     mt_acct.config["swapfree"] = bool(data["swapfree"])
-                    changed = True
-                if "stop_out_level" in data:
-                    try:
-                        mt_acct.config["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
-                        changed = True
-                    except (ValueError, TypeError):
-                        pass
-                if "alert_email" in data:
-                    mt_acct.config["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
-                    changed = True
-                if "alert_telegram" in data:
-                    mt_acct.config["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
-                    changed = True
-                if "auto_connect_start" in data:
-                    fix_acct.config["auto_connect_start"] = bool(data["auto_connect_start"])
-                    changed = True
-                if changed:
-                    fix_manager.save_config()
-
-            # Sync to MT Direct accounts config if it exists
-            if mt_direct_manager and account_name in mt_direct_manager.accounts:
-                mt_acct = mt_direct_manager.accounts[account_name]
-                changed = False
-                if "group_label" in data:
-                    mt_acct.config["group_label"] = str(data["group_label"]).strip()
                     changed = True
                 if "stop_out_level" in data:
                     try:
@@ -14814,11 +14840,21 @@ body {
         </div>
         <div class="form-group">
           <label>Account 1</label>
-          <input type="text" id="esAcct1">
+          <div class="acct-combo" id="esAcct1Combo">
+            <input type="text" class="acct-combo-input" id="esAcct1Input" placeholder="— type to search account —" autocomplete="off">
+            <span class="acct-combo-arrow">▼</span>
+            <input type="hidden" id="esAcct1">
+            <ul class="acct-combo-list" id="esAcct1List"></ul>
+          </div>
         </div>
         <div class="form-group">
           <label>Account 2</label>
-          <input type="text" id="esAcct2">
+          <div class="acct-combo" id="esAcct2Combo">
+            <input type="text" class="acct-combo-input" id="esAcct2Input" placeholder="— type to search account —" autocomplete="off">
+            <span class="acct-combo-arrow">▼</span>
+            <input type="hidden" id="esAcct2">
+            <ul class="acct-combo-list" id="esAcct2List"></ul>
+          </div>
         </div>
       </div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);">
@@ -15244,17 +15280,30 @@ function applyColVisibility() {
 
 // ─── Group view toggle ──────────────────────────────────────────────
 let _groupViewEnabled = localStorage.getItem('acctGroupView') === '1';
-(function() { const cb = document.getElementById('groupViewToggle'); if (cb) cb.checked = _groupViewEnabled; })();
+(function() {
+  const cb = document.getElementById('groupViewToggle');
+  if (cb) {
+    const saved = localStorage.getItem('acctGroupView');
+    if (saved !== null) {
+      _groupViewEnabled = (saved === '1');
+      cb.checked = _groupViewEnabled;
+    } else {
+      _groupViewEnabled = cb.checked;
+    }
+  }
+})();
 function toggleGroupView(enabled) {
   _groupViewEnabled = enabled;
   localStorage.setItem('acctGroupView', enabled ? '1' : '0');
+  const cb = document.getElementById('groupViewToggle');
+  if (cb) cb.checked = enabled;
   // Force immediate re-render
   if (window._lastRenderAccountsArgs) {
     renderAccounts.apply(null, window._lastRenderAccountsArgs);
     applyAcctColVisibility();
     // Re-attach drag handles and restore saved widths (table._resizeInit flag is reset by re-render)
-    document.getElementById('accountsTable')._resizeInit = false;
-    initAcctColResize();
+    const _at = document.getElementById('accountsTable');
+    if (_at) { _at._resizeInit = false; initAcctColResize(); }
   }
 }
 
@@ -15317,15 +15366,28 @@ function applyAcctColVisibility() {
     style.id = 'acctColStyle';
     document.head.appendChild(style);
   }
-  if (hiddenAcctCols.length === 0) {
+  if (!hiddenAcctCols || hiddenAcctCols.length === 0) {
     style.textContent = '';
     return;
   }
-  // nth-child is 1-based, data-acol is 0-based. Note: we added a "Hide" column (-1) at the start, so offset is +2.
+  // Build dynamic data-acol -> 1-based nth-child index mapping from table header
+  const thList = Array.from(document.querySelectorAll('#accountsTable thead th'));
+  const colIndexMap = {};
+  thList.forEach((th, idx) => {
+    const acol = th.getAttribute('data-acol');
+    if (acol !== null) {
+      colIndexMap[acol] = idx + 1;
+    }
+  });
+
   const rules = hiddenAcctCols.map(c => {
-    const n = parseInt(c) + 2;
-    return `#accountsTable th:nth-child(${n}), #accountsTable td:nth-child(${n}) { display: none; }`;
-  }).join('\n');
+    const n = colIndexMap[c];
+    if (n) {
+      return `#accountsTable th:nth-child(${n}), #accountsTable td:nth-child(${n}) { display: none !important; }`;
+    }
+    return '';
+  }).filter(Boolean).join('\n');
+
   style.textContent = rules;
 }
 
@@ -16245,7 +16307,7 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
 
   function renderList(filter) {
     const q = (filter || '').toLowerCase();
-    const filtered = items.filter(({label}) => label.toLowerCase().includes(q));
+    const filtered = items.filter(({label}) => label.toLowerCase().startsWith(q));
     list.innerHTML = '';
     if (filtered.length === 0) {
       list.innerHTML = '<li class="acct-combo-no-results">No matches</li>';
@@ -16326,28 +16388,17 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
     Object.keys(labelMap).forEach(k => delete labelMap[k]);
     newItems.forEach(({value, label}) => { labelMap[value] = label; });
   };
+  // Set current value programmatically
+  combo._setValue = (val) => {
+    hidden.value = val || '';
+    input.value  = labelMap[val] || val || '';
+  };
 }
 
 function showNewStrategyModal() {
   document.getElementById('sStratName').value = '';
   // Build account list
-  const allAccounts = [];
-  Object.keys(ea_heartbeats_cache).forEach(a => allAccounts.push(a));
-  Object.keys(manual_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  Object.keys(fix_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  Object.keys(mt_direct_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  allAccounts.sort();
-  const items = allAccounts.map(a => {
-    let lbl = '';
-    if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
-      lbl = manual_accounts_cache[a].group_label;
-    } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
-      lbl = fix_accounts_cache[a].group_label;
-    } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
-      lbl = mt_direct_accounts_cache[a].label;
-    }
-    return { value: a, label: lbl ? a + ' \u2014 ' + lbl : a };
-  });
+  const items = _buildAcctItems();
 
   ['1','2'].forEach(n => {
     const comboId = 'sAcct' + n + 'Combo';
@@ -16487,14 +16538,45 @@ function renderStrategies(strats, sessions) {
 }
 
 // ─── Edit Strategy modal (strategy details + instruments) ───────────────
+function _buildAcctItems() {
+  const allAccounts = [];
+  Object.keys(ea_heartbeats_cache).forEach(a => allAccounts.push(a));
+  Object.keys(manual_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
+  Object.keys(fix_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
+  Object.keys(mt_direct_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
+  allAccounts.sort();
+  return allAccounts.map(a => {
+    let lbl = '';
+    if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
+      lbl = manual_accounts_cache[a].group_label;
+    } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
+      lbl = fix_accounts_cache[a].group_label;
+    } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
+      lbl = mt_direct_accounts_cache[a].label;
+    }
+    return { value: a, label: lbl ? a + ' \u2014 ' + lbl : a };
+  });
+}
 function editStrategy(stratId) {
   currentStrategyId = stratId;
   const strat = strategies_cache.find(s => s.id === stratId);
   if (!strat) return;
   document.getElementById('esStratId').value = strat.id;
   document.getElementById('esStratName').value = strat.name;
-  document.getElementById('esAcct1').value = strat.account1;
-  document.getElementById('esAcct2').value = strat.account2;
+
+  // Build account combo items and init/populate
+  const items = _buildAcctItems();
+  ['1','2'].forEach(n => {
+    const comboId = 'esAcct' + n + 'Combo';
+    const combo = document.getElementById(comboId);
+    if (!combo._reset) {
+      initAcctCombo(comboId, 'esAcct' + n + 'Input', 'esAcct' + n, 'esAcct' + n + 'List', [...items]);
+    } else {
+      combo._setItems(items);
+    }
+    combo._setValue(strat['account' + n]);
+  });
+
   document.getElementById('esTradeStartTime').value = strat.trade_start_time || '00:00';
   document.getElementById('esTradeStopTime').value = strat.trade_stop_time || '23:59';
   document.getElementById('esEnabled').checked = strat.enabled !== false;
@@ -19186,6 +19268,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   // Skip re-render if user is editing a field inside the accounts table
   if (tbody.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
 
+  const groupCb = document.getElementById('groupViewToggle');
+  if (groupCb) _groupViewEnabled = groupCb.checked;
+
   // ── Grouped view ─────────────────────────────────────────────────
   if (_groupViewEnabled) {
     _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta);
@@ -19729,11 +19814,10 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     if (seen.has(id)) return;
     const isHidden = manualAccounts ? (manualAccounts[id]?.is_hidden === true) : false;
     if (window._hideHiddenAccounts !== false && isHidden) return;
-    let displayName = id;
-    if (source === 'mt' && info && info.label) displayName = info.label;
+    const displayName = getAccountLabel(id) || id;
     if (nameFilter && !id.toLowerCase().includes(nameFilter) && !displayName.toLowerCase().includes(nameFilter)) return;
     seen.add(id);
-    allAccts[id] = { info, source };
+    allAccts[id] = { info: info || {}, source };
   }
   if (fixAccounts) Object.entries(fixAccounts).forEach(([id, info]) => _collectAcct(id, info, 'fix'));
   if (mtDirectAccounts) Object.entries(mtDirectAccounts).forEach(([id, info]) => _collectAcct(id, info, 'mt'));
@@ -19746,20 +19830,19 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
 
   if (Object.keys(allAccts).length === 0) {
     const emptyMsg = nameFilter ? `No accounts matching "${nameFilter}"` : 'No accounts yet';
-    tbody.innerHTML = `<tr><td colspan="26" style="text-align:center;color:var(--text2);padding:30px;">${emptyMsg}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="28" style="text-align:center;color:var(--text2);padding:30px;">${emptyMsg}</td></tr>`;
     return;
   }
 
   // 2. Group by name prefix (before first hyphen)
   const groups = {};  // prefix -> [{id, info, source}]
   for (const [id, data] of Object.entries(allAccts)) {
-    // Use display name: MT Direct uses label, FIX uses id, EA uses id
-    let displayName = id;
-    if (data.source === 'mt' && data.info.label) displayName = data.info.label;
+    const info = data.info || {};
+    let displayName = getAccountLabel(id) || id;
     const dashIdx = displayName.indexOf('-');
     const prefix = dashIdx > 0 ? displayName.substring(0, dashIdx) : displayName;
     if (!groups[prefix]) groups[prefix] = [];
-    groups[prefix].push({ id, info: data.info, source: data.source, displayName });
+    groups[prefix].push({ id, info, source: data.source, displayName });
   }
 
   // 3. Render group rows
@@ -19800,8 +19883,8 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let connectedCount = 0;  // Count of connected accounts in this group
 
     for (const m of members) {
-      const info = m.info;
-      const hb = heartbeats ? heartbeats[m.id] : null;
+      const info = m.info || {};
+      const hb = heartbeats ? (heartbeats[m.id] || {}) : {};
       memberIds.push(m.id);
 
       // Connection status
@@ -19811,42 +19894,42 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       } else if (m.source === 'mt') {
         isConnected = !!info.connected;
       } else if (m.source === 'ea') {
-        isConnected = !!(info.online);
+        isConnected = !!(info.online || hb.online);
       } else {
         isConnected = true;  // Manual accounts treated as connected
       }
       if (isConnected) connectedCount++;
 
       // Balance
-      const rb = info.balance != null ? parseFloat(info.balance) : (hb && hb.balance != null ? parseFloat(hb.balance) : NaN);
+      const rb = info.balance != null ? parseFloat(info.balance) : (hb.balance != null ? parseFloat(hb.balance) : NaN);
       if (!isNaN(rb)) { sumBal += rb; hasBal = true; }
       // Equity
-      const re = info.equity != null ? parseFloat(info.equity) : (hb && hb.equity != null ? parseFloat(hb.equity) : NaN);
+      const re = info.equity != null ? parseFloat(info.equity) : (hb.equity != null ? parseFloat(hb.equity) : NaN);
       if (!isNaN(re)) { sumEq += re; hasEq = true; }
       // PnL
-      const rp = info.total_pnl != null ? parseFloat(info.total_pnl) : NaN;
+      const rp = info.total_pnl != null ? parseFloat(info.total_pnl) : (hb.total_pnl != null ? parseFloat(hb.total_pnl) : NaN);
       if (!isNaN(rp)) { sumPnl += rp; hasPnl = true; }
       // Positions
-      const rpos = info.positions != null ? parseInt(info.positions) : NaN;
+      const rpos = info.positions != null ? parseInt(info.positions) : (hb.positions != null ? parseInt(hb.positions) : NaN);
       if (!isNaN(rpos)) { sumPos += rpos; hasPos = true; }
       // Lots
-      const rl = info.total_lots != null ? parseFloat(info.total_lots) : NaN;
+      const rl = info.total_lots != null ? parseFloat(info.total_lots) : (hb.total_lots != null ? parseFloat(hb.total_lots) : NaN);
       if (!isNaN(rl)) { sumLots += rl; hasLots = true; if (rl >= 0) sumPosLots += rl; else sumNegLots += rl; }
       // Swap
-      const rs = info.total_swap != null ? parseFloat(info.total_swap) : NaN;
+      const rs = info.total_swap != null ? parseFloat(info.total_swap) : (hb.total_swap != null ? parseFloat(hb.total_swap) : NaN);
       if (!isNaN(rs)) { sumSwap += rs; hasSwap = true; }
       // Margin Use % — compute per account, take max; also track leverage of that account
-      const rawMargin = info.margin != null ? parseFloat(info.margin) : (hb && hb.margin != null ? parseFloat(hb.margin) : null);
+      const rawMargin = info.margin != null ? parseFloat(info.margin) : (hb.margin != null ? parseFloat(hb.margin) : null);
       const rawEqMu = !isNaN(re) ? re : 0;
       if (rawEqMu > 0 && rawMargin != null) {
         const mu = (rawMargin / rawEqMu) * 100;
         if (maxMu === null || mu > maxMu) {
           maxMu = mu;
           // Capture leverage of the account with highest margin use
-          const acctLev = info.leverage || (hb && hb.leverage) || null;
+          const acctLev = info.leverage || hb.leverage || null;
           maxMuLev = acctLev ? ('1:' + acctLev) : null;
         }
-        const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb && hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
+        const aLots = info.total_lots != null ? parseFloat(info.total_lots) : (hb.total_lots != null ? parseFloat(hb.total_lots) : 0);
         const aNotional = Math.abs(aLots) * 100000;
         sumNotional += aNotional;
         sumMargin += rawMargin;
@@ -19916,7 +19999,6 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     if (hasLots) { gLots += sumLots; gHasLots = true; gPosLots += sumPosLots; gNegLots += sumNegLots; }
     if (hasSwap) { gSwap += sumSwap; gHasSwap = true; }
     if (hasSwapDelta) { gSwapDelta += sumSwapDelta; gHasSwapDelta = true; }
-    if (hasSwapDelta) { gSwapDelta += sumSwapDelta; gHasSwapDelta = true; }
     if (sumNotional > 0) gNotional += sumNotional;
     if (sumMargin > 0) gMargin += sumMargin;
     if (maxMu !== null && (gMaxMu === null || maxMu > gMaxMu)) gMaxMu = maxMu;
@@ -19972,7 +20054,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       else if (isOrange) ageStyle += 'font-weight:600;color:var(--orange);';
     }
     const memberCount = members.length;
-    const memberList = members.map(m => m.displayName).join('\\n');
+    const memberList = members.map(m => m.displayName).join('\n');
 
     const connTotal = members.length;
     const connColor = connectedCount < connTotal ? 'color:var(--red);font-weight:600;' : 'color:var(--green);';
@@ -20015,7 +20097,6 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       ${groupLotsCell}
       <td>${fMu}</td>
       <td></td>
-      <td></td>
       <td>${fSwap}</td>
       ${groupSwapDeltaCell}
       <td></td><td></td><td></td><td></td><td></td><td></td>
@@ -20033,6 +20114,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   const gFm = gEq - gMargin;
   const fGMarginLevel = (gMargin > 0 && gEq > 0) ? ((gEq / gMargin) * 100).toFixed(1) + '%' : '-';
   const fGNormMu = gMaxNormMu === 'MAX' ? 'MAX' : (gMaxNormMu !== null ? gMaxNormMu.toFixed(0) + 'x' : '-');
+  const fGNormNopEq = gMaxNormNopEq === 'MAX' ? 'MAX' : (gMaxNormNopEq !== null ? gMaxNormNopEq.toFixed(0) + 'x' : '-');
   const fGSwap = gHasSwap ? gSwap.toFixed(2) : '-';
   const fGSwapDelta = gHasSwapDelta ? ((gSwapDelta > 0 ? '+' : '') + gSwapDelta.toFixed(2)) : '-';
   const gSdStyle = gHasSwapDelta ? (gSwapDelta >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
@@ -21231,36 +21313,103 @@ loadDayScheduleTemplates().then(() => refreshData()).then(() => applyColVisibili
 startRefreshLoop();
 startRefreshLoop();
 
+// Close modals on click outside or on Escape key
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' || e.code === 'Escape' || e.keyCode === 27) {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
+
+    let closedInnerModal = false;
+
+    const popoutParam = new URLSearchParams(window.location.search).get('strategy_id');
+    const isPopoutWindow = !!popoutParam || (window.opener && window.opener !== window);
+
+    // 1. Universal active class removal for any modal overlay or modal dialog
+    document.querySelectorAll('.modal-overlay.active, .modal.active, [class*="modal"].active').forEach(function(el) {
+      if (popoutParam && el.id === 'editStrategyModal') return;
+      el.classList.remove('active');
+      closedInnerModal = true;
+    });
+
+    // Invoke specific modal closing handlers if defined
+    if (typeof closeModal === 'function') { closeModal(); }
+    if (typeof closeEditMTDirectModal === 'function') { closeEditMTDirectModal(); }
+    if (typeof closeAddMTDirectModal === 'function') { closeAddMTDirectModal(); }
+    if (typeof closeEditEAAccountModal === 'function') { closeEditEAAccountModal(); }
+    if (typeof closeEditFixAccountModal === 'function') { closeEditFixAccountModal(); }
+    if (typeof closeAddFixAccountModal === 'function') { closeAddFixAccountModal(); }
+    if (typeof closeAddAccountModal === 'function') { closeAddAccountModal(); }
+    if (typeof closeNewStrategyModal === 'function') { closeNewStrategyModal(); }
+    if (typeof closeNewInstrumentModal === 'function') { closeNewInstrumentModal(); }
+    if (typeof closeImportModal === 'function') { closeImportModal(); }
+    if (typeof closePnlModal === 'function') { closePnlModal(); }
+    if (typeof closeRptModal === 'function') { closeRptModal(); }
+
+    if (!popoutParam && typeof closeEditStrategyModal === 'function') {
+      const sem = document.getElementById('editStrategyModal');
+      if (sem && sem.classList.contains('active')) {
+        closeEditStrategyModal();
+        closedInnerModal = true;
+      }
+    }
+
+    // 2. Display-based modals (PnL, reporting, breakdowns, confirmation)
+    ['pnlModal', 'rptModal', 'pairBreakdownModal', 'confirmModal'].forEach(function(id) {
+      const el = document.getElementById(id);
+      if (el) {
+        if (el.classList.contains('active') || (el.style.display !== 'none' && el.style.display !== '')) {
+          closedInnerModal = true;
+        }
+        el.classList.remove('active');
+        el.style.display = 'none';
+      }
+    });
+
+    // 3. Remove dynamic breakdown popups if present
+    ['lotsBreakdownModal', 'swapBreakdownModal'].forEach(function(id) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.remove();
+        closedInnerModal = true;
+      }
+    });
+
+    // 4. Close open menus/dropdown lists
+    const colMenu = document.getElementById('colToggleMenu');
+    if (colMenu && colMenu.classList.contains('open')) {
+      colMenu.classList.remove('open');
+      closedInnerModal = true;
+    }
+    document.querySelectorAll('.acct-combo-list.open').forEach(function(el) {
+      if (el.classList.contains('open')) {
+        el.classList.remove('open');
+        closedInnerModal = true;
+      }
+    });
+
+    // 5. If NO inner modal/popup was active and this is a popout window (e.g. Strategy popout window), close the window!
+    if (!closedInnerModal && isPopoutWindow) {
+      try {
+        window.close();
+      } catch(err) {}
+    }
+  }
+});
+
 // Close modals on click outside
-document.getElementById('editModal').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
-});
-document.getElementById('newStrategyModal').addEventListener('click', function(e) {
-  if (e.target === this) closeNewStrategyModal();
-});
-document.getElementById('editStrategyModal').addEventListener('click', function(e) {
-  if (e.target === this) closeEditStrategyModal();
-});
-document.getElementById('newInstrumentModal').addEventListener('click', function(e) {
-  if (e.target === this) closeNewInstrumentModal();
-});
-document.getElementById('addAccountModal').addEventListener('click', function(e) {
-  if (e.target === this) closeAddAccountModal();
-});
-document.getElementById('addFixAccountModal').addEventListener('click', function(e) {
-  if (e.target === this) closeAddFixAccountModal();
-});
-document.getElementById('addMTDirectModal').addEventListener('click', function(e) {
-  if (e.target === this) closeAddMTDirectModal();
-});
-document.getElementById('editEAAccountModal').addEventListener('click', function(e) {
-  if (e.target === this) closeEditEAAccountModal();
-});
-document.getElementById('editMTDirectModal').addEventListener('click', function(e) {
-  if (e.target === this) closeEditMTDirectModal();
-});
-document.getElementById('editFixAccountModal').addEventListener('click', function(e) {
-  if (e.target === this) closeEditFixAccountModal();
+['editModal', 'newStrategyModal', 'editStrategyModal', 'newInstrumentModal', 
+ 'addAccountModal', 'addFixAccountModal', 'addMTDirectModal', 'editEAAccountModal', 
+ 'editMTDirectModal', 'editFixAccountModal', 'importPositionsModal'].forEach(function(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('click', function(e) {
+      if (e.target === this) {
+        this.classList.remove('active');
+        this.style.display = 'none';
+      }
+    });
+  }
 });
 // Register PWA service worker
 if ('serviceWorker' in navigator) {
@@ -22177,6 +22326,7 @@ if __name__ == '__main__':
                             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "ts_epoch": time.time(),
                             "cmd_ts": cmd_sent_ts,
+                            "verified": True,
                         })
                         
                         _update_closed_lots(session, account, closed_lot_size)

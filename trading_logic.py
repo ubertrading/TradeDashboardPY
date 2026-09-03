@@ -933,10 +933,40 @@ def _run_hedge_monitor_all():
                 mismatch_key = f"hedge_mismatch_{sid}_{account}"
                 prev_count = session.get(mismatch_key, 0)
                 
-                # Direct connections (FIX, MT4/MT5 Direct) are reliable and don't need 
-                # the 3-tick debounce that EA HTTP polling requires for stability.
-                threshold = 0 if info.get("direct_mode") else 2
-                
+                # Check deal history confirmation: if broker explicitly confirms any missing ticket as closed,
+                # bypass the multi-cycle debounce window and trigger rebalance IMMEDIATELY (threshold = 0).
+                has_history_confirmation = False
+                mt_direct_manager = _ctx.get("mt_direct_manager")
+                if missing_tickets and mt_direct_manager:
+                    acct_obj = mt_direct_manager.accounts.get(account)
+                    if acct_obj and getattr(acct_obj, 'connected', False):
+                        check_tickets = [t for t in missing_tickets if not str(t).startswith("MISSING_IMPORT")]
+                        if check_tickets:
+                            if hasattr(acct_obj, '_confirm_closed_tickets'):
+                                try:
+                                    if acct_obj._confirm_closed_tickets(check_tickets):
+                                        has_history_confirmation = True
+                                except Exception as _e:
+                                    print(f"[HEDGE-REBAL] acct={account}: _confirm_closed_tickets warning: {_e}")
+                            if not has_history_confirmation and hasattr(acct_obj, 'get_deal_history'):
+                                try:
+                                    dh = acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True)
+                                    if dh and isinstance(dh, dict):
+                                        deals = dh.get("deals") or dh.get("orders") or []
+                                        deal_tickets = {str(d.get("ticket") or d.get("order") or d.get("position")) for d in deals if (d.get("ticket") or d.get("order") or d.get("position"))}
+                                        if any(str(ct) in deal_tickets for ct in check_tickets):
+                                            has_history_confirmation = True
+                                except Exception as _e:
+                                    print(f"[HEDGE-REBAL] acct={account}: get_deal_history warning: {_e}")
+
+                if has_history_confirmation:
+                    print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: missing ticket(s) CONFIRMED CLOSED in broker deal history — bypassing debounce!")
+                    threshold = 0
+                else:
+                    # Direct connections (FIX, MT4/MT5 Direct) are reliable and don't need 
+                    # the 3-tick debounce that EA HTTP polling requires for stability.
+                    threshold = 0 if info.get("direct_mode") else 2
+
                 if prev_count < threshold:
                     session[mismatch_key] = prev_count + 1
                     print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: "

@@ -1074,6 +1074,37 @@ class MT4DirectAccount:
             logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
         return positions
 
+    def _confirm_closed_tickets(self, prev_tickets):
+        """Query recent MT4 order history (last 5 minutes) to verify if previously open tickets were closed on broker."""
+        if not prev_tickets or not self._client or not self._connected:
+            return False
+        try:
+            import datetime
+            to_ts = datetime.datetime.utcnow()
+            from_ts = to_ts - datetime.timedelta(minutes=5)
+            _heartbeat_sem.acquire()
+            try:
+                with _clr_lock:
+                    raw_orders = list(self._client.DownloadOrderHistory(from_ts, to_ts))
+            finally:
+                _heartbeat_sem.release()
+            closed_tickets = set()
+            for o in raw_orders:
+                ticket = _normalize_ticket(getattr(o, 'Ticket', getattr(o, 'Order', getattr(o, 'TicketId', 0))))
+                if ticket:
+                    closed_tickets.add(ticket)
+                    closed_tickets.add(str(ticket))
+                    if str(ticket).isdigit():
+                        closed_tickets.add(int(ticket))
+            for t in prev_tickets:
+                norm_t = _normalize_ticket(t)
+                if norm_t in closed_tickets or str(norm_t) in closed_tickets or (str(norm_t).isdigit() and int(norm_t) in closed_tickets):
+                    logger.info("[%s] MT4 _confirm_closed_tickets: confirmed ticket %s closed in history!", self.account_id, norm_t)
+                    return True
+        except Exception as e:
+            logger.debug("[%s] Error checking MT4 closed tickets history: %s", self.account_id, e)
+        return False
+
     def get_deal_history(self, from_ts, to_ts, fee_keywords=None, **kwargs):
         """Retrieve closed deal history from the MT4 server and compute PnL totals.
 
@@ -1167,8 +1198,15 @@ class MT4DirectAccount:
                     # (we padded the download range, so filter precisely here)
                     if close_time_raw:
                         close_epoch = _parse_open_time(close_time_raw)
-                        if close_epoch and (close_epoch < from_ts or close_epoch > to_ts):
-                            continue  # Outside requested range
+                        if close_epoch:
+                            # _parse_open_time adjusts naive broker time to NY time (-7h offset).
+                            # Check if either raw parsed epoch or UTC-equivalent (+7h offset) falls in [from_ts, to_ts].
+                            in_range = (from_ts <= close_epoch <= to_ts) or \
+                                       (from_ts <= close_epoch + 25200 <= to_ts) or \
+                                       (from_ts <= close_epoch + 21600 <= to_ts) or \
+                                       (from_ts <= close_epoch + 28800 <= to_ts)
+                            if not in_range:
+                                continue  # Outside requested range
 
                     # Identify type of operation
                     is_trade = otype in ('buy', 'sell', '0', '1', 'op_buy', 'op_sell')
@@ -2853,8 +2891,15 @@ class MT5DirectAccount:
                     # Filter by close time within exact [from_ts, to_ts] range
                     if close_time_raw:
                         close_epoch = _parse_open_time(close_time_raw)
-                        if close_epoch and (close_epoch < from_ts or close_epoch > to_ts):
-                            continue
+                        if close_epoch:
+                            # _parse_open_time adjusts naive broker time to NY time (-7h offset).
+                            # Check if either raw parsed epoch or UTC-equivalent (+7h offset) falls in [from_ts, to_ts].
+                            in_range = (from_ts <= close_epoch <= to_ts) or \
+                                       (from_ts <= close_epoch + 25200 <= to_ts) or \
+                                       (from_ts <= close_epoch + 21600 <= to_ts) or \
+                                       (from_ts <= close_epoch + 28800 <= to_ts)
+                            if not in_range:
+                                continue
 
                     # Identify type of operation
                     is_trade = ('buy' in deal_type) or ('sell' in deal_type)
@@ -4271,6 +4316,19 @@ class MTDirectManager:
                 sides = session.get("sides", {})
 
                 action = session.get("action", "open")
+
+                # ── Pre-subscribe all session symbols for connected accounts ───
+                # Must happen BEFORE the atomic spread gate so that quotes are
+                # available when the gate checks. Without this, the gate fires
+                # "no quote" → blocks → subscribe_symbol never called → stuck loop.
+                for _pre_aid, _pre_side in sides.items():
+                    _pre_acct = self.accounts.get(_pre_aid)
+                    if not _pre_acct or not _pre_acct.connected:
+                        continue
+                    _pre_pair = (_pre_side.get("pair") or session.get("pair", "")).strip()
+                    if _pre_pair:
+                        _pre_acct.subscribe_symbol(_pre_pair)
+                # ───────────────────────────────────────────────────────────────
 
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
                 # Block command issuance for ALL linked accounts if ANY leg fails spread gate.

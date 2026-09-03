@@ -1013,10 +1013,23 @@ class MtBridgeAccount:
             return (False, 0, 0)
 
     def subscribe_symbol(self, symbol):
-        """Ensure the symbol is watched (update ea_account_info with it)."""
+        """Ensure the symbol is watched (update ea_account_info with it).
+
+        Calls POST /api/accounts/{id}/subscribe/{symbol} so the bridge tells
+        the MT4/MT5 API to start streaming ticks for this symbol. Without this,
+        the bridge only subscribes to open-position symbols at connect time —
+        meaning strategy pairs with no open positions (monitor mode) get no quotes.
+        """
         info = self.dd["ea_account_info"].get(self.account_id, {})
         info["symbol"] = symbol
         self.dd["ea_account_info"][self.account_id] = info
+        # Tell the bridge to subscribe (start tick streaming for this symbol)
+        encoded = urllib.parse.quote(symbol, safe='')
+        try:
+            _post(f"/api/accounts/{self.account_id}/subscribe/{encoded}", {}, timeout=2)
+        except Exception:
+            pass
+        # Pull the latest quote now that the subscription is active
         sym_info = self.get_symbol_info(symbol)
         if sym_info:
             for k, v in sym_info.items():
@@ -1097,6 +1110,19 @@ class MtBridgeManager:
                 sides = session.get("sides", {})
 
                 action = session.get("action", "open")
+
+                # ── Pre-subscribe all session symbols for connected accounts ───
+                # Must happen BEFORE the atomic spread gate so that quotes are
+                # available when the gate checks. Without this, the gate fires
+                # "no quote" → blocks → subscribe_symbol never called → stuck loop.
+                for _pre_aid, _pre_side in sides.items():
+                    _pre_acct = self.accounts.get(_pre_aid)
+                    if not _pre_acct or not _pre_acct.connected:
+                        continue
+                    _pre_pair = (_pre_side.get("pair") or session.get("pair", "")).strip()
+                    if _pre_pair:
+                        _pre_acct.subscribe_symbol(_pre_pair)
+                # ───────────────────────────────────────────────────────────────
 
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
                 # Block command issuance for ALL linked accounts if ANY leg fails spread gate.

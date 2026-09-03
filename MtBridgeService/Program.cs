@@ -75,6 +75,15 @@ app.MapGet("/api/accounts/{id}/quote/{symbol}", (string id, string symbol) =>
     return quote != null ? Results.Ok(quote) : Results.NotFound();
 });
 
+// Subscribe: tell the bridge to start streaming quotes for a symbol.
+// Python calls this from subscribe_symbol() for all strategy pairs,
+// ensuring quotes are available even when there are no open positions yet.
+app.MapPost("/api/accounts/{id}/subscribe/{symbol}", (string id, string symbol) =>
+{
+    var ok = accountStore.Subscribe(id, symbol);
+    return ok ? Results.Ok(new { subscribed = symbol, account = id }) : Results.NotFound();
+});
+
 app.MapGet("/api/accounts/{id}/swaps", (string id, string? symbols) =>
 {
     var syms = (symbols ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries);
@@ -251,6 +260,13 @@ public class AccountStore
 
     public object? GetQuote(string id, string symbol) =>
         _accounts.TryGetValue(id, out var a) ? a.GetQuote(symbol) : null;
+
+    public bool Subscribe(string id, string symbol)
+    {
+        if (!_accounts.TryGetValue(id, out var a)) return false;
+        a.SubscribeSymbol(symbol);
+        return true;
+    }
 
     public object? GetSwapRates(string id, string[] symbols) =>
         _accounts.TryGetValue(id, out var a) ? a.GetSwapRates(symbols) : null;
@@ -1180,6 +1196,24 @@ public class MtAccount
             return null;
         }
         return new { bid = q.Bid, ask = q.Ask, spread = q.Spread, symbol = string.IsNullOrEmpty(q.Symbol) ? symbol : q.Symbol };
+    }
+
+    // Subscribe to a symbol so the broker starts streaming ticks for it.
+    // Called by Python's subscribe_symbol() for all active strategy pairs.
+    public void SubscribeSymbol(string symbol)
+    {
+        if (!_connected || string.IsNullOrWhiteSpace(symbol)) return;
+        try
+        {
+            if (IsMt5)
+                _mt5?.Subscribe(symbol);
+            else
+                _mt4?.Subscribe(new[] { symbol });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("[{Id}] SubscribeSymbol({Symbol}) error: {Err}", Config.Id, symbol, ex.Message);
+        }
     }
 
     public object? GetQuote(string symbol)
