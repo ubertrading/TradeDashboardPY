@@ -105,18 +105,74 @@ class IForexAccount:
         """Stop background polling."""
         self._running = False
 
+    def fetch_quote_live(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """Actively fetch live bid/ask from iFOREX WebPL4 for symbol."""
+        sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+        inst_id = INSTRUMENT_MAP.get(sym_clean)
+        if not inst_id:
+            return None
+
+        # 1. Primary: FeedsHistory/GetTicks (real live ticks: rateType 1 = Bid, rateType 0 = Ask)
+        url_ticks = f"{self.base_url}/FeedsHistory/GetTicks"
+        try:
+            r_bid = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 1}, timeout=5)
+            r_ask = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 0}, timeout=5)
+            if r_bid.status_code == 200 and r_ask.status_code == 200:
+                self.connected = True
+                b_ticks = r_bid.json().get("Ticks", [])
+                a_ticks = r_ask.json().get("Ticks", [])
+                if b_ticks and a_ticks:
+                    bid = float(b_ticks[-1][1])
+                    ask = float(a_ticks[-1][1])
+                    if bid > 0 and ask > 0:
+                        with self._lock:
+                            self._quotes_cache[sym_clean] = {"bid": bid, "ask": ask, "ts": time.time()}
+                        return (bid, ask)
+            elif r_bid.status_code == 401 or r_ask.status_code == 401:
+                self.connected = False
+                logger.warning("[%s] iFOREX session expired (401 Unauthorized) — please update Cookie in Account Edit", self.account_id)
+                return None
+        except Exception as e:
+            logger.debug("[%s] FeedsHistory/GetTicks error for %s: %s", self.account_id, symbol, e)
+
+        # 2. Fallback to GetDealMarginDetails
+        url_margin = f"{self.base_url}/Deals/GetDealMarginDetails"
+        try:
+            resp = self.session.get(url_margin, params={"instrumentId": inst_id}, timeout=8)
+            if resp.status_code == 200:
+                self.connected = True
+                try:
+                    data = resp.json()
+                    res = data.get("Result", {}) or data
+                    rate = float(res.get("SpotRate") or res.get("Rate") or res.get("MarketRate") or 0.0)
+                    if rate > 0:
+                        spread = 0.00015 if "JPY" not in sym_clean and "GOLD" not in sym_clean else (0.015 if "JPY" in sym_clean else 0.3)
+                        bid = round(rate - spread / 2, 5)
+                        ask = round(rate + spread / 2, 5)
+                        with self._lock:
+                            self._quotes_cache[sym_clean] = {"bid": bid, "ask": ask, "ts": time.time()}
+                        return (bid, ask)
+                except Exception:
+                    pass
+            elif resp.status_code == 401:
+                self.connected = False
+        except Exception:
+            pass
+
+        return None
+
     def get_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
-        """Return (bid, ask) for symbol."""
-        sym_clean = symbol.upper().replace("/", "")
+        """Return (bid, ask) for symbol from cache or live fetch."""
+        sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
         with self._lock:
             q = self._quotes_cache.get(sym_clean)
-            if q:
+            if q and (time.time() - q.get("ts", 0)) < 3.0:
                 return (q["bid"], q["ask"])
-        return None
+        return self.fetch_quote_live(symbol)
 
     def get_deal_margin_details(self, symbol_or_id: Any) -> Optional[Dict[str, Any]]:
         """Query margin requirements for an instrument."""
-        inst_id = INSTRUMENT_MAP.get(str(symbol_or_id).upper().replace("/", ""), symbol_or_id)
+        inst_id = INSTRUMENT_MAP.get(str(symbol_or_id).upper().replace("/", "").replace(" ", ""), symbol_or_id)
         url = f"{self.base_url}/Deals/GetDealMarginDetails"
         try:
             resp = self.session.get(url, params={"instrumentId": inst_id}, timeout=10)

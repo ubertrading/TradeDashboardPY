@@ -210,6 +210,15 @@ def ensure_bridge_running():
 
     # Wait for it to become ready
     for i in range(15):
+        if _bridge_process.poll() is not None:
+            try:
+                stdout, _ = _bridge_process.communicate(timeout=2)
+                msg = stdout.decode("utf-8", errors="replace").strip() if stdout else "process exited"
+            except Exception:
+                msg = "process exited"
+            logger.error("MtBridgeService exited immediately (code %s): %s", _bridge_process.returncode, msg)
+            _bridge_process = None
+            return False
         time.sleep(1)
         try:
             result = _get("/api/status", timeout=2)

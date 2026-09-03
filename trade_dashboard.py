@@ -9951,9 +9951,10 @@ def api_status():
                 # For MT Direct accounts, always show whatever quote data is available
                 # (the command loop's subscribe_symbol already ensures the right data is pushed)
                 conn_type = ai.get("conn_type", "")
-                is_direct = conn_type in ("mt4_direct", "mt5_direct", "fix", "openapi") or (
+                is_direct = conn_type in ("mt4_direct", "mt5_direct", "fix", "openapi", "iforex_direct") or (
                     mt_direct_manager and acc in mt_direct_manager.accounts) or (
-                    fix_manager and acc in fix_manager.accounts)
+                    fix_manager and acc in fix_manager.accounts) or (
+                    'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts)
                 if is_direct:
                     # ALWAYS query the correct instrument's quote directly
                     # (ea_account_info only caches ONE symbol — unreliable for multi-instrument)
@@ -9962,17 +9963,32 @@ def api_status():
                         direct_acct = mt_direct_manager.accounts.get(acc)
                     elif fix_manager and acc in fix_manager.accounts:
                         direct_acct = fix_manager.accounts.get(acc)
+                    elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
+                        direct_acct = iforex_manager.accounts.get(acc)
                     got_direct = False
                     if direct_acct and side_pair:
-                        try:
-                            sym_quote = direct_acct.get_symbol_info(side_pair)
-                            if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
-                                sc[f"curr_spread_{sn}"] = sym_quote.get("spread")
-                                sc[f"curr_bid_{sn}"] = sym_quote.get("bid")
-                                sc[f"curr_ask_{sn}"] = sym_quote.get("ask")
-                                got_direct = True
-                        except Exception:
-                            pass
+                        if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
+                            try:
+                                q = direct_acct.get_quote(side_pair)
+                                if q:
+                                    q_bid, q_ask = q[0], q[1]
+                                    sc[f"curr_bid_{sn}"] = q_bid
+                                    sc[f"curr_ask_{sn}"] = q_ask
+                                    mult = 100 if "JPY" in side_pair.upper() else 10000
+                                    sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
+                                    got_direct = True
+                            except Exception:
+                                pass
+                        if not got_direct:
+                            try:
+                                sym_quote = direct_acct.get_symbol_info(side_pair)
+                                if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
+                                    sc[f"curr_spread_{sn}"] = sym_quote.get("spread")
+                                    sc[f"curr_bid_{sn}"] = sym_quote.get("bid")
+                                    sc[f"curr_ask_{sn}"] = sym_quote.get("ask")
+                                    got_direct = True
+                            except Exception:
+                                pass
                         # Fallback: try direct CLR GetQuote
                         if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
                             try:
@@ -19537,7 +19553,8 @@ function _nopEqCell(ratioStr) {
   </td>`;
 }
 
-function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta) {
+function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta, iforexAccounts) {
+  iforexAccounts = iforexAccounts || (typeof iforex_accounts_cache !== 'undefined' ? iforex_accounts_cache : {});
 
   window._hideHiddenAccounts = document.getElementById('hideHiddenAccountsToggle') ? document.getElementById('hideHiddenAccountsToggle').checked : true;
   const filterInputEl = document.getElementById('accountNameFilterInput');
@@ -22987,6 +23004,15 @@ if __name__ == '__main__':
         _mt_direct_dashboard_data["report_trade_result"] = _mt_direct_report_result
         _mt_direct_dashboard_data["save_sessions"] = _save_sessions
         mt_direct_manager.start()
+        if USE_MT_BRIDGE and not mt_direct_manager.accounts:
+            app.logger.warning("MtBridgeService has no active accounts — falling back to pythonnet in-process MT Direct connector")
+            try:
+                from mt_direct_connector import MTDirectManager as PythonnetManager
+                mt_direct_manager = PythonnetManager(_mt_direct_dashboard_data, config_dir=TRADE_CONFIG_DIR)
+                mt_direct_manager.start()
+                app.logger.info("pythonnet MT Direct Manager started with %d accounts", len(mt_direct_manager.accounts))
+            except Exception as ex:
+                app.logger.error("pythonnet fallback failed: %s", ex)
         app.logger.info("MT Direct Account Manager started")
 
     # Start universal hedge monitor (works for EA poll, MT Direct, FIX — all account types)

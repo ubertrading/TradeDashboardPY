@@ -1,4 +1,5 @@
 {
+  "ea_poll_enabled": true,
   "email": {
     "enabled": false,
     "from_addr": "newstrade.alerts2@gmail.com",
@@ -20,7 +21,10 @@
     "DEMO-CT-OPENAPI-9040256": 80.0
   },
   "position_change_alert": true,
-  "rebalance_close_delay": 0.0,
+  "position_change_closed": true,
+  "position_change_opened": false,
+  "prompt_on_rollbacks": false,
+  "rebalance_close_delay": 1.0,
   "stats_log_accounts": [
     "52769010"
   ],

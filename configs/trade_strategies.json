@@ -1,5 +1,29 @@
 {
   "manual_accounts": {
+    "DEMO-CT-FIX-HDBCH2-9040256": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "DEMO-CT-FIX-HDBCH2-9040257": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "DEMO-CT-OPENAPI-HDBCH2-9040256": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "DEMO-CT-OPENAPI-HDBCH2-9040257": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
     "DEMO-MT4-1218954455": {
       "balance": null,
       "conn_type": "poll",
@@ -7,12 +31,13 @@
       "group_label": ""
     },
     "DEMO-MT5-52769010": {
+      "alert_telegram": "DEMO2uotdK",
       "balance": null,
       "conn_type": "poll",
       "equity": null,
       "group_label": ""
     },
-    "HU-1-B-ICM11271572": {
+    "DUKA-DEMO-DEMO2uotdK": {
       "balance": null,
       "conn_type": "poll",
       "equity": null,
@@ -20,6 +45,18 @@
     }
   },
   "strategies": {
+    "18b8765a-c716-4e7c-8933-f2ff92aae041": {
+      "account1": "12141021",
+      "account2": "DEMO-MT5-52769010",
+      "created_at": "2026-09-02 21:11:47",
+      "enabled": true,
+      "id": "18b8765a-c716-4e7c-8933-f2ff92aae041",
+      "name": "IFOREX",
+      "running": true,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
     "3e569fe6-607a-4b79-9f17-6d7dc1c72e80": {
       "account1": "DEMO-MT4-1218954455",
       "account2": "DUKA-DEMO-DEMO2uotdK",
@@ -27,7 +64,7 @@
       "enabled": true,
       "id": "3e569fe6-607a-4b79-9f17-6d7dc1c72e80",
       "name": "DUKA",
-      "running": false,
+      "running": true,
       "trade_alerts": false,
       "trade_start_time": "18:00",
       "trade_stop_time": "16:30"
@@ -42,7 +79,7 @@
       "running": true,
       "trade_alerts": false,
       "trade_start_time": "18:00",
-      "trade_stop_time": "16:59"
+      "trade_stop_time": "16:30"
     },
     "5cba9996-fb53-4fd2-9fa0-46244b34c1ff": {
       "account1": "DEMO-CT-OPENAPI-HDBCH2-9040256",
@@ -51,6 +88,18 @@
       "enabled": true,
       "id": "5cba9996-fb53-4fd2-9fa0-46244b34c1ff",
       "name": "CT-TEST",
+      "running": false,
+      "trade_alerts": false,
+      "trade_start_time": "18:00",
+      "trade_stop_time": "16:30"
+    },
+    "f434e2ab-ae71-40c8-8e58-1ab2ffed63fc": {
+      "account1": "73201770",
+      "account2": "2110248",
+      "created_at": "2026-06-19 11:07:21",
+      "enabled": true,
+      "id": "f434e2ab-ae71-40c8-8e58-1ab2ffed63fc",
+      "name": "GOMARKETS",
       "running": false,
       "trade_alerts": false,
       "trade_start_time": "18:00",
