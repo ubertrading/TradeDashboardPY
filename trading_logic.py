@@ -86,6 +86,7 @@ def _calc_curr_diff(session, direction):
     """
     ea_account_info = _ctx["ea_account_info"]
     mt_direct_manager = _ctx.get("mt_direct_manager")
+    iforex_manager = _ctx.get("iforex_manager")
 
     sides = session.get("sides", {})
     accounts = list(sides.keys())
@@ -111,8 +112,8 @@ def _calc_curr_diff(session, direction):
     ea_sym2 = (info2.get("symbol") or "").upper()
     conn1 = info1.get("conn_type", "")
     conn2 = info2.get("conn_type", "")
-    is_direct1 = conn1 in ("mt4_direct", "mt5_direct")
-    is_direct2 = conn2 in ("mt4_direct", "mt5_direct")
+    is_direct1 = conn1 in ("mt4_direct", "mt5_direct", "iforex_direct")
+    is_direct2 = conn2 in ("mt4_direct", "mt5_direct", "iforex_direct")
     sym1_ok = not ea_sym1 or not pair1 or ea_sym1.startswith(pair1) or pair1.startswith(ea_sym1)
     sym2_ok = not ea_sym2 or not pair2 or ea_sym2.startswith(pair2) or pair2.startswith(ea_sym2)
 
@@ -127,7 +128,7 @@ def _calc_curr_diff(session, direction):
             (acc1, pair1, is_direct1, sym1_ok),
             (acc2, pair2, is_direct2, sym2_ok)
         ]):
-            if not is_dir:
+            if not is_dir or (conn1 == "iforex_direct" if i == 0 else conn2 == "iforex_direct"):
                 continue
             direct_acct = mt_direct_manager.accounts.get(acc)
             if direct_acct and direct_acct.connected:
@@ -143,6 +144,26 @@ def _calc_curr_diff(session, direction):
                 except Exception:
                     if not s_ok:
                         return (None, f"S{i+1}: fetching {pair_i}")
+
+    # For iFOREX Direct accounts, get quotes from iforex_manager
+    if iforex_manager:
+        for i, (acc, pair_i, s_ok) in enumerate([
+            (acc1, pair1, sym1_ok),
+            (acc2, pair2, sym2_ok)
+        ]):
+            conn_i = conn1 if i == 0 else conn2
+            if conn_i != "iforex_direct":
+                continue
+            iforex_acct = iforex_manager.accounts.get(acc)
+            if iforex_acct and iforex_acct.connected:
+                q = iforex_acct.get_quote(pair_i)
+                if q:
+                    if i == 0:
+                        bid1, ask1 = q[0], q[1]
+                    else:
+                        bid2, ask2 = q[0], q[1]
+                elif not s_ok:
+                    return (None, f"S{i+1}: fetching {pair_i}")
 
     # Original symbol checks for EA-polled accounts
     if not is_direct1 and not sym1_ok:

@@ -252,6 +252,10 @@ def get_account_label(acct_id: str) -> str:
         acct = mt_direct_manager.accounts.get(acct_id)
         if acct and acct.config.get("label") and acct.config["label"] != acct_id:
             return acct.config["label"]
+    if 'iforex_manager' in globals() and iforex_manager:
+        acct = iforex_manager.accounts.get(acct_id)
+        if acct and acct.config.get("label") and acct.config["label"] != acct_id:
+            return acct.config["label"]
     if fix_manager:
         acct = fix_manager.accounts.get(acct_id)
         if acct and acct.config.get("group_label"):
@@ -478,13 +482,16 @@ def _check_cycle_reminders():
     global cycle_reminders
     new_reminders = {}
 
-    # Collect accounts from both MT Direct and FIX managers
+    # Collect accounts from MT Direct, FIX, and iFOREX managers
     all_accounts = {}  # acct_id -> config dict
     if mt_direct_manager:
         for acct_id, acct in mt_direct_manager.accounts.items():
             all_accounts[acct_id] = acct.config
     if fix_manager:
         for acct_id, acct in fix_manager.accounts.items():
+            all_accounts[acct_id] = acct.config
+    if 'iforex_manager' in globals() and iforex_manager:
+        for acct_id, acct in iforex_manager.accounts.items():
             all_accounts[acct_id] = acct.config
 
     now_dt = datetime.now(NY_TZ)
@@ -627,13 +634,16 @@ def _trigger_auto_cycle(acct_id, label, days_held, max_days):
 def _friday_weekend_check():
     """On Friday start (after Thursday 5PM EST rollover), check if any positions
     can't survive the weekend without exceeding max_days using account day schedule."""
-    # Collect accounts from both MT Direct and FIX managers
+    # Collect accounts from MT Direct, FIX, and iFOREX managers
     all_accounts = {}
     if mt_direct_manager:
         for acct_id, acct in mt_direct_manager.accounts.items():
             all_accounts[acct_id] = acct.config
     if fix_manager:
         for acct_id, acct in fix_manager.accounts.items():
+            all_accounts[acct_id] = acct.config
+    if 'iforex_manager' in globals() and iforex_manager:
+        for acct_id, acct in iforex_manager.accounts.items():
             all_accounts[acct_id] = acct.config
     if not all_accounts:
         return
@@ -768,6 +778,12 @@ def _get_all_swap_values():
         # MT Direct accounts
         if 'mt_direct_manager' in globals() and mt_direct_manager:
             for aid, info in mt_direct_manager.get_status().items():
+                v = info.get("total_swap")
+                if v is not None:
+                    result[aid] = float(v)
+        # iFOREX Direct accounts
+        if 'iforex_manager' in globals() and iforex_manager:
+            for aid, info in iforex_manager.get_status().items():
                 v = info.get("total_swap")
                 if v is not None:
                     result[aid] = float(v)
@@ -1125,6 +1141,15 @@ def _is_account_connected(aid):
                     if st.get("connected") or (st.get("trade_connected") and st.get("quote_connected")):
                         return True
 
+        if 'iforex_manager' in globals() and iforex_manager:
+            if aid in iforex_manager.accounts:
+                acct = iforex_manager.accounts[aid]
+                if getattr(acct, "connected", False):
+                    return True
+                st = iforex_manager.get_status().get(aid, {})
+                if st.get("connected"):
+                    return True
+
         with lock:
             if aid in ea_account_info:
                 info = ea_account_info[aid]
@@ -1220,6 +1245,10 @@ def _is_account_swapfree(account_id):
                 if aid == account_id or c.get("group_label") == account_id or c.get("label") == account_id:
                     if c.get("swapfree"):
                         return True
+
+        if 'iforex_manager' in globals() and iforex_manager and account_id in iforex_manager.accounts:
+            if iforex_manager.accounts[account_id].config.get("swapfree"):
+                return True
     except Exception:
         pass
     return False
@@ -1243,6 +1272,8 @@ def _check_missing_swap_alerts():
         all_accounts.update(fix_manager.accounts.keys())
     if mt_direct_manager:
         all_accounts.update(mt_direct_manager.accounts.keys())
+    if 'iforex_manager' in globals() and iforex_manager:
+        all_accounts.update(iforex_manager.accounts.keys())
 
     non_swapfree_paid = {}
     non_swapfree_missing = []
@@ -1404,6 +1435,9 @@ def _optimal_fund_email_loop():
                     all_info_for_dist.setdefault(aid, {}).update(info)
             if 'mt_direct_manager' in globals() and mt_direct_manager:
                 for aid, info in mt_direct_manager.get_status().items():
+                    all_info_for_dist.setdefault(aid, {}).update(info)
+            if 'iforex_manager' in globals() and iforex_manager:
+                for aid, info in iforex_manager.get_status().items():
                     all_info_for_dist.setdefault(aid, {}).update(info)
                     
             distributions = _calculate_optimal_fund_distributions(all_info_for_dist)
@@ -1721,6 +1755,25 @@ try:
 except ImportError:
     mt_direct_manager = None
     app.logger.warning("MT Direct connector not available (bridge=%s) — MT Direct accounts disabled", USE_MT_BRIDGE)
+
+# ─── iFOREX Direct Account Manager ──────────────────────────────────────────
+try:
+    from iforex_connector import IForexAccountManager
+    _iforex_dashboard_data = {
+        "ea_heartbeats": ea_heartbeats,
+        "ea_account_info": ea_account_info,
+        "sessions": sessions,
+        "lock": lock,
+        "in_flight_commands": in_flight_commands,
+    }
+    iforex_manager = IForexAccountManager(
+        _iforex_dashboard_data,
+        config_dir=TRADE_CONFIG_DIR
+    )
+    app.logger.info("iFOREX Direct connector initialized")
+except Exception as e:
+    iforex_manager = None
+    app.logger.warning("iforex_connector not available — iFOREX accounts disabled: %s", e)
 
 # ─── Ticket normalization (MQL4 32-bit overflow fix) ────────────────────────
 def _normalize_ticket(t):
@@ -2383,6 +2436,8 @@ def _get_account_config(account_id):
         return mt_direct_manager.accounts[account_id].config
     if fix_manager and account_id in fix_manager.accounts:
         return fix_manager.accounts[account_id].config
+    if 'iforex_manager' in globals() and iforex_manager and account_id in iforex_manager.accounts:
+        return iforex_manager.accounts[account_id].config
     if account_id in manual_accounts:
         return manual_accounts[account_id]
     return None
@@ -7787,8 +7842,8 @@ def _calc_curr_diff(session, direction):
     info2 = ea_account_info.get(acc2) or {}
     conn1 = info1.get("conn_type", "")
     conn2 = info2.get("conn_type", "")
-    is_direct1 = conn1 in ("mt4_direct", "mt5_direct", "fix", "openapi") or (mt_direct_manager and acc1 in mt_direct_manager.accounts) or (fix_manager and acc1 in fix_manager.accounts)
-    is_direct2 = conn2 in ("mt4_direct", "mt5_direct", "fix", "openapi") or (mt_direct_manager and acc2 in mt_direct_manager.accounts) or (fix_manager and acc2 in fix_manager.accounts)
+    is_direct1 = conn1 in ("mt4_direct", "mt5_direct", "fix", "openapi", "iforex_direct") or (mt_direct_manager and acc1 in mt_direct_manager.accounts) or (fix_manager and acc1 in fix_manager.accounts) or ('iforex_manager' in globals() and iforex_manager and acc1 in iforex_manager.accounts)
+    is_direct2 = conn2 in ("mt4_direct", "mt5_direct", "fix", "openapi", "iforex_direct") or (mt_direct_manager and acc2 in mt_direct_manager.accounts) or (fix_manager and acc2 in fix_manager.accounts) or ('iforex_manager' in globals() and iforex_manager and acc2 in iforex_manager.accounts)
     is_fix1 = (fix_manager and acc1 in fix_manager.accounts)
     is_fix2 = (fix_manager and acc2 in fix_manager.accounts)
 
@@ -7813,13 +7868,25 @@ def _calc_curr_diff(session, direction):
         quote_src = "none"
 
         direct_acct = None
+        iforex_acct = None
         if mt_direct_manager and acc in mt_direct_manager.accounts:
             direct_acct = mt_direct_manager.accounts.get(acc)
         elif fix_manager and acc in fix_manager.accounts:
             direct_acct = fix_manager.accounts.get(acc)
+        elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
+            iforex_acct = iforex_manager.accounts.get(acc)
+
+        # 0. iFOREX Direct quote lookup
+        if iforex_acct and pair_i:
+            q = iforex_acct.get_quote(pair_i)
+            if q:
+                q_bid, q_ask = q[0], q[1]
+                got_quote = True
+                quote_src = "iforex_direct"
+                _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
 
         # 1. Direct quote lookup
-        if direct_acct and pair_i:
+        if not got_quote and direct_acct and pair_i:
             try:
                 if hasattr(direct_acct, 'get_symbol_info'):
                     sym_info = direct_acct.get_symbol_info(pair_i)
@@ -9961,6 +10028,7 @@ def api_status():
 
         fix_accts = fix_manager.get_status() if fix_manager else {}
         mt_accts = mt_direct_manager.get_status() if mt_direct_manager else {}
+        iforex_accts = iforex_manager.get_status() if ('iforex_manager' in globals() and iforex_manager) else {}
 
         # Enrich account status with position age from cycle config + live positions
         def _enrich_age(accts, manager):
@@ -10025,6 +10093,8 @@ def api_status():
 
         _enrich_age(fix_accts, fix_manager)
         _enrich_age(mt_accts, mt_direct_manager)
+        if 'iforex_manager' in globals() and iforex_manager:
+            _enrich_age(iforex_accts, iforex_manager)
 
         # ── Margin alert check (runs on every status poll) ──────────────
         try:
@@ -10032,6 +10102,8 @@ def api_status():
             for aid, ainfo in fix_accts.items():
                 _all_acct_info[aid] = ainfo
             for aid, ainfo in mt_accts.items():
+                _all_acct_info[aid] = ainfo
+            for aid, ainfo in iforex_accts.items():
                 _all_acct_info[aid] = ainfo
             for aid, ainfo in ea_status.items():
                 if aid not in _all_acct_info:
@@ -10142,6 +10214,7 @@ def api_status():
             "strategies": list(strategies.values()),
             "fix_accounts": fix_accts,
             "mt_direct_accounts": mt_accts,
+            "iforex_accounts": iforex_accts,
             "cycle_reminders": cycle_reminders,
             "news_blackout": {"blocked": news_blocked, "event": news_reason},
             "margin_alert": margin_alert_data,
@@ -10921,6 +10994,88 @@ def update_mt_direct_account(account_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ─── iFOREX Accounts API ───────────────────────────────────────────────────
+
+@app.route('/api/iforex_accounts', methods=['GET'])
+def list_iforex_accounts():
+    """List all configured iFOREX direct accounts and their status."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    return jsonify(iforex_manager.get_status())
+
+@app.route('/api/iforex_accounts', methods=['POST'])
+def add_iforex_account():
+    """Add a new iFOREX account. JSON body = full config dict."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    try:
+        data = request.get_json(force=True)
+        account_id = str(data.get("account_id", "")).strip()
+        if not account_id:
+            return jsonify({"error": "account_id is required"}), 400
+        iforex_manager.add_account(account_id, data)
+        _log_event(None, account_id, "iforex_account_added",
+                   f"label={data.get('label')} acc_num={data.get('account_number')}")
+        return jsonify({"ok": True, "account_id": account_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/iforex_accounts/<account_id>', methods=['DELETE'])
+def remove_iforex_account(account_id):
+    """Remove an iFOREX account."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    ok = iforex_manager.remove_account(account_id)
+    if not ok:
+        return jsonify({"error": "Account not found"}), 404
+    with lock:
+        ea_account_info.pop(account_id, None)
+        ea_heartbeats.pop(account_id, None)
+    _log_event(None, account_id, "iforex_account_removed", "")
+    return jsonify({"ok": True})
+
+@app.route('/api/iforex_accounts/<account_id>/config', methods=['GET'])
+def get_iforex_account_config(account_id):
+    """Get config of an iFOREX account for editing."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    acct = iforex_manager.accounts.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    cfg = dict(acct.config)
+    cfg["account_id"] = account_id
+    return jsonify(cfg)
+
+@app.route('/api/iforex_accounts/<account_id>', methods=['PUT'])
+def update_iforex_account(account_id):
+    """Update an iFOREX account config."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    acct = iforex_manager.accounts.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    try:
+        data = request.get_json(force=True)
+        for key in ['label', 'group_label', 'account_number', 'cookie', 'security_token',
+                     'base_url', 'leverage', 'swapfree', 'stop_out_level',
+                     'alert_email', 'alert_telegram']:
+            if key in data:
+                acct.config[key] = data[key]
+        if "label" in data:
+            acct.label = data["label"]
+        if "cookie" in data and data["cookie"]:
+            acct.cookie = data["cookie"]
+            acct.session.headers["Cookie"] = data["cookie"]
+        if "security_token" in data and data["security_token"]:
+            acct.security_token = data["security_token"]
+        iforex_manager.save_config()
+        _log_event(None, account_id, "iforex_account_updated", "")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 
 # ─── cTrader Open API OAuth ────────────────────────────────────────────────
 
@@ -11970,6 +12125,7 @@ def pnl_request_create():
         try:
             fix_accts = fix_manager.get_status() if fix_manager else {}
             mt_accts = mt_direct_manager.get_status() if mt_direct_manager else {}
+            iforex_accts = iforex_manager.get_status() if ('iforex_manager' in globals() and iforex_manager) else {}
             for acc in acct_list:
                 bal = None
                 eq = None
@@ -11981,6 +12137,10 @@ def pnl_request_create():
                 elif acc in fix_accts:
                     bal = fix_accts[acc].get("balance")
                     eq = fix_accts[acc].get("equity")
+                # Check iforex status
+                elif acc in iforex_accts:
+                    bal = iforex_accts[acc].get("balance")
+                    eq = iforex_accts[acc].get("equity")
                 # Check ea_account_info
                 elif acc in ea_account_info:
                     bal = ea_account_info[acc].get("balance")
@@ -12000,6 +12160,8 @@ def pnl_request_create():
                             open_swap = mt_accts[acc].get("total_swap", 0.0)
                         elif acc in fix_accts:
                             open_swap = fix_accts[acc].get("total_swap", 0.0)
+                        elif acc in iforex_accts:
+                            open_swap = iforex_accts[acc].get("total_swap", 0.0)
                         elif acc in ea_account_info:
                             open_swap = ea_account_info[acc].get("total_swap", 0.0)
                         elif acc in manual_accounts:
@@ -12055,6 +12217,14 @@ def pnl_request_create():
                 fix_acct = fix_manager.accounts.get(acc)
                 if fix_acct and hasattr(fix_acct, 'get_deal_history') and getattr(fix_acct, 'connected', False):
                     server_side_accts.append((acc, fix_acct, "openapi"))
+
+        if 'iforex_manager' in globals() and iforex_manager:
+            for acc in acct_list:
+                if any(s[0] == acc for s in server_side_accts):
+                    continue
+                ifx_acct = iforex_manager.accounts.get(acc)
+                if ifx_acct and hasattr(ifx_acct, 'get_deal_history') and getattr(ifx_acct, 'connected', False):
+                    server_side_accts.append((acc, ifx_acct, "iforex_direct"))
 
         if server_side_accts:
             labels = [f"{aid}({src})" for aid, _, src in server_side_accts]
@@ -13184,6 +13354,7 @@ body {
         <button class="btn btn-primary" onclick="showAddAccountModal()" style="padding:6px 16px;font-size:0.8rem;">+ Add EA Account</button>
         <button class="btn" onclick="showAddFixAccountModal()" style="padding:6px 16px;font-size:0.8rem;background:var(--accent);color:white;">+ Add API Account</button>
         <button class="btn" onclick="showAddMTDirectModal()" style="padding:6px 16px;font-size:0.8rem;background:#6366f1;color:white;">+ Add MT Direct</button>
+        <button class="btn" onclick="showAddIForexModal()" style="padding:6px 16px;font-size:0.8rem;background:#f59e0b;color:white;">+ Add iFOREX</button>
       </div>
     </div>
     <div style="overflow-x:auto;">
@@ -14424,6 +14595,98 @@ body {
   </div>
 </div>
 
+<!-- Add iFOREX Account Modal -->
+<div class="modal-overlay" id="addIForexModal">
+  <div class="modal" style="max-width:550px;">
+    <h2>Add iFOREX Direct Account</h2>
+    <p style="font-size:0.75rem; color:var(--text2); margin-top:-4px; margin-bottom:12px;">
+      Direct HTTP connection to iFOREX WebPL4. Tracks live quotes, margin, positions and executes orders.
+    </p>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr;">
+      <div class="form-group">
+        <label>Account ID</label>
+        <input type="text" id="ifxAcctId" placeholder="e.g. IFOREX_01">
+      </div>
+      <div class="form-group">
+        <label>Account Number</label>
+        <input type="text" id="ifxAcctNumber" placeholder="e.g. 12279333">
+      </div>
+      <div class="form-group">
+        <label>Display / Group Label</label>
+        <input type="text" id="ifxLabel" placeholder="e.g. iFOREX-12279333">
+      </div>
+      <div class="form-group">
+        <label>Leverage</label>
+        <input type="number" id="ifxLeverage" value="400" placeholder="e.g. 400">
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Security Token <span style="font-size:0.7rem;color:var(--text2);">(from browser console: <code>window.systemInfo.securityToken</code>)</span></label>
+        <input type="text" id="ifxSecurityToken" placeholder="e.g. 1054717647">
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(from browser F12 Network tab &rarr; Request Headers &rarr; Cookie)</span></label>
+        <textarea id="ifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;" placeholder="FXnetWeb_identity=...; .AspNetCore.Session=...; TS01d34e12=..."></textarea>
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Base URL</label>
+        <input type="text" id="ifxBaseUrl" value="https://trader.iforex.com/webpl4">
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ifxSwapFree"> Swap Free</label>
+    </div>
+    <div class="btn-group" style="margin-top:16px;">
+      <button class="btn btn-primary" onclick="addIForexAccount()">Add Account</button>
+      <button class="btn btn-danger" onclick="closeAddIForexModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit iFOREX Account Modal -->
+<div class="modal-overlay" id="editIForexModal">
+  <div class="modal" style="max-width:550px;">
+    <h2>Edit iFOREX Account</h2>
+    <input type="hidden" id="eifxAcctId">
+    <div class="form-grid" style="grid-template-columns:1fr 1fr;">
+      <div class="form-group">
+        <label>Account Number</label>
+        <input type="text" id="eifxAcctNumber">
+      </div>
+      <div class="form-group">
+        <label>Display / Group Label</label>
+        <input type="text" id="eifxLabel">
+      </div>
+      <div class="form-group">
+        <label>Leverage</label>
+        <input type="number" id="eifxLeverage">
+      </div>
+      <div class="form-group">
+        <label>Stop Out Level (%)</label>
+        <input type="number" id="eifxStopOutLevel" placeholder="e.g. 0">
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Security Token <span style="font-size:0.7rem;color:var(--text2);">(from browser console: <code>window.systemInfo.securityToken</code>)</span></label>
+        <input type="text" id="eifxSecurityToken">
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(paste fresh Cookie header when session expires)</span></label>
+        <textarea id="eifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;"></textarea>
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <label>Base URL</label>
+        <input type="text" id="eifxBaseUrl">
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="eifxSwapFree"> Swap Free</label>
+    </div>
+    <div class="btn-group" style="margin-top:16px;">
+      <button class="btn btn-primary" onclick="saveIForexEdit()">Save Changes</button>
+      <button class="btn btn-danger" onclick="closeEditIForexModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit FIX Account Modal -->
 <div class="modal-overlay" id="editFixAccountModal">
   <div class="modal" style="max-width:600px; position:relative;">
@@ -15156,12 +15419,13 @@ let ea_heartbeats_cache = {};
 let manual_accounts_cache = {};
 let fix_accounts_cache = {};
 let mt_direct_accounts_cache = {};
+let iforex_accounts_cache = {};
 let swap_delta_cache = {};
 let currentStrategyId = null;
 
 /**
  * Resolve an account key to its user-editable display label.
- * Checks MT Direct (label), FIX (group_label), manual accounts (group_label),
+ * Checks MT Direct (label), iFOREX (label/group_label), FIX (group_label), manual accounts (group_label),
  * and EA heartbeats (label) in that priority order.
  * Falls back to the raw key when no label is set.
  */
@@ -15170,6 +15434,11 @@ function getAccountLabel(key) {
   // MT Direct accounts use a 'label' field
   const mtInfo = mt_direct_accounts_cache[key];
   if (mtInfo && mtInfo.label && mtInfo.label !== key) return mtInfo.label;
+  // iFOREX direct accounts use 'label' or 'group_label'
+  const ifxInfo = iforex_accounts_cache[key];
+  if (ifxInfo && (ifxInfo.label || ifxInfo.group_label)) {
+    return ifxInfo.label || ifxInfo.group_label;
+  }
   // FIX & manual accounts use 'group_label'
   const fixInfo = fix_accounts_cache[key];
   if (fixInfo && fixInfo.group_label) return fixInfo.group_label;
@@ -16544,6 +16813,7 @@ function _buildAcctItems() {
   Object.keys(manual_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
   Object.keys(fix_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
   Object.keys(mt_direct_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
+  Object.keys(iforex_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
   allAccounts.sort();
   return allAccounts.map(a => {
     let lbl = '';
@@ -16553,6 +16823,8 @@ function _buildAcctItems() {
       lbl = fix_accounts_cache[a].group_label;
     } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
       lbl = mt_direct_accounts_cache[a].label;
+    } else if (typeof iforex_accounts_cache !== 'undefined' && iforex_accounts_cache[a] && iforex_accounts_cache[a].label) {
+      lbl = iforex_accounts_cache[a].label;
     }
     return { value: a, label: lbl ? a + ' \u2014 ' + lbl : a };
   });
@@ -17693,7 +17965,7 @@ function renderEvents(events) {
   }).join('');
 }
 
-function renderEAIndicators(heartbeats, fixAccounts, mtDirectAccounts) {
+function renderEAIndicators(heartbeats, fixAccounts, mtDirectAccounts, iforexAccounts) {
   const el = document.getElementById('eaIndicators');
   const items = [];
   const seen = new Set();
@@ -17703,6 +17975,14 @@ function renderEAIndicators(heartbeats, fixAccounts, mtDirectAccounts) {
       const displayName = info.label || id;
       seen.add(id);
       items.push({ name: displayName, online: !!info.connected });
+    });
+  }
+  // iFOREX Direct accounts
+  if (iforexAccounts) {
+    Object.entries(iforexAccounts).forEach(([id, info]) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      items.push({ name: info.label || id, online: !!info.connected });
     });
   }
   // FIX accounts
@@ -19085,6 +19365,7 @@ async function refreshData() {
     manual_accounts_cache = data.manual_accounts || {};
     fix_accounts_cache = data.fix_accounts || {};
     mt_direct_accounts_cache = data.mt_direct_accounts || {};
+    iforex_accounts_cache = data.iforex_accounts || {};
     swap_delta_cache = data.swap_delta || {};
     window._newsBlackout = data.news_blackout || {};
     window._marginAlertData = data.margin_alert || {global_threshold: 85, per_account: {}};
@@ -19124,9 +19405,9 @@ async function refreshData() {
     if (eventsTab && eventsTab.classList.contains('active')) {
       renderEvents(window._latestEventLog);
     }
-    renderEAIndicators(ea_heartbeats_cache, fix_accounts_cache, mt_direct_accounts_cache);
+    renderEAIndicators(ea_heartbeats_cache, fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache);
     if (accountsTab && accountsTab.classList.contains('active')) {
-      renderAccounts(ea_heartbeats_cache, manual_accounts_cache, fix_accounts_cache, mt_direct_accounts_cache, window._latestCycleReminders, swap_delta_cache);
+      renderAccounts(ea_heartbeats_cache, manual_accounts_cache, fix_accounts_cache, mt_direct_accounts_cache, window._latestCycleReminders, swap_delta_cache, iforex_accounts_cache);
       applyAcctColVisibility();
       // Re-attach drag handles after every data refresh
       const _at = document.getElementById('accountsTable');
@@ -19263,7 +19544,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   const nameFilter = (filterInputEl ? filterInputEl.value : (window._accountNameFilter || '')).trim().toLowerCase();
   window._accountNameFilter = filterInputEl ? filterInputEl.value : (window._accountNameFilter || '');
   // Stash args for re-render from toggleGroupView
-  window._lastRenderAccountsArgs = [heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta];
+  window._lastRenderAccountsArgs = [heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta, iforexAccounts];
   const tbody = document.getElementById('accountsBody');
   // Skip re-render if user is editing a field inside the accounts table
   if (tbody.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
@@ -19273,7 +19554,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 
   // ── Grouped view ─────────────────────────────────────────────────
   if (_groupViewEnabled) {
-    _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta);
+    _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta, iforexAccounts);
     return;
   }
 
@@ -19533,6 +19814,80 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     });
   }
 
+  // iFOREX Direct accounts
+  if (iforexAccounts) {
+    Object.entries(iforexAccounts).forEach(([id, info]) => {
+      const isHidden = manualAccounts ? (manualAccounts[id]?.is_hidden === true) : false;
+      if (window._hideHiddenAccounts && isHidden) return;
+      const displayName = info.label || id;
+      if (nameFilter && !id.toLowerCase().includes(nameFilter) && !displayName.toLowerCase().includes(nameFilter)) return;
+      shownAccounts.add(id);
+      const isConn = info.connected;
+      const ifxColor = isConn ? 'var(--green)' : '#f59e0b';
+      const connText = isConn ? 'iFOREX Connected' : 'iFOREX Standby';
+      const connDot = `<span style="cursor:default;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ifxColor};box-shadow:0 0 6px ${ifxColor};margin-right:6px;"></span>iFOREX</span>`;
+      const eaInfo = heartbeats ? heartbeats[id] : null;
+      const rawBal = info.balance != null ? info.balance : (eaInfo && eaInfo.balance != null ? eaInfo.balance : null);
+      const rawEq = info.equity != null ? info.equity : (eaInfo && eaInfo.equity != null ? eaInfo.equity : null);
+      const bal = rawBal != null ? parseFloat(rawBal).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
+      const eq = rawEq != null ? parseFloat(rawEq).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
+      const lev = info.leverage ? ('1:' + info.leverage) : '1:400';
+      const rawMarginIfx = info.margin != null ? info.margin : (eaInfo && eaInfo.margin != null ? eaInfo.margin : null);
+      const muIfxVal = (rawEq > 0 && rawMarginIfx != null) ? (rawMarginIfx / rawEq) : null;
+      const muIfx = muIfxVal != null ? (muIfxVal * 100).toFixed(1) + '%' : '-';
+      const mlIfx = (rawMarginIfx > 0 && rawEq > 0) ? ((rawEq / rawMarginIfx) * 100).toFixed(1) + '%' : '-';
+      const fmIfx = rawMarginIfx != null ? (rawEq - rawMarginIfx) : 0;
+      const notionalIfx = info.total_lots != null ? Math.abs(parseFloat(info.total_lots)) * 100000 : 0;
+      const normNopEqIfx = notionalIfx > 0 ? (rawEq > 0 ? (notionalIfx / rawEq).toFixed(0) + 'x' : 'MAX') : '-';
+      const normMuIfx = notionalIfx > 0 ? (fmIfx > 0 ? (notionalIfx / fmIfx).toFixed(0) + 'x' : 'MAX') : '-';
+      const pnlIfx = info.total_pnl != null ? parseFloat(info.total_pnl).toFixed(2) : '-';
+      const pnlIfxStyle = info.total_pnl != null ? (info.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+      const swapIfx = info.total_swap != null ? parseFloat(info.total_swap).toFixed(2) : '-';
+      const posIfx = info.positions != null ? info.positions : '-';
+      const lotsIfx = info.total_lots != null ? info.total_lots : '-';
+      const lotsIfxStyle = info.total_lots != null ? (info.total_lots >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+
+      const distIfx = fundDists[id] || {};
+      const optEqIfx = distIfx.optimal_equity != null ? distIfx.optimal_equity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
+      const shiftIfx = distIfx.suggested_transfer != null ? distIfx.suggested_transfer.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
+      const shiftIfxColor = distIfx.suggested_transfer != null ? (distIfx.suggested_transfer >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+
+      rows.push(`<tr>
+        <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${id}', this.checked)" title="Hide this account"></td>
+        <td><a href="#" onclick="editIForexAccount('${id}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${displayName}</a></td>
+        <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${id}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+        <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
+        ${_nopEqCell(normNopEqIfx)}
+        ${_nopFmCell(normMuIfx)}
+        <td title="Gives proximity of margin call">${mlIfx}</td>
+        ${_pipsToMcCell(info)}
+        ${_ageCell(info, id)}
+        <td>${bal}</td>
+        <td>${eq}</td>
+        <td>${optEqIfx}</td>
+        <td style="${shiftIfxColor}">${shiftIfx}</td>
+        ${_intendedLotsCell(displayName, info.group_label)}
+        <td style="${pnlIfxStyle}">${pnlIfx}</td>
+        <td>${lev}</td>
+        <td>${posIfx}</td>
+        ${_lotsCell(id, lotsIfx, lotsIfxStyle)}
+        <td>${muIfx}</td>
+        ${_marginAlertCell(id, false)}
+        <td>${swapIfx}</td>
+        ${_swapDeltaCell(id)}
+        <td style="font-size:0.78rem">-</td>
+        <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
+        <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+        <td><input class="inl" style="width:120px;" value="${info.alert_telegram || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_telegram', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+        <td><input type="checkbox" ${(window._statsAccounts||[]).includes(id)?'checked':''} onchange="toggleStatsLog('${id}', this.checked)" title="Log market stats to CSV"></td>
+        <td>
+          <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="editIForexAccount('${id}')" title="Edit credentials">\u270e</button>
+          <button class="btn btn-danger" style="padding:2px 8px;font-size:0.72rem;" onclick="deleteIForexAccount('${id}')" title="Delete account">x</button>
+        </td>
+      </tr>`);
+    });
+  }
+
   // Manual accounts — merge with EA heartbeat data if available
   if (manualAccounts) {
     Object.entries(manualAccounts).forEach(([name, info]) => {
@@ -19732,9 +20087,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       if (dist.optimal_equity != null) { totOptEq += dist.optimal_equity; hasOptEq = true; }
       if (dist.suggested_transfer != null) { totShift += dist.suggested_transfer; hasShift = true; }
     }
-    // Add in render-order: FIX, MT Direct, Manual, EA-only
+    // Add in render-order: FIX, MT Direct, iFOREX, Manual, EA-only
     if (fixAccounts) Object.entries(fixAccounts).forEach(([id, info]) => _addAcct(id, info));
     if (mtDirectAccounts) Object.entries(mtDirectAccounts).forEach(([id, info]) => _addAcct(id, info));
+    if (iforexAccounts) Object.entries(iforexAccounts).forEach(([id, info]) => _addAcct(id, info));
     if (manualAccounts) Object.entries(manualAccounts).forEach(([id, info]) => _addAcct(id, info));
     if (heartbeats) Object.entries(heartbeats).forEach(([id, info]) => _addAcct(id, info));
     const fmtBal = hasBal ? totBal.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
@@ -19799,7 +20155,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 }
 
 // ─── Grouped Accounts View ──────────────────────────────────────────────
-function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta) {
+function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta, iforexAccounts) {
   cycleReminders = cycleReminders || {};
   swapDelta = swapDelta || {};
   const fundDists = window._fundDistributions || {};
@@ -19821,6 +20177,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
   }
   if (fixAccounts) Object.entries(fixAccounts).forEach(([id, info]) => _collectAcct(id, info, 'fix'));
   if (mtDirectAccounts) Object.entries(mtDirectAccounts).forEach(([id, info]) => _collectAcct(id, info, 'mt'));
+  if (iforexAccounts) Object.entries(iforexAccounts).forEach(([id, info]) => _collectAcct(id, info, 'iforex'));
   if (manualAccounts) Object.entries(manualAccounts).forEach(([id, info]) => {
     if (!seen.has(id)) _collectAcct(id, info, 'manual');
   });
@@ -21399,8 +21756,8 @@ document.addEventListener('keydown', function(e) {
 
 // Close modals on click outside
 ['editModal', 'newStrategyModal', 'editStrategyModal', 'newInstrumentModal', 
- 'addAccountModal', 'addFixAccountModal', 'addMTDirectModal', 'editEAAccountModal', 
- 'editMTDirectModal', 'editFixAccountModal', 'importPositionsModal'].forEach(function(id) {
+ 'addAccountModal', 'addFixAccountModal', 'addMTDirectModal', 'addIForexModal', 'editEAAccountModal', 
+ 'editMTDirectModal', 'editFixAccountModal', 'editIForexModal', 'importPositionsModal'].forEach(function(id) {
   const el = document.getElementById(id);
   if (el) {
     el.addEventListener('click', function(e) {
@@ -21414,6 +21771,116 @@ document.addEventListener('keydown', function(e) {
 // Register PWA service worker
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(function() {});
+}
+
+// ─── iFOREX Modal & Account Management ────────────────────────────────────
+function showAddIForexModal() {
+  document.getElementById('ifxAcctId').value = '';
+  document.getElementById('ifxAcctNumber').value = '';
+  document.getElementById('ifxLabel').value = '';
+  document.getElementById('ifxLeverage').value = '400';
+  document.getElementById('ifxSecurityToken').value = '';
+  document.getElementById('ifxCookie').value = '';
+  document.getElementById('ifxBaseUrl').value = 'https://trader.iforex.com/webpl4';
+  if (document.getElementById('ifxSwapFree')) document.getElementById('ifxSwapFree').checked = false;
+  document.getElementById('addIForexModal').classList.add('active');
+}
+
+function closeAddIForexModal() {
+  document.getElementById('addIForexModal').classList.remove('active');
+}
+
+async function addIForexAccount() {
+  const id = document.getElementById('ifxAcctId').value.trim();
+  if (!id) { alert('Account ID is required'); return; }
+  const cookie = document.getElementById('ifxCookie').value.trim();
+  if (!cookie) { alert('Cookie header is required'); return; }
+  const token = parseInt(document.getElementById('ifxSecurityToken').value.trim()) || 0;
+
+  const payload = {
+    account_id: id,
+    account_number: document.getElementById('ifxAcctNumber').value.trim() || id,
+    label: document.getElementById('ifxLabel').value.trim() || id,
+    group_label: document.getElementById('ifxLabel').value.trim() || id,
+    cookie: cookie,
+    security_token: token,
+    base_url: document.getElementById('ifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
+    leverage: parseInt(document.getElementById('ifxLeverage').value) || 400,
+    swapfree: document.getElementById('ifxSwapFree') ? document.getElementById('ifxSwapFree').checked : false,
+    enabled: true
+  };
+
+  try {
+    const res = await fetch('/api/iforex_accounts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+    closeAddIForexModal();
+    refreshData();
+  } catch(e) { alert('Failed to add iFOREX account: ' + e); }
+}
+
+async function editIForexAccount(id) {
+  try {
+    const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/config');
+    const cfg = await res.json();
+    if (cfg.error) { alert(cfg.error); return; }
+    document.getElementById('eifxAcctId').value = id;
+    document.getElementById('eifxAcctNumber').value = cfg.account_number || '';
+    document.getElementById('eifxLabel').value = cfg.label || '';
+    document.getElementById('eifxLeverage').value = cfg.leverage || 400;
+    document.getElementById('eifxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    document.getElementById('eifxSecurityToken').value = cfg.security_token || '';
+    document.getElementById('eifxCookie').value = cfg.cookie || '';
+    document.getElementById('eifxBaseUrl').value = cfg.base_url || 'https://trader.iforex.com/webpl4';
+    if (document.getElementById('eifxSwapFree')) {
+      document.getElementById('eifxSwapFree').checked = !!cfg.swapfree;
+    }
+    document.getElementById('editIForexModal').classList.add('active');
+  } catch(e) { alert('Failed to load iFOREX config: ' + e); }
+}
+
+function closeEditIForexModal() {
+  document.getElementById('editIForexModal').classList.remove('active');
+}
+
+async function saveIForexEdit() {
+  const id = document.getElementById('eifxAcctId').value;
+  const stopOut = document.getElementById('eifxStopOutLevel').value.trim();
+  const token = parseInt(document.getElementById('eifxSecurityToken').value.trim()) || 0;
+  const payload = {
+    account_number: document.getElementById('eifxAcctNumber').value.trim(),
+    label: document.getElementById('eifxLabel').value.trim(),
+    group_label: document.getElementById('eifxLabel').value.trim(),
+    leverage: parseInt(document.getElementById('eifxLeverage').value) || 400,
+    stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
+    security_token: token,
+    cookie: document.getElementById('eifxCookie').value.trim(),
+    base_url: document.getElementById('eifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
+    swapfree: document.getElementById('eifxSwapFree') ? document.getElementById('eifxSwapFree').checked : false
+  };
+  try {
+    const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id), {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+    closeEditIForexModal();
+    refreshData();
+  } catch(e) { alert('Failed to update iFOREX account: ' + e); }
+}
+
+async function deleteIForexAccount(id) {
+  if (!confirm('Delete iFOREX account ' + id + '?')) return;
+  try {
+    await fetch('/api/iforex_accounts/' + encodeURIComponent(id), {method: 'DELETE'});
+    refreshData();
+  } catch(e) { alert('Failed to delete: ' + e); }
 }
 // ── PnL Report Functions ──
 let _pnlCurrentName = '';
