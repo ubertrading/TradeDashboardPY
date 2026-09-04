@@ -1107,65 +1107,65 @@ def _is_account_connected(aid):
     if not aid:
         return False
     try:
+        acc_str = str(aid).strip()
+        label = get_account_label(aid)
+
         if mt_direct_manager:
-            if aid in mt_direct_manager.accounts:
-                acct = mt_direct_manager.accounts[aid]
-                if getattr(acct, "connected", False) or getattr(acct, "_connected", False):
-                    return True
-                st = mt_direct_manager.get_status().get(aid, {})
-                if st.get("connected"):
-                    return True
             for k, acct in mt_direct_manager.accounts.items():
                 c = acct.config
-                if c.get("label") == aid or str(c.get("login")) == str(aid):
-                    if getattr(acct, "connected", False) or getattr(acct, "_connected", False):
-                        return True
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or str(c.get("login") or "") in (aid, acc_str, label):
                     st = mt_direct_manager.get_status().get(k, {})
-                    if st.get("connected"):
+                    is_conn = (getattr(acct, "connected", False) or getattr(acct, "_connected", False) or bool(st.get("connected")))
+                    if is_conn:
                         return True
+                    else:
+                        return False
 
         if fix_manager:
-            if aid in fix_manager.accounts:
-                acct = fix_manager.accounts[aid]
-                if getattr(acct, "connected", False):
-                    return True
-                st = fix_manager.get_status().get(aid, {})
-                if st.get("connected") or (st.get("trade_connected") and st.get("quote_connected")):
-                    return True
             for k, acct in fix_manager.accounts.items():
                 c = acct.config
-                if c.get("group_label") == aid or c.get("label") == aid:
-                    if getattr(acct, "connected", False):
-                        return True
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or c.get("group_label") in (aid, acc_str, label) or c.get("external_account_id") in (aid, acc_str, label):
                     st = fix_manager.get_status().get(k, {})
-                    if st.get("connected") or (st.get("trade_connected") and st.get("quote_connected")):
+                    is_conn = (getattr(acct, "connected", False) or bool(st.get("connected")) or (bool(st.get("trade_connected")) and bool(st.get("quote_connected"))))
+                    if is_conn:
                         return True
+                    else:
+                        return False
 
         if 'iforex_manager' in globals() and iforex_manager:
-            if aid in iforex_manager.accounts:
-                acct = iforex_manager.accounts[aid]
-                if getattr(acct, "connected", False):
-                    return True
-                st = iforex_manager.get_status().get(aid, {})
-                if st.get("connected"):
-                    return True
+            for k, acct in iforex_manager.accounts.items():
+                c = acct.config
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or c.get("group_label") in (aid, acc_str, label):
+                    st = iforex_manager.get_status().get(k, {})
+                    is_conn = (getattr(acct, "connected", False) or bool(st.get("connected")))
+                    if is_conn:
+                        return True
+                    else:
+                        return False
 
         with lock:
-            if aid in ea_account_info:
-                info = ea_account_info[aid]
-                if info.get("online") or info.get("connected"):
-                    return True
-                ts_epoch = info.get("ts_epoch") or info.get("ts")
-                if ts_epoch:
-                    try:
-                        if time.time() - float(ts_epoch) < 120:
-                            return True
-                    except Exception:
-                        pass
-            if aid in manual_accounts:
-                info = manual_accounts[aid]
-                if info.get("online") or info.get("connected"):
-                    return True
+            # EA accounts check
+            for k, info in ea_account_info.items():
+                if k in (aid, acc_str, label) or info.get("label") in (aid, acc_str, label) or str(info.get("login") or "") in (aid, acc_str, label):
+                    is_online_flag = bool(info.get("online") or info.get("connected"))
+                    ts_epoch = info.get("ts_epoch") or info.get("ts")
+                    is_fresh = False
+                    if ts_epoch:
+                        try:
+                            is_fresh = (time.time() - float(ts_epoch) < 120)
+                        except Exception:
+                            pass
+                    if is_online_flag and is_fresh:
+                        return True
+                    else:
+                        return False
+
+            # Manual accounts check
+            for k, info in manual_accounts.items():
+                if k in (aid, acc_str, label) or info.get("label") in (aid, acc_str, label):
+                    if info.get("online") or info.get("connected"):
+                        return True
+
     except Exception as e:
         logger.error("[CONN-CHECK] Error checking connection for %s: %s", aid, e)
     return False
@@ -1176,42 +1176,70 @@ def _account_has_positions(aid):
     if not aid:
         return False
     try:
-        # MT Direct manager status
-        if mt_direct_manager and aid in mt_direct_manager.accounts:
-            st = mt_direct_manager.get_status().get(aid, {})
-            tot_lots = st.get("total_lots")
-            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
-                return True
-            pos = st.get("positions") or st.get("position_details")
-            if isinstance(pos, (list, dict)) and len(pos) > 0:
-                return True
+        acc_str = str(aid).strip()
+        label = get_account_label(aid)
 
-        # FIX manager status
-        if fix_manager and aid in fix_manager.accounts:
-            st = fix_manager.get_status().get(aid, {})
-            tot_lots = st.get("total_lots")
-            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
-                return True
-            pos = st.get("positions") or st.get("position_details")
-            if isinstance(pos, (list, dict)) and len(pos) > 0:
-                return True
+        if mt_direct_manager:
+            for k, acct in mt_direct_manager.accounts.items():
+                c = acct.config
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or str(c.get("login") or "") in (aid, acc_str, label):
+                    st = mt_direct_manager.get_status().get(k, {})
+                    tot_lots = st.get("total_lots")
+                    if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                        return True
+                    pos = st.get("positions") or st.get("position_details")
+                    if isinstance(pos, (list, dict)) and len(pos) > 0:
+                        return True
 
-        # EA account info / manual accounts
+        if fix_manager:
+            for k, acct in fix_manager.accounts.items():
+                c = acct.config
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or c.get("group_label") in (aid, acc_str, label) or c.get("external_account_id") in (aid, acc_str, label):
+                    st = fix_manager.get_status().get(k, {})
+                    tot_lots = st.get("total_lots")
+                    if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                        return True
+                    pos = st.get("positions") or st.get("position_details")
+                    if isinstance(pos, (list, dict)) and len(pos) > 0:
+                        return True
+
+        if 'iforex_manager' in globals() and iforex_manager:
+            for k, acct in iforex_manager.accounts.items():
+                c = acct.config
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or c.get("group_label") in (aid, acc_str, label):
+                    st = iforex_manager.get_status().get(k, {})
+                    tot_lots = st.get("total_lots")
+                    if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                        return True
+                    pos = st.get("positions") or st.get("position_details")
+                    if isinstance(pos, (list, dict)) and len(pos) > 0:
+                        return True
+
         with lock:
-            info = ea_account_info.get(aid, {})
-            tot_lots = info.get("total_lots")
-            if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
-                return True
-            pos = info.get("position_details") or info.get("positions")
-            if isinstance(pos, (list, dict)) and len(pos) > 0:
-                return True
-            open_tickets = info.get("open_tickets") or []
-            if len(open_tickets) > 0:
-                return True
-            lbi = info.get("lots_by_instrument", {})
-            for sym, vals in lbi.items():
-                if abs(float(vals.get("buy", 0))) > 0.0001 or abs(float(vals.get("sell", 0))) > 0.0001:
-                    return True
+            for k, info in ea_account_info.items():
+                if k in (aid, acc_str, label) or info.get("label") in (aid, acc_str, label) or str(info.get("login") or "") in (aid, acc_str, label):
+                    tot_lots = info.get("total_lots")
+                    if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                        return True
+                    pos = info.get("position_details") or info.get("positions")
+                    if isinstance(pos, (list, dict)) and len(pos) > 0:
+                        return True
+                    open_tickets = info.get("open_tickets") or []
+                    if len(open_tickets) > 0:
+                        return True
+                    lbi = info.get("lots_by_instrument", {})
+                    for sym, vals in lbi.items():
+                        if abs(float(vals.get("buy", 0))) > 0.0001 or abs(float(vals.get("sell", 0))) > 0.0001:
+                            return True
+
+            for k, info in manual_accounts.items():
+                if k in (aid, acc_str, label) or info.get("label") in (aid, acc_str, label):
+                    tot_lots = info.get("total_lots")
+                    if tot_lots is not None and abs(float(tot_lots)) > 0.0001:
+                        return True
+                    pos = info.get("position_details") or info.get("positions")
+                    if isinstance(pos, (list, dict)) and len(pos) > 0:
+                        return True
     except Exception as e:
         logger.error("[POS-CHECK] Error checking positions for %s: %s", aid, e)
     return False
@@ -1222,35 +1250,78 @@ def _is_account_swapfree(account_id):
     if not account_id:
         return False
     try:
+        acc_str = str(account_id).strip()
+
+        # 1. Flexible config check
         cfg = _get_account_config(account_id)
-        if cfg and cfg.get("swapfree"):
+        if cfg and (cfg.get("swapfree") or cfg.get("swap_free") or cfg.get("is_swapfree")):
             return True
 
-        with lock:
-            if account_id in manual_accounts and manual_accounts[account_id].get("swapfree"):
-                return True
-            if account_id in ea_account_info and ea_account_info[account_id].get("swapfree"):
-                return True
+        # 2. Build set of alias strings for account_id
+        ids_to_check = {account_id, acc_str}
+        lbl = get_account_label(account_id)
+        if lbl:
+            ids_to_check.add(lbl)
 
         if mt_direct_manager:
             for aid, acct in mt_direct_manager.accounts.items():
                 c = acct.config
-                if aid == account_id or c.get("label") == account_id or str(c.get("login")) == str(account_id):
-                    if c.get("swapfree"):
+                c_lbl = c.get("label")
+                c_login = str(c.get("login") or "")
+                c_grp = c.get("group_label")
+                if account_id in (aid, c_lbl, c_login, c_grp) or acc_str in (aid, c_lbl, c_login, c_grp) or (lbl and lbl in (aid, c_lbl, c_login, c_grp)):
+                    if c.get("swapfree") or c.get("swap_free") or c.get("is_swapfree"):
                         return True
+                    ids_to_check.update({x for x in (aid, c_lbl, c_login, c_grp) if x})
 
         if fix_manager:
             for aid, acct in fix_manager.accounts.items():
                 c = acct.config
-                if aid == account_id or c.get("group_label") == account_id or c.get("label") == account_id:
-                    if c.get("swapfree"):
+                c_lbl = c.get("label")
+                c_grp = c.get("group_label")
+                c_ext = c.get("external_account_id")
+                if account_id in (aid, c_lbl, c_grp, c_ext) or (lbl and lbl in (aid, c_lbl, c_grp, c_ext)):
+                    if c.get("swapfree") or c.get("swap_free") or c.get("is_swapfree"):
+                        return True
+                    ids_to_check.update({x for x in (aid, c_lbl, c_grp, c_ext) if x})
+
+        if 'iforex_manager' in globals() and iforex_manager:
+            for aid, acct in iforex_manager.accounts.items():
+                c = acct.config
+                c_lbl = c.get("label")
+                c_grp = c.get("group_label")
+                if account_id in (aid, c_lbl, c_grp) or (lbl and lbl in (aid, c_lbl, c_grp)):
+                    if c.get("swapfree") or c.get("swap_free") or c.get("is_swapfree"):
+                        return True
+                    ids_to_check.update({x for x in (aid, c_lbl, c_grp) if x})
+
+        ids_to_check = {x for x in ids_to_check if x}
+
+        with lock:
+            # 3. Check manual_accounts
+            for i in ids_to_check:
+                if i in manual_accounts:
+                    m = manual_accounts[i]
+                    if m.get("swapfree") or m.get("swap_free") or m.get("is_swapfree"):
+                        return True
+            for man_k, man_v in manual_accounts.items():
+                if man_k in ids_to_check or man_v.get("group_label") in ids_to_check or man_v.get("label") in ids_to_check:
+                    if man_v.get("swapfree") or man_v.get("swap_free") or man_v.get("is_swapfree"):
                         return True
 
-        if 'iforex_manager' in globals() and iforex_manager and account_id in iforex_manager.accounts:
-            if iforex_manager.accounts[account_id].config.get("swapfree"):
-                return True
-    except Exception:
-        pass
+            # 4. Check ea_account_info
+            for i in ids_to_check:
+                if i in ea_account_info:
+                    info = ea_account_info[i]
+                    if info.get("swapfree") or info.get("swap_free") or info.get("is_swapfree"):
+                        return True
+            for ea_k, ea_v in ea_account_info.items():
+                if (ea_k in ids_to_check or ea_v.get("label") in ids_to_check or ea_v.get("group_label") in ids_to_check or str(ea_v.get("login") or "") in ids_to_check):
+                    if ea_v.get("swapfree") or ea_v.get("swap_free") or ea_v.get("is_swapfree"):
+                        return True
+
+    except Exception as e:
+        logger.error("[SWAPFREE-CHECK] Error checking swapfree for %s: %s", account_id, e)
     return False
 
 
@@ -1279,24 +1350,28 @@ def _check_missing_swap_alerts():
     non_swapfree_missing = []
 
     for aid in sorted(all_accounts):
-        # 1. Skip swapfree accounts
-        if _is_account_swapfree(aid):
-            logger.debug("[SWAP-MISSING-ALERT] Skipping %s (swapfree)", aid)
+        label = get_account_label(aid)
+
+        # 1. Skip swapfree accounts (checks aid, label, logins, and manager configs)
+        if _is_account_swapfree(aid) or _is_account_swapfree(label):
+            logger.info("[SWAP-MISSING-ALERT] Skipping %s (%s) (swapfree)", aid, label)
             continue
 
         # 2. Skip disconnected accounts
         if not _is_account_connected(aid):
-            logger.info("[SWAP-MISSING-ALERT] Skipping %s (disconnected/offline)", aid)
+            logger.info("[SWAP-MISSING-ALERT] Skipping %s (%s) (disconnected/offline)", aid, label)
             continue
 
         # 3. Skip accounts with no open positions
         if not _account_has_positions(aid):
-            logger.info("[SWAP-MISSING-ALERT] Skipping %s (no open positions / 0 lots)", aid)
+            logger.info("[SWAP-MISSING-ALERT] Skipping %s (%s) (no open positions / 0 lots)", aid, label)
             continue
 
         # 4. Check swap delta value
         delta_val = deltas.get(aid)
-        label = get_account_label(aid)
+        if delta_val is None and label != aid:
+            delta_val = deltas.get(label)
+
         if delta_val is not None and abs(delta_val) > 0.0001:
             non_swapfree_paid[label] = delta_val
         else:
@@ -1316,7 +1391,7 @@ def _check_missing_swap_alerts():
         subject = f"⚠️ Missing Swap Alert: {missing_str}"
         body = (
             f"Missing Swap Alert:\n\n"
-            f"The following active, connected non-swapfree account(s) with open positions received NO daily swap (Δ SWAP is blank/zero) after the 5:00 PM rollover:\n"
+            f"The following active, connected non-swapfree account(s) with open positions received NO daily swap (Î” SWAP is blank/zero) after the 5:00 PM rollover:\n"
             f"  - {missing_str}\n\n"
             f"Meanwhile, other non-swapfree account(s) DID receive swap:\n"
             f"  - {paid_str}\n\n"
@@ -1773,7 +1848,9 @@ try:
     app.logger.info("iFOREX Direct connector initialized")
 except Exception as e:
     iforex_manager = None
+    _iforex_dashboard_data = {}
     app.logger.warning("iforex_connector not available — iFOREX accounts disabled: %s", e)
+
 
 # ─── Ticket normalization (MQL4 32-bit overflow fix) ────────────────────────
 def _normalize_ticket(t):
@@ -2432,14 +2509,39 @@ from email.mime.text import MIMEText
 def _get_account_config(account_id):
     if not account_id:
         return None
-    if mt_direct_manager and account_id in mt_direct_manager.accounts:
-        return mt_direct_manager.accounts[account_id].config
-    if fix_manager and account_id in fix_manager.accounts:
-        return fix_manager.accounts[account_id].config
-    if 'iforex_manager' in globals() and iforex_manager and account_id in iforex_manager.accounts:
-        return iforex_manager.accounts[account_id].config
-    if account_id in manual_accounts:
-        return manual_accounts[account_id]
+    acc_str = str(account_id).strip()
+
+    if mt_direct_manager:
+        if account_id in mt_direct_manager.accounts:
+            return mt_direct_manager.accounts[account_id].config
+        for k, acct in mt_direct_manager.accounts.items():
+            c = acct.config
+            if k == account_id or c.get("label") == account_id or str(c.get("login") or "") == acc_str or c.get("group_label") == account_id:
+                return c
+
+    if fix_manager:
+        if account_id in fix_manager.accounts:
+            return fix_manager.accounts[account_id].config
+        for k, acct in fix_manager.accounts.items():
+            c = acct.config
+            if k == account_id or c.get("label") == account_id or c.get("group_label") == account_id or c.get("external_account_id") == account_id:
+                return c
+
+    if 'iforex_manager' in globals() and iforex_manager:
+        if account_id in iforex_manager.accounts:
+            return iforex_manager.accounts[account_id].config
+        for k, acct in iforex_manager.accounts.items():
+            c = acct.config
+            if k == account_id or c.get("label") == account_id or c.get("group_label") == account_id:
+                return c
+
+    with lock:
+        if account_id in manual_accounts:
+            return manual_accounts[account_id]
+        for k, info in manual_accounts.items():
+            if k == account_id or info.get("label") == account_id or info.get("group_label") == account_id:
+                return info
+
     return None
 
 def _send_email(subject, body, account_id=None):
@@ -5220,12 +5322,20 @@ def _run_hedge_monitor_all():
                                     and (max_netting or _normalize_ticket(f["ticket"]) in ea_open_tickets)
                                 ]
 
+                                candidate_missing = []
+                                min_info = ea_account_info.get(min_acc, {})
+                                min_netting = min_info.get("netting_mode", False)
+                                min_ea_open = set(_normalize_ticket(t) for t in min_info.get("open_tickets", []))
+                                min_close_set = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []) if f.get("account") == min_acc)
+                                candidate_missing = [
+                                    _normalize_ticket(f["ticket"]) for f in session.get("fills", [])
+                                    if f.get("account") == min_acc
+                                    and _normalize_ticket(f["ticket"]) not in min_close_set
+                                    and _normalize_ticket(f["ticket"]) not in min_ea_open
+                                ]
+
                                 match_mode = session.get("match_mode", "ticket")
                                 if match_mode == "ticket":
-                                    min_info = ea_account_info.get(min_acc, {})
-                                    min_netting = min_info.get("netting_mode", False)
-                                    min_ea_open = set(_normalize_ticket(t) for t in min_info.get("open_tickets", []))
-                                    min_close_set = set(_normalize_ticket(f["ticket"]) for f in session.get("close_fills", []) if f.get("account") == min_acc)
                                     min_open_fills = [
                                         f for f in session.get("fills", [])
                                         if f.get("account") == min_acc
@@ -5239,20 +5349,22 @@ def _run_hedge_monitor_all():
 
                                     # ── CLOSED DEAL HISTORY VERIFICATION ──
                                     # Verify that missing counterparty positions on min_acc are backed by confirmed closed deals on the broker
-                                    min_close_fills = [cf for cf in session.get("close_fills", []) if cf.get("account") == min_acc]
-                                    has_verified = any(cf.get("verified") for cf in min_close_fills)
-                                    if mt_direct_manager and not has_verified:
-                                        min_acct_obj = mt_direct_manager.accounts.get(min_acc)
+                                    has_verified = False
+                                    min_total_fills = len([f for f in session.get("fills", []) if f.get("account") == min_acc])
+                                    if min_total_fills == 0:
+                                        # min_acc NEVER opened any position in this session (e.g. order open failure / 403 error).
+                                        # There is no missing counterparty position to verify in deal history — position was never created.
+                                        has_verified = True
+                                    else:
+                                        min_acct_obj = None
+                                        if mt_direct_manager and min_acc in mt_direct_manager.accounts:
+                                            min_acct_obj = mt_direct_manager.accounts.get(min_acc)
+                                        elif fix_manager and min_acc in fix_manager.accounts:
+                                            min_acct_obj = fix_manager.accounts.get(min_acc)
+                                        elif 'iforex_manager' in globals() and iforex_manager and min_acc in iforex_manager.accounts:
+                                            min_acct_obj = iforex_manager.accounts.get(min_acc)
+
                                         if min_acct_obj and getattr(min_acct_obj, 'connected', False):
-                                            # Identify candidate missing tickets on min_acc
-                                            min_ea_open_norm = set(_normalize_ticket(t) for t in min_info.get("open_tickets", []))
-                                            min_close_set_norm = set(_normalize_ticket(f["ticket"]) for f in min_close_fills)
-                                            candidate_missing = [
-                                                _normalize_ticket(f["ticket"]) for f in session.get("fills", [])
-                                                if f.get("account") == min_acc
-                                                and _normalize_ticket(f["ticket"]) not in min_close_set_norm
-                                                and _normalize_ticket(f["ticket"]) not in min_ea_open_norm
-                                            ]
                                             if candidate_missing and hasattr(min_acct_obj, '_confirm_closed_tickets'):
                                                 try:
                                                     has_verified = min_acct_obj._confirm_closed_tickets(candidate_missing)
@@ -5273,12 +5385,10 @@ def _run_hedge_monitor_all():
                                                             has_verified = True
                                                 except Exception as _e:
                                                     print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
-                                    if not has_verified:
-                                        print(f"[HEDGE-REBAL] Suppressing rollback for {max_acc} — missing counterparty positions on {min_acc} are unverified in deal history (transient desync)")
-                                        tickets_to_close = []
                                 else:
                                     tickets_to_close = [_normalize_ticket(f["ticket"]) for f in open_session_fills[:excess]]
                                     print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
+                                    has_verified = False
                                     
                                 if tickets_to_close:
                                     # ── IMBALANCE PERSISTENCE DEBOUNCE (3-second buffer) ──
@@ -5304,11 +5414,44 @@ def _run_hedge_monitor_all():
                                     else:
                                         rb_tickets = session.setdefault("rollback_tickets", {})
                                         existing_tks = set(_normalize_ticket(t) for t in rb_tickets.get(max_acc, []))
-                                        unique_to_add = [t for t in tickets_to_close if _normalize_ticket(t) not in existing_tks]
+                                        already_pending_count = len(existing_tks)
+                                        needed_count = max(0, excess - already_pending_count)
+
+                                        candidate_to_add = [t for t in tickets_to_close if _normalize_ticket(t) not in existing_tks]
+                                        unique_to_add = candidate_to_add[:needed_count]
                                         if unique_to_add:
                                             rb_tickets.setdefault(max_acc, []).extend(unique_to_add)
                                             rb = session.setdefault("rollback_needed", {})
                                             rb[max_acc] = len(rb_tickets[max_acc])
+
+                                            # Immediately record the corresponding externally closed tickets on min_acc in close_fills!
+                                            # This is critical: without this, min_acc's external closes remain unrecorded in close_fills,
+                                            # which causes Path 2 (missing tickets detector) to re-detect them after this rollback finishes
+                                            # and fire a duplicate counterparty close!
+                                            for c_t in candidate_missing[:len(unique_to_add)]:
+                                                session.setdefault("close_fills", []).append({
+                                                    "account": min_acc,
+                                                    "ticket": c_t,
+                                                    "price": None,
+                                                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    "ts_epoch": now_ts,
+                                                    "external": True,
+                                                    "verified": True,
+                                                })
+                                                session.setdefault("closed", {})[min_acc] = session.get("closed", {}).get(min_acc, 0) + 1
+                                                fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
+                                                                  if f.get("account") == min_acc and _normalize_ticket(f.get("ticket")) == c_t), 0)
+                                                if fill_lots:
+                                                    _update_closed_lots(session, min_acc, fill_lots)
+                                                print(f"[HEDGE-REBAL] Recorded externally closed ticket {c_t} on {min_acc} in close_fills (rebalancing {max_acc})")
+
+                                            net_1_display = net_1 if max_acc == accs[0] else net_2
+                                            net_2_display = net_2 if max_acc == accs[0] else net_1
+                                            session.setdefault("rollback_reason", {})[max_acc] = (
+                                                f"Structural imbalance: net {net_1_display} vs {net_2_display}. "
+                                                f"Queuing {len(unique_to_add)} close(s) on {max_acc} to rebalance (excess={excess})"
+                                            )
+
                                         rebal_delay = dashboard_settings.get("rebalance_close_delay", 1)
                                         session["imbalance_rebal_ts"] = now_ts
 
@@ -5318,8 +5461,9 @@ def _run_hedge_monitor_all():
                                             print(f"[EMERGENCY-STOP] CATASTROPHIC ACCOUNT FLUSH DETECTED: {min_acc} has 0 positions! Queuing full rollback of {len(tickets_to_close)} position(s) on {max_acc}.")
                                             _log_event(sid, max_acc, "emergency_account_flush", f"CATASTROPHIC ACCOUNT FLUSH: {min_acc} has 0 open positions. Queuing full rollback of {len(tickets_to_close)} position(s) on {max_acc}.")
 
-                                        print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess (net open {net_1_display} vs {net_2_display}) — queuing {len(tickets_to_close)} close(s) on {max_acc} (delay={rebal_delay}s)")
-                                        _log_event(sid, max_acc, "hedge_rebalance", f"Structural imbalance: net {net_1_display} vs {net_2_display}. Queuing {len(tickets_to_close)} close(s) to rebalance (excess={excess})")
+                                        if unique_to_add:
+                                            print(f"[HEDGE-REBAL] IMBALANCE: {max_acc} has {excess} excess (net open {net_1_display} vs {net_2_display}) — queuing {len(unique_to_add)} close(s) on {max_acc} (delay={rebal_delay}s)")
+                                            _log_event(sid, max_acc, "hedge_rebalance", f"Structural imbalance: net {net_1_display} vs {net_2_display}. Queuing {len(unique_to_add)} close(s) to rebalance (excess={excess})")
                                         _save_sessions()
                                         continue
                         else:
@@ -6524,6 +6668,11 @@ def _should_issue_command(session, account):
         if blocked:
             return False
 
+    # ── Market Closed filter (e.g. iFOREX weekend / holiday) ──
+    for a in sides:
+        if ea_account_info.get(a, {}).get("market_closed"):
+            return False
+
     if action == "open":
         target = session["total_positions"]
         # Use NET open count (filled - closed) so re-opening after a full close works.
@@ -6665,13 +6814,25 @@ def _should_issue_command(session, account):
                         pass
 
             if not (bid > 0 and ask > 0):
+                _iforex_mgr = globals().get("iforex_manager")
+                iforex_acct_obj = _iforex_mgr.accounts.get(acc) if _iforex_mgr else None
+                if iforex_acct_obj and instrument:
+                    try:
+                        sym_clean = instrument.upper().replace("/", "").replace(" ", "")
+                        q = iforex_acct_obj.get_quote(sym_clean, allow_live=True)
+                        if q and q[0] > 0 and q[1] > 0:
+                            bid, ask = q[0], q[1]
+                    except Exception:
+                        pass
+
+            if not (bid > 0 and ask > 0):
                 bid = ei.get("bid", 0)
                 ask = ei.get("ask", 0)
                 stored_spread = ei.get("spread")
 
             has_live_quotes = bid > 0 and ask > 0
             if has_live_quotes:
-                pip_mult = 1000 if "JPY" in instrument else 100000
+                pip_mult = 100 if "JPY" in instrument else 10000
                 cur_spread = round((ask - bid) * pip_mult, 1)
             else:
                 cur_spread = stored_spread
@@ -8451,6 +8612,19 @@ def reset_cycle(session_id):
         if not s:
             return jsonify({"error": "Session not found"}), 404
         old_mode = s.get("action", "monitor")
+
+        # Guard: block reset to open if any account in this session has market_closed
+        blocked_accounts = []
+        for acc_id in s.get("sides", {}):
+            acc_info = ea_account_info.get(acc_id, {})
+            if acc_info.get("market_closed"):
+                blocked_accounts.append(acc_id)
+        if blocked_accounts:
+            return jsonify({
+                "error": "iforex_market_closed",
+                "message": "iFOREX market is currently closed. Cannot reset session to OPEN mode.",
+                "accounts": blocked_accounts
+            }), 400
         for acc in s.get("sides", {}):
             s["filled"][acc] = 0
             s["closed"][acc] = 0
@@ -8487,6 +8661,21 @@ def set_session_mode(session_id):
         if not s:
             return jsonify({"error": "Session not found"}), 404
         old_mode = s.get("action", "monitor")
+
+        # Guard: block active modes if any iFOREX account in this session has market_closed
+        if mode != "monitor":
+            blocked_accounts = []
+            for acc_id in s.get("sides", {}):
+                acc_info = ea_account_info.get(acc_id, {})
+                if acc_info.get("market_closed"):
+                    blocked_accounts.append(acc_id)
+            if blocked_accounts:
+                return jsonify({
+                    "error": "iforex_market_closed",
+                    "message": f"iFOREX market is currently closed. Cannot switch to '{mode}' mode.",
+                    "accounts": blocked_accounts
+                }), 400
+
         s["action"] = mode
 
         # Clear TakeProfits set on open positions if switching away from a limit mode
@@ -9886,364 +10075,340 @@ def api_recalculate_fund_distributions():
 @app.route('/api/status', methods=['GET'])
 def api_status():
     include_fills = request.args.get('include_fills', '0') == '1'
+    force_recalc = request.args.get('force_recalc', '0') == '1'
+    now_ts = time.time()
+
+    # ── Snapshot shared data under lock (keep this as short as possible) ─────
     with lock:
-        now_ts = time.time()
-        ea_status = {}
-        for acc, last_ts in ea_heartbeats.items():
-            info = ea_account_info.get(acc, {})
-            ea_status[acc] = {
-                "last_poll": datetime.fromtimestamp(last_ts).strftime("%H:%M:%S"),
-                "ago_sec": round(now_ts - last_ts, 1),
-                "online": (now_ts - last_ts) < 45,
-                "label": info.get("label") or acc,
-                "balance": info.get("balance"),
-                "equity": info.get("equity"),
-                "margin": info.get("margin") or info.get("margin_used"),
-                "leverage": info.get("leverage"),
-                "bid": info.get("bid"),
-                "ask": info.get("ask"),
-                "spread": info.get("spread"),
-                "symbol": info.get("symbol", ""),
-                "swapfree": _is_account_swapfree(acc),
-                "stats_log": acc in dashboard_settings.get("stats_log_accounts", []),
-            }
+        _snap_ea_heartbeats = dict(ea_heartbeats)
+        _snap_ea_account_info = {k: dict(v) for k, v in ea_account_info.items()}
+        _snap_sessions = {k: dict(v) for k, v in sessions.items()}
+        _snap_event_log = list(event_log[-100:])
+        _snap_manual_accounts = dict(manual_accounts)
+        _snap_strategies = list(strategies.values())
+        _snap_cycle_reminders = dict(cycle_reminders)
+        _snap_settings = dict(dashboard_settings)
+    # ─────────────────────────────────────────────────────────────────────────
 
-        # Attach live diff/spread data to each session for UI display
-        enriched_sessions = []
-        for s in sessions.values():
-            sc = dict(s)  # shallow copy
+    ea_status = {}
+    for acc, last_ts in _snap_ea_heartbeats.items():
+        info = _snap_ea_account_info.get(acc, {})
+        ea_status[acc] = {
+            "last_poll": datetime.fromtimestamp(last_ts).strftime("%H:%M:%S"),
+            "ago_sec": round(now_ts - last_ts, 1),
+            "online": (now_ts - last_ts) < 45,
+            "label": info.get("label") or acc,
+            "balance": info.get("balance"),
+            "equity": info.get("equity"),
+            "margin": info.get("margin") or info.get("margin_used"),
+            "leverage": info.get("leverage"),
+            "bid": info.get("bid"),
+            "ask": info.get("ask"),
+            "spread": info.get("spread"),
+            "symbol": info.get("symbol", ""),
+            "swapfree": _is_account_swapfree(acc),
+            "stats_log": acc in _snap_settings.get("stats_log_accounts", []),
+        }
 
-            # Backfill fills from event log for sessions that predate fill tracking
-            total_filled = sum(sc.get("filled", {}).values())
-            if total_filled > 0 and not sc.get("fills"):
-                backfilled = []
-                for evt in event_log:
-                    if evt.get("session_id") == sc["id"] and evt.get("event") == "trade_filled":
-                        detail = evt.get("detail", "")
-                        # Parse "ticket=12345 spread=5 price=154.040 filled=1/10"
-                        t_match = re.search(r'ticket=(\d+)', detail)
-                        s_match = re.search(r'spread=(\d+)', detail)
-                        p_match = re.search(r'price=([\d.]+)', detail)
-                        backfilled.append({
-                            "account": evt.get("account", ""),
-                            "ticket": int(t_match.group(1)) if t_match else None,
-                            "price": float(p_match.group(1)) if p_match else None,
-                            "spread": int(s_match.group(1)) if s_match else None,
-                            "ts": evt.get("ts", ""),
-                            "ts_epoch": None,
-                        })
-                if backfilled:
-                    sc["fills"] = backfilled
+    # Attach live diff/spread data to each session for UI display
+    enriched_sessions = []
+    for s in _snap_sessions.values():
+        sc = dict(s)  # shallow copy
 
-            diff_open, reason_open = _calc_curr_diff(s, "open")
-            diff_close, reason_close = _calc_curr_diff(s, "close")
-            sc["curr_diff_open"] = diff_open
-            sc["curr_diff_close"] = diff_close
-            sc["diff_reason"] = reason_open or reason_close  # same root cause for both
-            # Attach per-side current spreads and EA symbol from live EA data
-            for acc, side_info in s.get("sides", {}).items():
-                sn = side_info.get("side_number", 0)
-                if sn not in (1, 2):
-                    continue
-                ai = ea_account_info.get(acc, {})
-                side_pair = (side_info.get("pair") or s.get("pair", "")).upper()
+        # Backfill fills from event log for sessions that predate fill tracking
+        total_filled = sum(sc.get("filled", {}).values())
+        if total_filled > 0 and not sc.get("fills"):
+            backfilled = []
+            for evt in _snap_event_log:
+                if evt.get("session_id") == sc["id"] and evt.get("event") == "trade_filled":
+                    detail = evt.get("detail", "")
+                    t_match = re.search(r'ticket=(\d+)', detail)
+                    s_match = re.search(r'spread=(\d+)', detail)
+                    p_match = re.search(r'price=([\d.]+)', detail)
+                    backfilled.append({
+                        "account": evt.get("account", ""),
+                        "ticket": int(t_match.group(1)) if t_match else None,
+                        "price": float(p_match.group(1)) if p_match else None,
+                        "spread": int(s_match.group(1)) if s_match else None,
+                        "ts": evt.get("ts", ""),
+                        "ts_epoch": None,
+                    })
+            if backfilled:
+                sc["fills"] = backfilled
 
-                # For MT Direct accounts, always show whatever quote data is available
-                # (the command loop's subscribe_symbol already ensures the right data is pushed)
-                conn_type = ai.get("conn_type", "")
-                is_direct = conn_type in ("mt4_direct", "mt5_direct", "fix", "openapi", "iforex_direct") or (
-                    mt_direct_manager and acc in mt_direct_manager.accounts) or (
-                    fix_manager and acc in fix_manager.accounts) or (
-                    'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts)
-                if is_direct:
-                    # ALWAYS query the correct instrument's quote directly
-                    # (ea_account_info only caches ONE symbol — unreliable for multi-instrument)
-                    direct_acct = None
-                    if mt_direct_manager and acc in mt_direct_manager.accounts:
-                        direct_acct = mt_direct_manager.accounts.get(acc)
-                    elif fix_manager and acc in fix_manager.accounts:
-                        direct_acct = fix_manager.accounts.get(acc)
-                    elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
-                        direct_acct = iforex_manager.accounts.get(acc)
-                    got_direct = False
-                    if direct_acct and side_pair:
-                        if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
-                            try:
-                                q = direct_acct.get_quote(side_pair)
-                                if q:
-                                    q_bid, q_ask = q[0], q[1]
-                                    sc[f"curr_bid_{sn}"] = q_bid
-                                    sc[f"curr_ask_{sn}"] = q_ask
-                                    mult = 100 if "JPY" in side_pair.upper() else 10000
-                                    sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
-                                    got_direct = True
-                            except Exception:
-                                pass
-                        if not got_direct:
-                            try:
-                                sym_quote = direct_acct.get_symbol_info(side_pair)
-                                if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
-                                    sc[f"curr_spread_{sn}"] = sym_quote.get("spread")
-                                    sc[f"curr_bid_{sn}"] = sym_quote.get("bid")
-                                    sc[f"curr_ask_{sn}"] = sym_quote.get("ask")
-                                    got_direct = True
-                            except Exception:
-                                pass
-                        # Fallback: try direct CLR GetQuote
-                        if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
-                            try:
-                                dq = direct_acct.get_quote_direct(side_pair)
-                                if dq and dq.get("bid") and dq.get("ask"):
-                                    sc[f"curr_spread_{sn}"] = dq.get("spread")
-                                    sc[f"curr_bid_{sn}"] = dq.get("bid")
-                                    sc[f"curr_ask_{sn}"] = dq.get("ask")
-                                    got_direct = True
-                            except Exception:
-                                pass
+        diff_open, reason_open = _calc_curr_diff(s, "open")
+        diff_close, reason_close = _calc_curr_diff(s, "close")
+        sc["curr_diff_open"] = diff_open
+        sc["curr_diff_close"] = diff_close
+        sc["diff_reason"] = reason_open or reason_close
+        # Attach per-side current spreads and EA symbol from live EA data
+        for acc, side_info in s.get("sides", {}).items():
+            sn = side_info.get("side_number", 0)
+            if sn not in (1, 2):
+                continue
+            ai = _snap_ea_account_info.get(acc, {})
+            side_pair = (side_info.get("pair") or s.get("pair", "")).upper()
+
+            conn_type = ai.get("conn_type", "")
+            is_direct = conn_type in ("mt4_direct", "mt5_direct", "fix", "openapi", "iforex_direct") or (
+                mt_direct_manager and acc in mt_direct_manager.accounts) or (
+                fix_manager and acc in fix_manager.accounts) or (
+                'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts)
+            if is_direct:
+                direct_acct = None
+                if mt_direct_manager and acc in mt_direct_manager.accounts:
+                    direct_acct = mt_direct_manager.accounts.get(acc)
+                elif fix_manager and acc in fix_manager.accounts:
+                    direct_acct = fix_manager.accounts.get(acc)
+                elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
+                    direct_acct = iforex_manager.accounts.get(acc)
+                got_direct = False
+                if direct_acct and side_pair:
+                    if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
+                        try:
+                            q = direct_acct.get_quote(side_pair)
+                            if q:
+                                q_bid, q_ask = q[0], q[1]
+                                sc[f"curr_bid_{sn}"] = q_bid
+                                sc[f"curr_ask_{sn}"] = q_ask
+                                mult = 100 if "JPY" in side_pair.upper() else 10000
+                                sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
+                                got_direct = True
+                        except Exception:
+                            pass
                     if not got_direct:
-                        # Last resort: ea_account_info for SPD display (cosmetic)
+                        try:
+                            sym_quote = direct_acct.get_symbol_info(side_pair)
+                            if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
+                                sc[f"curr_spread_{sn}"] = sym_quote.get("spread")
+                                sc[f"curr_bid_{sn}"] = sym_quote.get("bid")
+                                sc[f"curr_ask_{sn}"] = sym_quote.get("ask")
+                                got_direct = True
+                        except Exception:
+                            pass
+                    if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
+                        try:
+                            dq = direct_acct.get_quote_direct(side_pair)
+                            if dq and dq.get("bid") and dq.get("ask"):
+                                sc[f"curr_spread_{sn}"] = dq.get("spread")
+                                sc[f"curr_bid_{sn}"] = dq.get("bid")
+                                sc[f"curr_ask_{sn}"] = dq.get("ask")
+                                got_direct = True
+                        except Exception:
+                            pass
+                if not got_direct:
+                    sc[f"curr_spread_{sn}"] = ai.get("spread")
+                    sc[f"curr_bid_{sn}"] = ai.get("bid")
+                    sc[f"curr_ask_{sn}"] = ai.get("ask")
+                sc[f"ea_symbol_{sn}"] = side_pair
+            else:
+                got_quote = False
+                fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
+                if fix_acct and hasattr(fix_acct, 'get_symbol_info') and side_pair:
+                    try:
+                        sq = fix_acct.get_symbol_info(side_pair)
+                        if sq and sq.get("bid") and sq.get("ask"):
+                            sc[f"curr_spread_{sn}"] = sq.get("spread")
+                            sc[f"curr_bid_{sn}"] = sq.get("bid")
+                            sc[f"curr_ask_{sn}"] = sq.get("ask")
+                            got_quote = True
+                    except Exception:
+                        pass
+                if not got_quote:
+                    ea_sym = (ai.get("symbol") or "").upper()
+                    sym_match = not ea_sym or not side_pair or ea_sym.replace("/", "") == side_pair.replace("/", "")
+                    if sym_match:
                         sc[f"curr_spread_{sn}"] = ai.get("spread")
                         sc[f"curr_bid_{sn}"] = ai.get("bid")
                         sc[f"curr_ask_{sn}"] = ai.get("ask")
-                    sc[f"ea_symbol_{sn}"] = side_pair
+                    else:
+                        sc[f"curr_spread_{sn}"] = None
+                        sc[f"curr_bid_{sn}"] = None
+                        sc[f"curr_ask_{sn}"] = None
+                sc[f"ea_symbol_{sn}"] = side_pair
+        if not include_fills:
+            sc.pop('fills', None)
+            sc.pop('close_fills', None)
+        enriched_sessions.append(sc)
+
+    # News blackout status
+    news_blocked, news_reason = is_news_blackout(impact_filter="High")
+
+    fix_accts = fix_manager.get_status() if fix_manager else {}
+    mt_accts = mt_direct_manager.get_status() if mt_direct_manager else {}
+    iforex_accts = iforex_manager.get_status() if ('iforex_manager' in globals() and iforex_manager) else {}
+
+    # Enrich account status with position age from cycle config + live positions
+    def _enrich_age(accts, manager):
+        if not manager:
+            return
+        try:
+            for acct_id, entry in accts.items():
+                entry["swapfree"] = _is_account_swapfree(acct_id)
+                acct = manager.accounts.get(acct_id)
+                if not acct or not hasattr(acct, 'config'):
+                    continue
+                cfg = acct.config or {}
+
+                oldest_epoch = None
+                acct_info = _snap_ea_account_info.get(acct_id, {})
+                positions = acct_info.get("position_details") or acct_info.get("positions", [])
+                open_tickets = set(acct_info.get("open_tickets", []))
+                if isinstance(positions, list):
+                    for pos in positions:
+                        if not isinstance(pos, dict):
+                            continue
+                        oe = pos.get("open_epoch")
+                        if oe and (oldest_epoch is None or oe < oldest_epoch):
+                            oldest_epoch = oe
+                if oldest_epoch is None and open_tickets:
+                    for sid, sess in list(_snap_sessions.items()):
+                        if sess.get("status") not in ("active", "paused", "partial_close"):
+                            continue
+                        if acct_id not in sess.get("sides", {}):
+                            continue
+                        for f in sess.get("fills", []):
+                            if f.get("account") != acct_id:
+                                continue
+                            ft = f.get("ticket")
+                            if ft and ft not in open_tickets:
+                                continue
+                            fe = f.get("ts_epoch") or f.get("open_epoch")
+                            if fe and (oldest_epoch is None or fe < oldest_epoch):
+                                oldest_epoch = fe
+                if oldest_epoch:
+                    entry["oldest_position_age"] = _count_rollover_days(oldest_epoch, day_schedule=cfg)
                 else:
-                    # Try to query the actual connector for the correct instrument
-                    got_quote = False
-                    fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
-                    if fix_acct and hasattr(fix_acct, 'get_symbol_info') and side_pair:
-                        try:
-                            sq = fix_acct.get_symbol_info(side_pair)
-                            if sq and sq.get("bid") and sq.get("ask"):
-                                sc[f"curr_spread_{sn}"] = sq.get("spread")
-                                sc[f"curr_bid_{sn}"] = sq.get("bid")
-                                sc[f"curr_ask_{sn}"] = sq.get("ask")
-                                got_quote = True
-                        except Exception:
-                            pass
-                    if not got_quote:
-                        # Fallback to ea_account_info (may be wrong instrument)
-                        ea_sym = (ai.get("symbol") or "").upper()
-                        sym_match = not ea_sym or not side_pair or ea_sym.replace("/", "") == side_pair.replace("/", "")
-                        if sym_match:
-                            sc[f"curr_spread_{sn}"] = ai.get("spread")
-                            sc[f"curr_bid_{sn}"] = ai.get("bid")
-                            sc[f"curr_ask_{sn}"] = ai.get("ask")
-                        else:
-                            sc[f"curr_spread_{sn}"] = None
-                            sc[f"curr_bid_{sn}"] = None
-                            sc[f"curr_ask_{sn}"] = None
-                    sc[f"ea_symbol_{sn}"] = side_pair
-            # Strip heavy fills data unless explicitly requested (saves ~28KB+ per poll)
-            if not include_fills:
-                sc.pop('fills', None)
-                sc.pop('close_fills', None)
-            enriched_sessions.append(sc)
+                    entry.pop("oldest_position_age", None)
 
-        # News blackout status
-        news_blocked, news_reason = is_news_blackout(impact_filter="High")
+                if cfg.get("cycle_reminder_enabled"):
+                    entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
+                    entry["cycle_max_days"] = cfg.get("cycle_max_days")
+                else:
+                    entry.pop("cycle_remind_days", None)
+                    entry.pop("cycle_max_days", None)
+        except Exception as e:
+            print(f"[CYCLE-AGE] Error enriching age for accounts: {e}")
 
-        fix_accts = fix_manager.get_status() if fix_manager else {}
-        mt_accts = mt_direct_manager.get_status() if mt_direct_manager else {}
-        iforex_accts = iforex_manager.get_status() if ('iforex_manager' in globals() and iforex_manager) else {}
+    _enrich_age(fix_accts, fix_manager)
+    _enrich_age(mt_accts, mt_direct_manager)
+    if 'iforex_manager' in globals() and iforex_manager:
+        _enrich_age(iforex_accts, iforex_manager)
 
-        # Enrich account status with position age from cycle config + live positions
-        def _enrich_age(accts, manager):
-            if not manager:
-                return
-            try:
-                for acct_id, entry in accts.items():
-                    entry["swapfree"] = _is_account_swapfree(acct_id)
-                    acct = manager.accounts.get(acct_id)
-                    if not acct or not hasattr(acct, 'config'):
-                        continue
-                    cfg = acct.config or {}
-                    
-                    # Primary: get oldest position open time from ea_account_info
-                    # (position_details has broker-reported open_epoch for each position)
-                    oldest_epoch = None
-                    acct_info = ea_account_info.get(acct_id, {})
-                    positions = acct_info.get("position_details") or acct_info.get("positions", [])
-                    open_tickets = set(acct_info.get("open_tickets", []))
-                    if isinstance(positions, list):
-                        for pos in positions:
-                            if not isinstance(pos, dict):
-                                continue
-                            oe = pos.get("open_epoch")
-                            if oe and (oldest_epoch is None or oe < oldest_epoch):
-                                oldest_epoch = oe
-                    # Fallback: check session fills if no position data available
-                    # Only use fills whose tickets match currently open positions
-                    # to avoid stale timestamps from historical fills.
-                    # Skip entirely when open_tickets is empty — no positions means
-                    # no age to compute.
-                    if oldest_epoch is None and open_tickets:
-                        for sid, sess in list(sessions.items()):
-                            if sess.get("status") not in ("active", "paused", "partial_close"):
-                                continue
-                            if acct_id not in sess.get("sides", {}):
-                                continue
-                            for f in sess.get("fills", []):
-                                if f.get("account") != acct_id:
-                                    continue
-                                # Only consider fills for currently open tickets
-                                ft = f.get("ticket")
-                                if ft and ft not in open_tickets:
-                                    continue
-                                fe = f.get("ts_epoch") or f.get("open_epoch")
-                                if fe and (oldest_epoch is None or fe < oldest_epoch):
-                                    oldest_epoch = fe
-                    if oldest_epoch:
-                        entry["oldest_position_age"] = _count_rollover_days(oldest_epoch, day_schedule=cfg)
-                    else:
-                        # No open positions — clear any stale age value
-                        entry.pop("oldest_position_age", None)
-
-                    if cfg.get("cycle_reminder_enabled"):
-                        entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
-                        entry["cycle_max_days"] = cfg.get("cycle_max_days")
-                    else:
-                        entry.pop("cycle_remind_days", None)
-                        entry.pop("cycle_max_days", None)
-            except Exception as e:
-                print(f"[CYCLE-AGE] Error enriching age for accounts: {e}")
-
-        _enrich_age(fix_accts, fix_manager)
-        _enrich_age(mt_accts, mt_direct_manager)
-        if 'iforex_manager' in globals() and iforex_manager:
-            _enrich_age(iforex_accts, iforex_manager)
-
-        # ── Margin alert check (runs on every status poll) ──────────────
-        try:
-            _all_acct_info = {}
-            for aid, ainfo in fix_accts.items():
+    # ── Margin alert check (runs on every status poll) ──────────────
+    try:
+        _all_acct_info = {}
+        for aid, ainfo in fix_accts.items():
+            _all_acct_info[aid] = ainfo
+        for aid, ainfo in mt_accts.items():
+            _all_acct_info[aid] = ainfo
+        for aid, ainfo in iforex_accts.items():
+            _all_acct_info[aid] = ainfo
+        for aid, ainfo in ea_status.items():
+            if aid not in _all_acct_info:
                 _all_acct_info[aid] = ainfo
-            for aid, ainfo in mt_accts.items():
-                _all_acct_info[aid] = ainfo
-            for aid, ainfo in iforex_accts.items():
-                _all_acct_info[aid] = ainfo
-            for aid, ainfo in ea_status.items():
-                if aid not in _all_acct_info:
-                    _all_acct_info[aid] = ainfo
-            _check_margin_alerts(_all_acct_info)
-            _check_nop_fm_alerts(_all_acct_info)
-            _check_position_changes(_all_acct_info)
-        except Exception:
-            pass
+        _check_margin_alerts(_all_acct_info)
+        _check_nop_fm_alerts(_all_acct_info)
+        _check_position_changes(_all_acct_info)
+    except Exception:
+        pass
 
-        # ── Pips-to-Margin-Call enrichment ──────────────────────────────
-        # Inject pips_to_mc into every account status dict so the frontend
-        # can display it alongside margin use.
-        try:
-            def _enrich_pips_to_mc(accts):
-                for aid, ainfo in accts.items():
-                    try:
-                        eq = ainfo.get("equity") or ainfo.get("balance")
-                        mu = ainfo.get("margin") or ainfo.get("margin_used")
-
-                        # Per-instrument lot data
-                        lbi = ea_account_info.get(aid, {}).get("lots_by_instrument", {})
-
-                        if lbi:
-                            # Find the instrument with the LARGEST position (buy + sell lots).
-                            # We calculate pips-to-MC using ONLY that instrument's lots,
-                            # because each instrument moves independently — mixing lots from
-                            # different instruments with one pip size is incorrect.
-                            dominant_sym = max(
-                                lbi.keys(),
-                                key=lambda s: abs(lbi[s].get("buy", 0)) + abs(lbi[s].get("sell", 0))
-                            )
-                            dom = lbi[dominant_sym]
-                            lots_abs = round(abs(dom.get("buy", 0)) + abs(dom.get("sell", 0)), 4)
-                            sym_hint = dominant_sym
-                        else:
-                            # Fallback: no per-instrument breakdown available
-                            raw_lots = ainfo.get("total_lots")
-                            lots_abs = abs(float(raw_lots)) if raw_lots is not None else None
-                            sym_hint = ainfo.get("symbol", "")
-
-                        sol_frac = _get_stop_out_frac(aid)
-                        ptmc = _calc_pips_to_mc(
-                            equity=float(eq) if eq is not None else None,
-                            margin_used=float(mu) if mu is not None else 0.0,
-                            total_lots_abs=lots_abs,
-                            stop_out_frac=sol_frac,
-                            symbol_hint=sym_hint,
+    # ── Pips-to-Margin-Call enrichment ──────────────────────────────
+    try:
+        def _enrich_pips_to_mc(accts):
+            for aid, ainfo in accts.items():
+                try:
+                    eq = ainfo.get("equity") or ainfo.get("balance")
+                    mu = ainfo.get("margin") or ainfo.get("margin_used")
+                    lbi = _snap_ea_account_info.get(aid, {}).get("lots_by_instrument", {})
+                    if lbi:
+                        dominant_sym = max(
+                            lbi.keys(),
+                            key=lambda s: abs(lbi[s].get("buy", 0)) + abs(lbi[s].get("sell", 0))
                         )
-                        ainfo["pips_to_mc"] = ptmc
-                        ainfo["stop_out_frac"] = sol_frac
-                        ainfo["pips_to_mc_sym"] = sym_hint  # shown in tooltip
-                    except Exception:
-                        ainfo["pips_to_mc"] = None
-            _enrich_pips_to_mc(fix_accts)
-            _enrich_pips_to_mc(mt_accts)
-            _enrich_pips_to_mc(ea_status)
-        except Exception:
-            pass
+                        dom = lbi[dominant_sym]
+                        lots_abs = round(abs(dom.get("buy", 0)) + abs(dom.get("sell", 0)), 4)
+                        sym_hint = dominant_sym
+                    else:
+                        raw_lots = ainfo.get("total_lots")
+                        lots_abs = abs(float(raw_lots)) if raw_lots is not None else None
+                        sym_hint = ainfo.get("symbol", "")
+                    sol_frac = _get_stop_out_frac(aid)
+                    ptmc = _calc_pips_to_mc(
+                        equity=float(eq) if eq is not None else None,
+                        margin_used=float(mu) if mu is not None else 0.0,
+                        total_lots_abs=lots_abs,
+                        stop_out_frac=sol_frac,
+                        symbol_hint=sym_hint,
+                    )
+                    ainfo["pips_to_mc"] = ptmc
+                    ainfo["stop_out_frac"] = sol_frac
+                    ainfo["pips_to_mc_sym"] = sym_hint
+                except Exception:
+                    ainfo["pips_to_mc"] = None
+        _enrich_pips_to_mc(fix_accts)
+        _enrich_pips_to_mc(mt_accts)
+        _enrich_pips_to_mc(ea_status)
+    except Exception:
+        pass
 
+    # Include margin alert thresholds in response for frontend
+    margin_alert_data = {
+        "global_threshold": _snap_settings.get("margin_alert_threshold", 85),
+        "per_account": _snap_settings.get("margin_alert_thresholds", {}),
+    }
+    nop_fm_alert_data = {
+        "global_threshold": _snap_settings.get("nop_fm_alert_threshold", 100),
+        "throttle_sec": _snap_settings.get("nop_fm_alert_throttle_sec", 900),
+        "peak_throttle_sec": _snap_settings.get("nop_fm_alert_peak_throttle_sec", 0),
+        "per_account": _snap_settings.get("nop_fm_alert_thresholds", {}),
+    }
 
+    # Calculate optimal fund distributions
+    global _last_fund_dist_ts, _cached_fund_distributions
+    _cache_all_zero = _cached_fund_distributions and all(
+        v.get("optimal_equity", 0) == 0 for v in _cached_fund_distributions.values()
+    )
+    if force_recalc or now_ts - _last_fund_dist_ts >= 3600 or not _cached_fund_distributions or _cache_all_zero:
+        all_info_for_dist = {}
+        for name, info in _snap_manual_accounts.items():
+            all_info_for_dist[name] = {
+                "balance": info.get("balance"),
+                "equity": info.get("equity"),
+                "margin": 0.0,
+                "leverage": 100.0,
+            }
+        for aid, ainfo in ea_status.items():
+            all_info_for_dist.setdefault(aid, {}).update(ainfo)
+        for aid, ainfo in fix_accts.items():
+            all_info_for_dist.setdefault(aid, {}).update(ainfo)
+        for aid, ainfo in mt_accts.items():
+            all_info_for_dist.setdefault(aid, {}).update(ainfo)
+        _cached_fund_distributions = _calculate_optimal_fund_distributions(all_info_for_dist)
+        _last_fund_dist_ts = now_ts
 
-        # Include margin alert thresholds in response for frontend
-        margin_alert_data = {
-            "global_threshold": dashboard_settings.get("margin_alert_threshold", 85),
-            "per_account": dashboard_settings.get("margin_alert_thresholds", {}),
-        }
-        nop_fm_alert_data = {
-            "global_threshold": dashboard_settings.get("nop_fm_alert_threshold", 100),
-            "throttle_sec": dashboard_settings.get("nop_fm_alert_throttle_sec", 900),
-            "peak_throttle_sec": dashboard_settings.get("nop_fm_alert_peak_throttle_sec", 0),
-            "per_account": dashboard_settings.get("nop_fm_alert_thresholds", {}),
-        }
+    dist_last_updated = datetime.fromtimestamp(_last_fund_dist_ts).strftime("%H:%M:%S") if _last_fund_dist_ts > 0 else "-"
 
-        # Calculate optimal fund distributions
-        global _last_fund_dist_ts, _cached_fund_distributions
-        force_recalc = request.args.get('force_recalc', '0') == '1'
-        # Treat an all-zero cache as invalid (startup race: accounts not yet connected)
-        _cache_all_zero = _cached_fund_distributions and all(
-            v.get("optimal_equity", 0) == 0 for v in _cached_fund_distributions.values()
-        )
-        if force_recalc or now_ts - _last_fund_dist_ts >= 3600 or not _cached_fund_distributions or _cache_all_zero:
-            all_info_for_dist = {}
-            for name, info in manual_accounts.items():
-                all_info_for_dist[name] = {
-                    "balance": info.get("balance"),
-                    "equity": info.get("equity"),
-                    "margin": 0.0,
-                    "leverage": 100.0,
-                }
-            for aid, ainfo in ea_status.items():
-                all_info_for_dist.setdefault(aid, {}).update(ainfo)
-            for aid, ainfo in fix_accts.items():
-                all_info_for_dist.setdefault(aid, {}).update(ainfo)
-            for aid, ainfo in mt_accts.items():
-                all_info_for_dist.setdefault(aid, {}).update(ainfo)
-            
-            _cached_fund_distributions = _calculate_optimal_fund_distributions(all_info_for_dist)
-            _last_fund_dist_ts = now_ts
-
-        dist_last_updated = datetime.fromtimestamp(_last_fund_dist_ts).strftime("%H:%M:%S") if _last_fund_dist_ts > 0 else "-"
-
-        return jsonify({
-            "sessions": enriched_sessions,
-            "ea_heartbeats": ea_status,
-            "event_log": event_log[-100:],
-            "manual_accounts": manual_accounts,
-            "strategies": list(strategies.values()),
-            "fix_accounts": fix_accts,
-            "mt_direct_accounts": mt_accts,
-            "iforex_accounts": iforex_accts,
-            "cycle_reminders": cycle_reminders,
-            "news_blackout": {"blocked": news_blocked, "event": news_reason},
-            "margin_alert": margin_alert_data,
-            "nop_fm_alert": nop_fm_alert_data,
-            "adr_settings": dashboard_settings.get("adr_settings", {}),
-            "account_intended_lots": dashboard_settings.get("account_intended_lots", {}),
-            "default_intended_lots": dashboard_settings.get("default_intended_lots", 0),
-            "swap_delta": _compute_swap_deltas_live(),
-            "fund_distributions": _cached_fund_distributions,
-            "fund_distributions_last_updated": dist_last_updated,
-        })
-
-# ─── Lots Breakdown by Instrument ──────────────────────────────────────────
+    return jsonify({
+        "sessions": enriched_sessions,
+        "ea_heartbeats": ea_status,
+        "event_log": _snap_event_log,
+        "manual_accounts": _snap_manual_accounts,
+        "strategies": _snap_strategies,
+        "fix_accounts": fix_accts,
+        "mt_direct_accounts": mt_accts,
+        "iforex_accounts": iforex_accts,
+        "cycle_reminders": _snap_cycle_reminders,
+        "news_blackout": {"blocked": news_blocked, "event": news_reason},
+        "margin_alert": margin_alert_data,
+        "nop_fm_alert": nop_fm_alert_data,
+        "adr_settings": _snap_settings.get("adr_settings", {}),
+        "account_intended_lots": _snap_settings.get("account_intended_lots", {}),
+        "default_intended_lots": _snap_settings.get("default_intended_lots", 0),
+        "swap_delta": _compute_swap_deltas_live(),
+        "fund_distributions": _cached_fund_distributions,
+        "fund_distributions_last_updated": dist_last_updated,
+    })
 
 @app.route('/api/lots_breakdown', methods=['GET'])
 def api_lots_breakdown():
@@ -10405,11 +10570,17 @@ def add_account():
 
 @app.route('/api/accounts/<account_name>', methods=['PATCH'])
 def update_account(account_name):
-    """Update fields on a manual account (e.g. group_label)."""
+    """Update fields on an account (e.g. group_label, swapfree, etc.)."""
     try:
         data = request.get_json(force=True)
+        acc_str = str(account_name).strip()
         with lock:
             acct = manual_accounts.get(account_name)
+            if not acct:
+                for k, v in manual_accounts.items():
+                    if v.get("label") == account_name or v.get("group_label") == account_name:
+                        acct = v
+                        break
             if not acct:
                 # Auto-create entry for EA-discovered accounts
                 acct = {"conn_type": "poll", "group_label": "", "balance": None, "equity": None}
@@ -10470,63 +10641,111 @@ def update_account(account_name):
                 except (ValueError, TypeError):
                     pass
 
+            # Sync swapfree to manual_accounts aliases
+            if "swapfree" in data:
+                sf_val = bool(data["swapfree"])
+                for k, v in manual_accounts.items():
+                    if k == account_name or v.get("label") == account_name or v.get("group_label") == account_name:
+                        v["swapfree"] = sf_val
+
+            # Sync swapfree to ea_account_info
+            for k, v in ea_account_info.items():
+                if k == account_name or v.get("label") == account_name or v.get("group_label") == account_name or str(v.get("login") or "") == acc_str:
+                    if "swapfree" in data:
+                        v["swapfree"] = bool(data["swapfree"])
+
             # Sync to FIX accounts config if it exists
-            if fix_manager and account_name in fix_manager.accounts:
-                fix_acct = fix_manager.accounts[account_name]
+            if fix_manager:
                 changed = False
-                if "group_label" in data:
-                    fix_acct.config["group_label"] = str(data["group_label"]).strip()
-                    changed = True
-                if "swapfree" in data:
-                    fix_acct.config["swapfree"] = bool(data["swapfree"])
-                    changed = True
-                if "stop_out_level" in data:
-                    try:
-                        fix_acct.config["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
-                        changed = True
-                    except (ValueError, TypeError):
-                        pass
-                if "alert_email" in data:
-                    fix_acct.config["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
-                    changed = True
-                if "alert_telegram" in data:
-                    fix_acct.config["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
-                    changed = True
-                if "auto_connect_start" in data:
-                    fix_acct.config["auto_connect_start"] = bool(data["auto_connect_start"])
-                    changed = True
+                for aid, fix_acct in fix_manager.accounts.items():
+                    c = fix_acct.config
+                    if aid == account_name or c.get("label") == account_name or c.get("group_label") == account_name or c.get("external_account_id") == account_name:
+                        if "group_label" in data:
+                            c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "swapfree" in data:
+                            c["swapfree"] = bool(data["swapfree"])
+                            changed = True
+                        if "stop_out_level" in data:
+                            try:
+                                c["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
+                                changed = True
+                            except (ValueError, TypeError):
+                                pass
+                        if "alert_email" in data:
+                            c["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
+                            changed = True
+                        if "alert_telegram" in data:
+                            c["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
+                            changed = True
+                        if "auto_connect_start" in data:
+                            c["auto_connect_start"] = bool(data["auto_connect_start"])
+                            changed = True
                 if changed:
                     fix_manager.save_config()
 
             # Sync to MT Direct accounts config if it exists
-            if mt_direct_manager and account_name in mt_direct_manager.accounts:
-                mt_acct = mt_direct_manager.accounts[account_name]
+            if mt_direct_manager:
                 changed = False
-                if "group_label" in data:
-                    mt_acct.config["group_label"] = str(data["group_label"]).strip()
-                    changed = True
-                if "swapfree" in data:
-                    mt_acct.config["swapfree"] = bool(data["swapfree"])
-                    changed = True
-                if "stop_out_level" in data:
-                    try:
-                        mt_acct.config["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
-                        changed = True
-                    except (ValueError, TypeError):
-                        pass
-                if "alert_email" in data:
-                    mt_acct.config["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
-                    changed = True
-                if "alert_telegram" in data:
-                    mt_acct.config["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
-                    changed = True
-                if "auto_connect_start" in data:
-                    mt_acct.config["auto_connect_start"] = bool(data["auto_connect_start"])
-                    changed = True
+                for aid, mt_acct in mt_direct_manager.accounts.items():
+                    c = mt_acct.config
+                    if aid == account_name or c.get("label") == account_name or str(c.get("login") or "") == acc_str or c.get("group_label") == account_name:
+                        if "group_label" in data:
+                            c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "swapfree" in data:
+                            c["swapfree"] = bool(data["swapfree"])
+                            changed = True
+                        if "stop_out_level" in data:
+                            try:
+                                c["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
+                                changed = True
+                            except (ValueError, TypeError):
+                                pass
+                        if "alert_email" in data:
+                            c["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
+                            changed = True
+                        if "alert_telegram" in data:
+                            c["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
+                            changed = True
+                        if "auto_connect_start" in data:
+                            c["auto_connect_start"] = bool(data["auto_connect_start"])
+                            changed = True
+                        if changed:
+                            from mt_bridge_client import normalize_mt_config
+                            mt_acct.config = normalize_mt_config(mt_acct.config)
                 if changed:
-                    from mt_bridge_client import normalize_mt_config
-                    mt_acct.config = normalize_mt_config(mt_acct.config)
                     mt_direct_manager.save_config()
+
+            # Sync to iForex manager if present
+            if 'iforex_manager' in globals() and iforex_manager:
+                changed = False
+                for aid, ifx_acct in iforex_manager.accounts.items():
+                    c = ifx_acct.config
+                    if aid == account_name or c.get("label") == account_name or c.get("group_label") == account_name:
+                        if "group_label" in data:
+                            c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "swapfree" in data:
+                            c["swapfree"] = bool(data["swapfree"])
+                            changed = True
+                        if "auto_connect_start" in data:
+                            c["auto_connect_start"] = bool(data["auto_connect_start"])
+                            changed = True
+                        if "stop_out_level" in data:
+                            try:
+                                c["stop_out_level"] = float(data["stop_out_level"]) if data["stop_out_level"] is not None and str(data["stop_out_level"]).strip() != "" else None
+                                changed = True
+                            except (ValueError, TypeError):
+                                pass
+                        if "alert_email" in data:
+                            c["alert_email"] = str(data["alert_email"]).strip() if data["alert_email"] else None
+                            changed = True
+                        if "alert_telegram" in data:
+                            c["alert_telegram"] = str(data["alert_telegram"]).strip() if data["alert_telegram"] else None
+                            changed = True
+                if changed:
+                    iforex_manager.save_config()
 
         # Handle connection type switching (EA ↔ MT Direct)
         # ONLY if conn_type was explicitly provided in the request
@@ -11051,6 +11270,101 @@ def remove_iforex_account(account_id):
     _log_event(None, account_id, "iforex_account_removed", "")
     return jsonify({"ok": True})
 
+@app.route('/api/iforex_accounts/<account_id>/connect', methods=['POST'])
+def connect_iforex_account(account_id):
+    """Connect an iFOREX account (verify credentials and start poll loop)."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    acct = iforex_manager.accounts.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    try:
+        cfg_path = os.path.join(TRADE_CONFIG_DIR, "iforex_accounts.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if account_id in data:
+                acct.config.update(data[account_id])
+                acct.cookie = data[account_id].get("cookie", acct.cookie)
+                acct.security_token = data[account_id].get("security_token", acct.security_token)
+                acct.session.headers["Cookie"] = acct.cookie
+        acct._last_401_ts = 0.0
+        with acct._lock:
+            acct._quotes_cache.clear()
+        q = acct.fetch_quote_live("EUR/USD")
+        if q:
+            acct.connected = True
+            if not acct._running:
+                acct.start()
+            with lock:
+                if account_id in ea_account_info:
+                    ea_account_info[account_id]["connected"] = True
+                    ea_account_info[account_id]["bid"] = q[0]
+                    ea_account_info[account_id]["ask"] = q[1]
+            _log_event(None, account_id, "iforex_account_connected", "")
+            return jsonify({"ok": True, "message": "Connected successfully"})
+        else:
+            return jsonify({"error": "Could not connect to iFOREX. Session may be expired — try 'Re-Auth'."}), 400
+    except Exception as e:
+        app.logger.error("Error connecting iFOREX account %s: %s", account_id, e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/iforex_accounts/<account_id>/disconnect', methods=['POST'])
+def disconnect_iforex_account(account_id):
+    """Disconnect an iFOREX account (stop poll thread)."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    acct = iforex_manager.accounts.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    acct.stop()
+    acct.connected = False
+    with lock:
+        if account_id in ea_account_info:
+            ea_account_info[account_id]["connected"] = False
+    _log_event(None, account_id, "iforex_account_disconnected", "")
+    return jsonify({"ok": True})
+
+@app.route('/api/iforex_accounts/<account_id>/auto_login', methods=['POST'])
+def auto_login_iforex(account_id):
+    """Trigger automated browser session refresh for iFOREX via Playwright."""
+    if not ('iforex_manager' in globals() and iforex_manager):
+        return jsonify({"error": "iFOREX connector not available"}), 501
+    acct = iforex_manager.accounts.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    try:
+        from iforex_auto_login import refresh_iforex_session
+        res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=180, headless=False)
+        if res.get("status") == "ok":
+            acct.cookie = res["cookie"]
+            acct.session.headers["Cookie"] = res["cookie"]
+            acct.security_token = res["security_token"]
+            acct.connected = True
+            acct._last_401_ts = 0.0
+            with acct._lock:
+                acct._quotes_cache.clear()
+            q = acct.fetch_quote_live("EUR/USD")
+            with lock:
+                if account_id in ea_account_info:
+                    ea_account_info[account_id]["connected"] = True
+                    if q:
+                        ea_account_info[account_id]["bid"] = q[0]
+                        ea_account_info[account_id]["ask"] = q[1]
+            _log_event(None, account_id, "iforex_session_auto_refreshed", f"Account {res.get('account_number')} tokens refreshed")
+            return jsonify({
+                "ok": True,
+                "message": res.get("message", "Session refreshed successfully!"),
+                "account_number": res.get("account_number"),
+                "security_token": res.get("security_token"),
+                "cookie": res.get("cookie")
+            })
+        else:
+            return jsonify({"error": res.get("message", "Extraction failed")}), 400
+    except Exception as e:
+        app.logger.error("Error in auto_login_iforex: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/iforex_accounts/<account_id>/config', methods=['GET'])
 def get_iforex_account_config(account_id):
     """Get config of an iFOREX account for editing."""
@@ -11073,7 +11387,7 @@ def update_iforex_account(account_id):
         return jsonify({"error": "Account not found"}), 404
     try:
         data = request.get_json(force=True)
-        for key in ['label', 'group_label', 'account_number', 'cookie', 'security_token',
+        for key in ['label', 'group_label', 'account_number', 'username', 'password', 'cookie', 'security_token',
                      'base_url', 'leverage', 'swapfree', 'stop_out_level',
                      'alert_email', 'alert_telegram']:
             if key in data:
@@ -13399,7 +13713,7 @@ body {
 
             <th data-acol="17" title="Margin alert threshold (%)">Marg.Alrt%</th>
             <th data-acol="18">Swap</th>
-            <th data-acol="19" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
+            <th data-acol="19" title="Swap change at last 5 PM ET rollover">Î” Swap</th>
             <th data-acol="20">Last Poll</th>
             <th data-acol="21" title="Auto connect account at start">Auto Conn</th>
             <th data-acol="22" title="Alert Email(s) Override">Email Alert</th>
@@ -14673,6 +14987,14 @@ body {
         <input type="text" id="eifxLabel">
       </div>
       <div class="form-group">
+        <label>Username <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
+        <input type="text" id="eifxUsername" placeholder="e.g. 12330940">
+      </div>
+      <div class="form-group">
+        <label>Password <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
+        <input type="password" id="eifxPassword" placeholder="iFOREX password">
+      </div>
+      <div class="form-group">
         <label>Leverage</label>
         <input type="number" id="eifxLeverage">
       </div>
@@ -14685,7 +15007,10 @@ body {
         <input type="text" id="eifxSecurityToken">
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
-        <label>Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(paste fresh Cookie header when session expires)</span></label>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <label style="margin-bottom:0;">Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(or click Auto-Extract)</span></label>
+          <button type="button" id="btn-auto-extract-modal" class="btn btn-primary" style="padding:2px 8px;font-size:0.72rem;" onclick="autoExtractIForexModal()">&#x1f511; Auto-Extract from Browser</button>
+        </div>
         <textarea id="eifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;"></textarea>
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
@@ -15602,7 +15927,7 @@ const ACCT_COLUMNS = [
   {idx:'8', name:'Opt Eq'}, {idx:'9', name:'Shift'}, {idx:'10', name:'TGT Lots'},
   {idx:'11', name:'PnL'}, {idx:'12', name:'Leverage'}, {idx:'13', name:'Pos.'}, {idx:'14', name:'Lots'},
   {idx:'15', name:'Margin Use'}, {idx:'17', name:'Marg.Alrt%'},
-  {idx:'18', name:'Swap'}, {idx:'19', name:'Δ Swap'}, {idx:'20', name:'Last Poll'},
+  {idx:'18', name:'Swap'}, {idx:'19', name:'Î” Swap'}, {idx:'20', name:'Last Poll'},
   {idx:'21', name:'Auto Conn'}, {idx:'22', name:'Email Alert'}, {idx:'23', name:'Telegram Alert'},
   {idx:'24', name:'Stats'}, {idx:'25', name:'Actions'},
 ];
@@ -17876,11 +18201,23 @@ async function setSessionMode(id, mode) {
     // Blur the mode dropdown so the renderInstrumentsTable guard
     // doesn't block the re-render after the mode change
     if (document.activeElement) document.activeElement.blur();
-    await fetch('/api/sessions/' + id + '/set_mode', {
+    const res = await fetch('/api/sessions/' + id + '/set_mode', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mode: mode })
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      if (body.error === 'iforex_market_closed') {
+        alert('⚠️ iFOREX Market Closed\n\n' + (body.message || 'iFOREX market is currently closed.') +
+              '\n\nPlease wait for the market to reopen before switching to ' + mode.toUpperCase() + ' mode.');
+        await refreshData();
+        renderInstrumentsTable();
+        return;
+      }
+      alert('Set mode failed: ' + (body.error || res.status));
+      return;
+    }
     await refreshData();
     renderInstrumentsTable();
   } catch(e) { alert('Set mode failed: ' + e); }
@@ -17901,7 +18238,17 @@ async function saveSessionField(id, field, val) {
 async function resetCycle(id) {
   showConfirmModal('Reset this session? This will clear all counters and switch to OPEN mode.', async () => {
     try {
-      await fetch('/api/sessions/' + id + '/reset_cycle', { method: 'POST' });
+      const res = await fetch('/api/sessions/' + id + '/reset_cycle', { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        if (body.error === 'iforex_market_closed') {
+          alert('⚠️ iFOREX Market Closed\n\n' + (body.message || 'iFOREX market is currently closed.') +
+                '\n\nPlease wait for the market to reopen before resetting to OPEN mode.');
+          return;
+        }
+        alert('Reset cycle failed: ' + (body.error || res.status));
+        return;
+      }
       await refreshData();
       renderInstrumentsTable();
     } catch(e) { alert('Reset cycle failed: ' + e); }
@@ -19840,9 +20187,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
       if (nameFilter && !id.toLowerCase().includes(nameFilter) && !displayName.toLowerCase().includes(nameFilter)) return;
       shownAccounts.add(id);
       const isConn = info.connected;
-      const ifxColor = isConn ? 'var(--green)' : '#f59e0b';
-      const connText = isConn ? 'iFOREX Connected' : 'iFOREX Standby';
-      const connDot = `<span style="cursor:default;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ifxColor};box-shadow:0 0 6px ${ifxColor};margin-right:6px;"></span>iFOREX</span>`;
+      const ifxColor = isConn ? 'var(--green)' : 'var(--red)';
+      const ifxAction = isConn ? `disconnectIForexAccount('${id}')` : `connectIForexAccount('${id}')`;
+      const connText = isConn ? 'iFOREX Connected (Click to Disconnect)' : 'iFOREX Disconnected (Click to Connect)';
+      const connDot = `<span onclick="${ifxAction}" style="cursor:pointer;" title="Click to ${isConn?'Disconnect':'Connect'}"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ifxColor};box-shadow:0 0 6px ${ifxColor};margin-right:6px;"></span>iFOREX</span>`;
       const eaInfo = heartbeats ? heartbeats[id] : null;
       const rawBal = info.balance != null ? info.balance : (eaInfo && eaInfo.balance != null ? eaInfo.balance : null);
       const rawEq = info.equity != null ? info.equity : (eaInfo && eaInfo.equity != null ? eaInfo.equity : null);
@@ -19898,7 +20246,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td><input class="inl" style="width:120px;" value="${info.alert_telegram || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_telegram', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td><input type="checkbox" ${(window._statsAccounts||[]).includes(id)?'checked':''} onchange="toggleStatsLog('${id}', this.checked)" title="Log market stats to CSV"></td>
         <td>
-          <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="editIForexAccount('${id}')" title="Edit credentials">\u270e</button>
+          <button class="btn btn-primary" id="btn-auto-login-${id}" style="padding:2px 8px;font-size:0.72rem;" onclick="autoLoginIForex('${id}')" title="Auto-Refresh Session (Edge Playwright)">&#x1f511; Re-Auth</button>
+          <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="editIForexAccount('${id}')" title="Edit credentials">&#x270e;</button>
+          <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="connectIForexAccount('${id}')" title="Connect">&#x21bb;</button>
+          <button class="btn" style="padding:2px 8px;font-size:0.72rem;background:var(--surface);color:var(--orange);border:1px solid var(--orange);" onclick="disconnectIForexAccount('${id}')" title="Disconnect">&#x23fb;</button>
           <button class="btn btn-danger" style="padding:2px 8px;font-size:0.72rem;" onclick="deleteIForexAccount('${id}')" title="Delete account">x</button>
         </td>
       </tr>`);
@@ -20337,7 +20688,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           }
         }
       }
-      // Δ Swap
+      // Î” Swap
       const sd = swapDelta[m.id];
       if (sd != null) { sumSwapDelta += sd; hasSwapDelta = true; }
       // Age — from direct info or cycle_reminders
@@ -20664,8 +21015,8 @@ function _renderSwapBreakdownModal(title, data) {
           <thead><tr style="border-bottom:1px solid var(--border);text-align:right;">
             <th style="text-align:left;padding:4px 8px;">Instrument</th>
             <th style="padding:4px 8px;">Lots</th>
-            <th style="padding:4px 8px;">Total Δ Swap</th>
-            <th style="padding:4px 8px;">Per Lot Δ Swap</th>
+            <th style="padding:4px 8px;">Total Î” Swap</th>
+            <th style="padding:4px 8px;">Per Lot Î” Swap</th>
           </tr></thead><tbody>`;
     let gLots = 0, gDeltaSwap = 0;
     data.forEach(r => {
@@ -21685,7 +22036,6 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
 // Init
 loadDayScheduleTemplates().then(() => refreshData()).then(() => applyColVisibility());
 startRefreshLoop();
-startRefreshLoop();
 
 // Close modals on click outside or on Escape key
 document.addEventListener('keydown', function(e) {
@@ -21848,6 +22198,12 @@ async function editIForexAccount(id) {
     document.getElementById('eifxAcctId').value = id;
     document.getElementById('eifxAcctNumber').value = cfg.account_number || '';
     document.getElementById('eifxLabel').value = cfg.label || '';
+    if (document.getElementById('eifxUsername')) {
+      document.getElementById('eifxUsername').value = cfg.username || cfg.account_number || '';
+    }
+    if (document.getElementById('eifxPassword')) {
+      document.getElementById('eifxPassword').value = cfg.password || '';
+    }
     document.getElementById('eifxLeverage').value = cfg.leverage || 400;
     document.getElementById('eifxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
     document.getElementById('eifxSecurityToken').value = cfg.security_token || '';
@@ -21872,6 +22228,8 @@ async function saveIForexEdit() {
     account_number: document.getElementById('eifxAcctNumber').value.trim(),
     label: document.getElementById('eifxLabel').value.trim(),
     group_label: document.getElementById('eifxLabel').value.trim(),
+    username: document.getElementById('eifxUsername') ? document.getElementById('eifxUsername').value.trim() : '',
+    password: document.getElementById('eifxPassword') ? document.getElementById('eifxPassword').value.trim() : '',
     leverage: parseInt(document.getElementById('eifxLeverage').value) || 400,
     stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
     security_token: token,
@@ -21890,6 +22248,89 @@ async function saveIForexEdit() {
     closeEditIForexModal();
     refreshData();
   } catch(e) { alert('Failed to update iFOREX account: ' + e); }
+}
+
+async function autoLoginIForex(id) {
+  const btn = document.getElementById('btn-auto-login-' + id);
+  const origText = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Logging in...';
+  }
+  try {
+    const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/auto_login', {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (data.ok) {
+      alert(data.message || 'iFOREX session successfully refreshed!');
+      refreshData();
+    } else {
+      alert('iFOREX Auto-Login failed: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) {
+    alert('Failed to trigger auto-login: ' + e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origText;
+    }
+  }
+}
+
+async function autoExtractIForexModal() {
+  const id = document.getElementById('eifxAcctId').value;
+  const btn = document.getElementById('btn-auto-extract-modal');
+  const origText = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Logging in...';
+  }
+  try {
+    const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/auto_login', {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.cookie) document.getElementById('eifxCookie').value = data.cookie;
+      if (data.security_token) document.getElementById('eifxSecurityToken').value = data.security_token;
+      if (data.account_number) document.getElementById('eifxAcctNumber').value = data.account_number;
+      alert('Session extracted successfully! Click "Save Changes" to apply.');
+    } else {
+      alert('Extraction failed: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) {
+    alert('Extraction request failed: ' + e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origText;
+    }
+  }
+}
+
+async function connectIForexAccount(id) {
+  try {
+    const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/connect', {method: 'POST'});
+    const data = await res.json();
+    if (data.error) {
+      alert('iFOREX Connect: ' + data.error);
+    }
+    refreshData();
+  } catch(e) {
+    alert('Failed to connect iFOREX account: ' + e);
+  }
+}
+
+async function disconnectIForexAccount(id) {
+  try {
+    if (typeof iforex_accounts_cache !== 'undefined' && iforex_accounts_cache[id]) {
+      iforex_accounts_cache[id].connected = false;
+      if (window._lastRenderAccountsArgs) renderAccounts.apply(null, window._lastRenderAccountsArgs);
+    }
+    await fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/disconnect', {method: 'POST'});
+    refreshData();
+  } catch(e) { alert('Failed to disconnect iFOREX account: ' + e); }
 }
 
 async function deleteIForexAccount(id) {
@@ -23003,17 +23444,28 @@ if __name__ == '__main__':
 
         _mt_direct_dashboard_data["report_trade_result"] = _mt_direct_report_result
         _mt_direct_dashboard_data["save_sessions"] = _save_sessions
-        mt_direct_manager.start()
+        mt_direct_manager.start(force_connect_all=True)
         if USE_MT_BRIDGE and not mt_direct_manager.accounts:
             app.logger.warning("MtBridgeService has no active accounts — falling back to pythonnet in-process MT Direct connector")
             try:
                 from mt_direct_connector import MTDirectManager as PythonnetManager
                 mt_direct_manager = PythonnetManager(_mt_direct_dashboard_data, config_dir=TRADE_CONFIG_DIR)
-                mt_direct_manager.start()
+                mt_direct_manager.start(force_connect_all=True)
                 app.logger.info("pythonnet MT Direct Manager started with %d accounts", len(mt_direct_manager.accounts))
             except Exception as ex:
                 app.logger.error("pythonnet fallback failed: %s", ex)
         app.logger.info("MT Direct Account Manager started")
+
+    # Wire up iFOREX manager command loop
+    if 'iforex_manager' in globals() and iforex_manager:
+        _iforex_dashboard_data["sessions"] = sessions
+        _iforex_dashboard_data["lock"] = lock
+        _iforex_dashboard_data["in_flight_commands"] = in_flight_commands
+        _iforex_dashboard_data["should_issue_command"] = _should_issue_command
+        _iforex_dashboard_data["report_trade_result"] = _mt_direct_report_result  # reuse same result handler
+        iforex_manager.dd = _iforex_dashboard_data  # ensure dd is the wired one
+        iforex_manager.start()
+        app.logger.info("iFOREX Account Manager command loop started")
 
     # Start universal hedge monitor (works for EA poll, MT Direct, FIX — all account types)
     _start_hedge_monitor_thread()

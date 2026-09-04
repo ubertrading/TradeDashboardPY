@@ -3671,10 +3671,26 @@ class FixAccountManager:
 
                 action = session.get("action", "open")
 
+                # ── Pre-subscribe symbols before gate check ────────────────
+                # Must happen BEFORE the atomic spread gate so quotes are
+                # available when the gate checks — mirrors MT Direct pattern.
+                if action in ("open", "open_limit"):
+                    for _pre_aid, _pre_side in sides.items():
+                        _pre_acct = self.accounts.get(_pre_aid)
+                        if not _pre_acct or not getattr(_pre_acct, 'connected', False):
+                            continue
+                        _pre_pair = (_pre_side.get("pair") or session.get("pair", "")).upper()
+                        if _pre_pair and isinstance(_pre_acct, (CTraderFixAccount, CTraderOpenApiAccount, SwissquoteFixAccount, DukascopyFixAccount)):
+                            _pre_acct.subscribe_symbol(_pre_pair)
+
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
                 if action in ("open", "open_limit"):
                     atomic_spread_ok = True
                     for check_aid in sides:
+                        # Skip accounts not managed by this FIX loop (e.g. iFOREX, MT Direct)
+                        # — they have their own command loops with native quote gates.
+                        if check_aid not in self.accounts:
+                            continue
                         check_side = sides[check_aid]
                         check_max_spread = check_side.get("max_spread") if check_side.get("max_spread") is not None else session.get("max_spread_points", 999)
                         try:
@@ -3691,11 +3707,22 @@ class FixAccountManager:
                                 cur_sp = None
 
                             if cur_sp is None:
-                                logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: no quote for session %s — blocking", check_aid, session_id[:8])
+                                # Throttle: log at most once per 30s per account to avoid log flood
+                                _gate_key = ("fix_gate_noquote", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: no quote for session %s — blocking", check_aid, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 atomic_spread_ok = False
                                 break
                             if cur_sp > check_max_spread:
-                                logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: spread %.1f > max %s — blocking session %s", check_aid, cur_sp, check_max_spread, session_id[:8])
+                                _gate_key = ("fix_gate_highspread", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC FIX OPEN SPREAD GATE: spread %.1f > max %s — blocking session %s", check_aid, cur_sp, check_max_spread, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 session.setdefault("spread_rejects", {})[check_aid] = session.get("spread_rejects", {}).get(check_aid, 0) + 1
                                 atomic_spread_ok = False
                                 break

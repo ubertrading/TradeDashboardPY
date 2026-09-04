@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mt_bridge_client.py â€” Python bridge client for MtBridgeService
+mt_bridge_client.py — Python bridge client for MtBridgeService
 
 Replaces pythonnet-based MT4/MT5 Direct connections with HTTP calls
 to the standalone C# MtBridgeService. Same interface as
@@ -138,12 +138,12 @@ def normalize_mt_config(cfg):
     return normalized
 
 
-# â”€â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Configuration ─────────────────────────────────────────────────────────
 BRIDGE_URL = os.environ.get("MT_BRIDGE_URL", "http://localhost:5090")
 _bridge_dir = os.path.dirname(os.path.abspath(__file__))
 BRIDGE_EXE = os.path.join(_bridge_dir, "MtBridgeService", "bin", "Release", "net8.0", "MtBridgeService.exe")
 
-# â”€â”€â”€ HTTP Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── HTTP Helpers ──────────────────────────────────────────────────────────
 
 def _api(method, path, data=None, timeout=30):
     """Make an HTTP request to the bridge service."""
@@ -179,7 +179,7 @@ def _delete(path, timeout=30):
     return _api("DELETE", path, timeout=timeout)
 
 
-# â”€â”€â”€ Bridge Process Management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Bridge Process Management ─────────────────────────────────────────────
 
 _bridge_process = None
 
@@ -241,9 +241,9 @@ def stop_bridge():
         _bridge_process = None
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# MtBridgeAccount â€” drop-in replacement for MT4DirectAccount/MT5DirectAccount
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════════════════
+# MtBridgeAccount — drop-in replacement for MT4DirectAccount/MT5DirectAccount
+# ═══════════════════════════════════════════════════════════════════════════
 
 class MtBridgeAccount:
     """
@@ -281,7 +281,7 @@ class MtBridgeAccount:
     @property
     def conn_type(self):
         t = self.config.get("type", self.config.get("platform", "mt5")).lower()
-        # Normalise to canonical 'mt4_direct' / 'mt5_direct' â€” same as mt_direct_connector
+        # Normalise to canonical 'mt4_direct' / 'mt5_direct' — same as mt_direct_connector
         if t in ("mt5", "mt5_direct"):
             return "mt5_direct"
         return "mt4_direct"
@@ -348,7 +348,7 @@ class MtBridgeAccount:
                         _quote_wakeup.set()  # Wake command loop immediately
                     else:
                         # Not connected yet (async stagger still in progress or
-                        # reconnecting) â€” do NOT write positions so stale data
+                        # reconnecting) — do NOT write positions so stale data
                         # from a previous session is never injected.
                         logger.debug("[%s] Bridge heartbeat: account not connected, skipping position push",
                                      self.account_id)
@@ -768,7 +768,7 @@ class MtBridgeAccount:
                     fees     = float(sv.get("fees", 0) or 0)
                     net      = gross + swap + fees          # true net per pair
                     hedge_lots = round(count / 2.0, 2)
-                    sv["net_pnl"]    = round(net, 2)       # net field â€” do NOT overwrite pnl (avoids double-count in aggregation)
+                    sv["net_pnl"]    = round(net, 2)       # net field — do NOT overwrite pnl (avoids double-count in aggregation)
                     sv["hedge_lots"] = hedge_lots
                     sv["pnl_per_lot"] = round(net / hedge_lots, 2) if hedge_lots > 0 else 0.0
             return result
@@ -789,7 +789,7 @@ class MtBridgeAccount:
         return None
 
     def get_quote_direct(self, symbol):
-        """Get live bid/ask â€” same as get_symbol_info via bridge."""
+        """Get live bid/ask — same as get_symbol_info via bridge."""
         return self.get_symbol_info(symbol)
 
     def get_swap_rates(self, symbols):
@@ -1046,9 +1046,9 @@ class MtBridgeAccount:
                     info[k] = v
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# MtBridgeManager â€” drop-in replacement for MTDirectManager
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════════════════════════
+# MtBridgeManager — drop-in replacement for MTDirectManager
+# ═══════════════════════════════════════════════════════════════════════════
 
 class MtBridgeManager:
     """
@@ -1064,14 +1064,14 @@ class MtBridgeManager:
         self.accounts = {}
         self._running = False
         self._command_thread = None
-        # Don't auto-start in __init__ â€” dashboard calls .start() explicitly
+        # Don't auto-start in __init__ — dashboard calls .start() explicitly
     
-    def start(self):
+    def start(self, force_connect_all=False, **kwargs):
         """Start the bridge and load config."""
         if self._running:
             return  # already started
         if not ensure_bridge_running():
-            logger.error("MtBridgeService failed to start â€” MT Direct disabled")
+            logger.error("MtBridgeService failed to start — MT Direct disabled")
             return
         self._running = True
         self._load_config()
@@ -1109,7 +1109,7 @@ class MtBridgeManager:
         if not should_issue:
             return False
 
-        # Phase 1: Collect commands under the dashboard lock (fast â€” no broker calls)
+        # Phase 1: Collect commands under the dashboard lock (fast — no broker calls)
         pending_commands = []  # list of (direct_acct, session, session_id, account_id, pair, lot_size, comment, result, action, side_info)
 
         with self.dd["lock"]:
@@ -1161,11 +1161,21 @@ class MtBridgeManager:
                                 cur_sp = ea_i.get("spread")
 
                             if cur_sp is None:
-                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: no quote for %s — blocking session %s", check_aid, check_pair, session_id[:8])
+                                _gate_key = ("bridge_gate_noquote", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC OPEN SPREAD GATE: no quote for %s — blocking session %s", check_aid, check_pair, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 atomic_spread_ok = False
                                 break
                             if cur_sp > check_max_spread:
-                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: spread %.1f > max %s for %s — blocking session %s", check_aid, cur_sp, check_max_spread, check_pair, session_id[:8])
+                                _gate_key = ("bridge_gate_highspread", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC OPEN SPREAD GATE: spread %.1f > max %s for %s — blocking session %s", check_aid, cur_sp, check_max_spread, check_pair, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 session.setdefault("spread_rejects", {})[check_aid] = session.get("spread_rejects", {}).get(check_aid, 0) + 1
                                 atomic_spread_ok = False
                                 break
@@ -1266,10 +1276,20 @@ class MtBridgeManager:
                             current_spread = ea_info.get("spread")
 
                         if current_spread is None:
-                            logger.info("[%s] Spread gate: no quotes for %s, skipping", account_id, pair)
+                            _gate_key = ("bridge_gate_single_noquote", account_id, pair)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] Spread gate: no quotes for %s, skipping", account_id, pair)
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
                             continue
                         if max_spread is not None and current_spread > max_spread:
-                            logger.info("[%s] Spread gate: spread %.1f > max %s for %s", account_id, current_spread, max_spread, pair)
+                            _gate_key = ("bridge_gate_single_highspread", account_id, pair)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] Spread gate: spread %.1f > max %s for %s", account_id, current_spread, max_spread, pair)
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
                             session.setdefault("spread_rejects", {})[account_id] = session.get("spread_rejects", {}).get(account_id, 0) + 1
                             continue
 
@@ -1499,7 +1519,7 @@ class MtBridgeManager:
                             elif action.startswith("cycle_"):
                                 had_cycle = True
                 else:
-                    logger.warning("[%s] Unknown action=%s result=%s â€” skipping",
+                    logger.warning("[%s] Unknown action=%s result=%s — skipping",
                                    account_id, action, result)
             except Exception as e:
                 logger.error("[%s] Command execution error: %s", account_id, e)
@@ -1528,7 +1548,7 @@ class MtBridgeManager:
             side_info = session.get("sides", {}).get(account_id, {})
             original_side = side_info.get("action", "buy")
 
-            # Look up actual position volume from broker â€” MT5 rejects mismatched lots
+            # Look up actual position volume from broker — MT5 rejects mismatched lots
             actual_lots = lot_size
             try:
                 orders = direct_acct._get_open_orders()
@@ -1721,7 +1741,7 @@ class MtBridgeManager:
                         )
                     return
                 else:
-                    logger.warning("[%s] CYCLE: idx=%d >= acct_fills=%d â€” nothing to close",
+                    logger.warning("[%s] CYCLE: idx=%d >= acct_fills=%d — nothing to close",
                                    account_id, idx, len(acct_fills))
                     return
 

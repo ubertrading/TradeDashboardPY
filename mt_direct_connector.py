@@ -4061,7 +4061,7 @@ class MTDirectManager:
         self._command_thread = None
         self._lock = threading.Lock()
 
-    def load_config(self):
+    def load_config(self, force_connect_all=False):
         """Load Direct accounts from config file."""
         if not os.path.exists(self.config_path):
             logger.info("No MT Direct config file found at %s", self.config_path)
@@ -4085,7 +4085,7 @@ class MTDirectManager:
                 MAX_ROUNDS = 3
                 RETRY_DELAY = 15
                 to_connect = [aid for aid, cfg in configs.items()
-                              if cfg.get("auto_connect_start", True)]
+                              if force_connect_all or cfg.get("auto_connect_start", True)]
                 logger.info("Batch connecting %d account(s) (max %d rounds)...",
                             len(to_connect), MAX_ROUNDS)
                 failed = list(to_connect)
@@ -4226,6 +4226,7 @@ class MTDirectManager:
             info = self.dd["ea_account_info"].get(acct_id, {})
             result[acct_id] = {
                 "label": acct.label,
+                "group_label": acct.config.get("group_label", acct.label),
                 "type": acct.conn_type,
                 "connected": acct.connected,
                 "balance": info.get("balance"),
@@ -4239,12 +4240,17 @@ class MTDirectManager:
                 "server": acct.config.get("server", ""),
                 "login": acct.config.get("login", ""),
                 "last_error": acct._last_error,
+                "auto_connect_start": acct.config.get("auto_connect_start", True),
+                "swapfree": acct.config.get("swapfree", False),
+                "stop_out_level": acct.config.get("stop_out_level"),
+                "alert_email": acct.config.get("alert_email"),
+                "alert_telegram": acct.config.get("alert_telegram"),
             }
         return result
 
-    def start(self):
+    def start(self, force_connect_all=False):
         """Load config and start command loop."""
-        self.load_config()
+        self.load_config(force_connect_all=force_connect_all)
         self._running = True
         self._command_thread = threading.Thread(
             target=self._command_loop, daemon=True, name="MTDirect-CmdLoop"
@@ -4335,6 +4341,10 @@ class MTDirectManager:
                 if action in ("open", "open_limit"):
                     atomic_spread_ok = True
                     for check_aid in sides:
+                        # Skip accounts not managed by this MT Direct loop (e.g. iFOREX, FIX).
+                        # They have their own command loops with native spread gates.
+                        if check_aid not in self.accounts:
+                            continue
                         check_side = sides[check_aid]
                         check_pair = (check_side.get("pair") or session.get("pair", "")).strip()
                         check_max_spread = check_side.get("max_spread") if check_side.get("max_spread") is not None else session.get("max_spread_points")
@@ -4366,11 +4376,21 @@ class MTDirectManager:
                                 cur_sp = ea_i.get("spread")
 
                             if cur_sp is None:
-                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: no quote for %s — blocking session %s", check_aid, check_pair, session_id[:8])
+                                _gate_key = ("mtd_gate_noquote", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC OPEN SPREAD GATE: no quote for %s — blocking session %s", check_aid, check_pair, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 atomic_spread_ok = False
                                 break
                             if cur_sp > check_max_spread:
-                                logger.info("[%s] ATOMIC OPEN SPREAD GATE: spread %.1f > max %s for %s — blocking session %s", check_aid, cur_sp, check_max_spread, check_pair, session_id[:8])
+                                _gate_key = ("mtd_gate_highspread", check_aid, session_id)
+                                _gate_last = getattr(self, '_gate_log_ts', {})
+                                if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                    logger.info("[%s] ATOMIC OPEN SPREAD GATE: spread %.1f > max %s for %s — blocking session %s", check_aid, cur_sp, check_max_spread, check_pair, session_id[:8])
+                                    _gate_last[_gate_key] = time.time()
+                                    self._gate_log_ts = _gate_last
                                 session.setdefault("spread_rejects", {})[check_aid] = session.get("spread_rejects", {}).get(check_aid, 0) + 1
                                 atomic_spread_ok = False
                                 break
@@ -4506,10 +4526,20 @@ class MTDirectManager:
 
                         if current_spread is None:
                             # No quotes yet — do not send orders blind
-                            logger.info("[%s] Spread gate: no quotes for %s, skipping", account_id, pair)
+                            _gate_key = ("mtd_gate_single_noquote", account_id, pair)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] Spread gate: no quotes for %s, skipping", account_id, pair)
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
                             continue
                         if max_spread is not None and current_spread > max_spread:
-                            logger.info("[%s] Spread gate: spread %.1f > max %s for %s", account_id, current_spread, max_spread, pair)
+                            _gate_key = ("mtd_gate_single_highspread", account_id, pair)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] Spread gate: spread %.1f > max %s for %s", account_id, current_spread, max_spread, pair)
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
                             session.setdefault("spread_rejects", {})[account_id] = \
                                 session.get("spread_rejects", {}).get(account_id, 0) + 1
                             continue

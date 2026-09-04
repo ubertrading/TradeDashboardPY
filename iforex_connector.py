@@ -17,6 +17,7 @@ import logging
 import threading
 import requests
 from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime, timezone
 
 logger = logging.getLogger("iforex_connector")
 
@@ -56,6 +57,60 @@ REVERSE_INSTRUMENT_MAP = {
 }
 
 
+# ─── Notional Quantity & Lot Conversion Helpers ──────────────────────────────
+FOREX_CURRENCIES = {
+    "USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF",
+    "NOK", "SEK", "SGD", "HKD", "TRY", "ZAR", "MXN", "PLN",
+    "CZK", "DKK", "HUF", "CNH", "ILS"
+}
+
+def is_forex_pair(symbol: str) -> bool:
+    """Check if an instrument symbol represents a Forex currency pair."""
+    sym_clean = str(symbol).upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+    if any(k in sym_clean for k in ("GOLD", "XAU", "SILVER", "XAG", "OIL", "WTI", "BRENT", "US30", "US500", "NAS100", "DE30", "DE40", "UK100", "BTC", "ETH")):
+        return False
+    if len(sym_clean) == 6 and sym_clean[:3] in FOREX_CURRENCIES and sym_clean[3:] in FOREX_CURRENCIES:
+        return True
+    if "/" in str(symbol):
+        parts = str(symbol).upper().split("/")
+        if len(parts) == 2 and parts[0] in FOREX_CURRENCIES and parts[1] in FOREX_CURRENCIES:
+            return True
+    if sym_clean in ("EURUSD", "USDJPY", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF"):
+        return True
+    return True
+
+def lot_to_notional(symbol: str, lot_or_amount: float) -> int:
+    """
+    Convert lot size or amount to notional quantity for iFOREX orders.
+    For Forex pairs: 1 lot = 100,000 units of base currency (e.g. 1 lot USD/JPY = 100,000 USD).
+    If lot_or_amount < 500, it is treated as standard lot size (e.g. 1.0 -> 100,000, 0.1 -> 10,000).
+    If lot_or_amount >= 500, it is assumed to be already in notional units.
+    """
+    if lot_or_amount <= 0:
+        return 0
+    if is_forex_pair(symbol):
+        if lot_or_amount < 500.0:
+            return int(round(lot_or_amount * 100000.0))
+        return int(round(lot_or_amount))
+    else:
+        if lot_or_amount < 500.0:
+            return int(round(lot_or_amount * 100.0))
+        return int(round(lot_or_amount))
+
+def notional_to_lots(symbol: str, amount: float) -> float:
+    """
+    Convert notional unit amount back to lot size for display and dashboard accounting.
+    For Forex pairs: 100,000 units = 1.0 lot.
+    """
+    if amount <= 0:
+        return 0.0
+    if is_forex_pair(symbol):
+        if amount >= 500.0:
+            return round(amount / 100000.0, 4)
+        return round(amount, 4)
+    return round(amount, 4)
+
+
 # ─── Account Class ──────────────────────────────────────────────────────────
 class IForexAccount:
     def __init__(self, config: Dict[str, Any], dashboard_data: Dict[str, Any]):
@@ -90,23 +145,38 @@ class IForexAccount:
         self._quotes_cache: Dict[str, Dict[str, float]] = {}
         self._margin_cache: Dict[int, float] = {}
         self._open_orders: List[Dict[str, Any]] = []
+        self._account_summary: Dict[str, float] = {}
+        self.is_market_closed: bool = False
+        self._last_401_ts = 0.0
         self._running = False
         self._poll_thread = None
+        self._pos_sync_thread = None
         self._lock = threading.Lock()
 
     def start(self):
-        """Start the background polling loop."""
+        """Start the background polling loop and position sync loop."""
         self._running = True
+        self.connected = True
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name=f"iforex_poll_{self.account_id}")
         self._poll_thread.start()
-        logger.info("[%s] iFOREX Direct polling thread started", self.account_id)
+        self._pos_sync_thread = threading.Thread(target=self._position_sync_loop, daemon=True, name=f"iforex_possync_{self.account_id}")
+        self._pos_sync_thread.start()
+        logger.info("[%s] iFOREX Direct polling and position sync threads started", self.account_id)
 
     def stop(self):
-        """Stop background polling."""
+        """Stop background polling and position sync."""
         self._running = False
+        self.connected = False
+        with self._lock:
+            self._quotes_cache.clear()
+        if "ea_account_info" in self.dd and self.account_id in self.dd["ea_account_info"]:
+            self.dd["ea_account_info"][self.account_id]["connected"] = False
 
     def fetch_quote_live(self, symbol: str) -> Optional[Tuple[float, float]]:
         """Actively fetch live bid/ask from iFOREX WebPL4 for symbol."""
+        if not self.connected and self._last_401_ts > 0 and (time.time() - self._last_401_ts) < 30:
+            return None
+
         sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
         inst_id = INSTRUMENT_MAP.get(sym_clean)
         if not inst_id:
@@ -115,8 +185,8 @@ class IForexAccount:
         # 1. Primary: FeedsHistory/GetTicks (real live ticks: rateType 1 = Bid, rateType 0 = Ask)
         url_ticks = f"{self.base_url}/FeedsHistory/GetTicks"
         try:
-            r_bid = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 1}, timeout=5)
-            r_ask = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 0}, timeout=5)
+            r_bid = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 1}, timeout=3.0)
+            r_ask = self.session.get(url_ticks, params={"instrumentId": inst_id, "numTicks": 1, "rateType": 0}, timeout=3.0)
             if r_bid.status_code == 200 and r_ask.status_code == 200:
                 self.connected = True
                 b_ticks = r_bid.json().get("Ticks", [])
@@ -130,7 +200,11 @@ class IForexAccount:
                         return (bid, ask)
             elif r_bid.status_code == 401 or r_ask.status_code == 401:
                 self.connected = False
-                logger.warning("[%s] iFOREX session expired (401 Unauthorized) — please update Cookie in Account Edit", self.account_id)
+                now_ts = time.time()
+                if now_ts - self._last_401_ts > 45:
+                    self._last_401_ts = now_ts
+                    logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
+                    self._trigger_auto_relogin()
                 return None
         except Exception as e:
             logger.debug("[%s] FeedsHistory/GetTicks error for %s: %s", self.account_id, symbol, e)
@@ -138,7 +212,7 @@ class IForexAccount:
         # 2. Fallback to GetDealMarginDetails
         url_margin = f"{self.base_url}/Deals/GetDealMarginDetails"
         try:
-            resp = self.session.get(url_margin, params={"instrumentId": inst_id}, timeout=8)
+            resp = self.session.get(url_margin, params={"instrumentId": inst_id}, timeout=3.0)
             if resp.status_code == 200:
                 self.connected = True
                 try:
@@ -156,26 +230,72 @@ class IForexAccount:
                     pass
             elif resp.status_code == 401:
                 self.connected = False
+                now_ts = time.time()
+                if now_ts - self._last_401_ts > 45:
+                    self._last_401_ts = now_ts
+                    logger.warning("[%s] iFOREX session expired (401) on margin check — initiating auto-recovery...", self.account_id)
+                    self._trigger_auto_relogin()
         except Exception:
             pass
 
         return None
 
-    def get_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
-        """Return (bid, ask) for symbol from cache or live fetch."""
+    def _trigger_auto_relogin(self):
+        """Trigger background Playwright auto-login if credentials or profile exist."""
+        if getattr(self, "_relogin_in_progress", False):
+            return
+        self._relogin_in_progress = True
+
+        def _worker():
+            try:
+                from iforex_auto_login import refresh_iforex_session
+                logger.info("[%s] Triggering automatic iFOREX session recovery in background...", self.account_id)
+                res = refresh_iforex_session(
+                    account_id=self.account_id,
+                    username=self.config.get("username"),
+                    password=self.config.get("password"),
+                    timeout_sec=90,
+                    headless=True
+                )
+                if res.get("status") == "ok":
+                    self.cookie = res["cookie"]
+                    self.session.headers["Cookie"] = res["cookie"]
+                    self.security_token = res["security_token"]
+                    self.connected = True
+                    self._last_401_ts = 0.0
+                    with self._lock:
+                        self._quotes_cache.clear()
+                    logger.info("[%s] Automatic session recovery succeeded! Reconnected to iFOREX.", self.account_id)
+                else:
+                    logger.warning("[%s] Headless auto-recovery did not complete: %s (click 'Re-Auth' in UI)",
+                                   self.account_id, res.get("message"))
+            except Exception as e:
+                logger.error("[%s] Background auto-login error: %s", self.account_id, e)
+            finally:
+                self._relogin_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True, name=f"iforex_reauth_{self.account_id}").start()
+
+    def get_quote(self, symbol: str, allow_live: bool = False) -> Optional[Tuple[float, float]]:
+        """Return (bid, ask) for symbol from cache or live fetch if allow_live=True."""
         sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
         with self._lock:
             q = self._quotes_cache.get(sym_clean)
-            if q and (time.time() - q.get("ts", 0)) < 3.0:
+            if q and (time.time() - q.get("ts", 0)) < 10.0:
                 return (q["bid"], q["ask"])
-        return self.fetch_quote_live(symbol)
+        if allow_live:
+            return self.fetch_quote_live(symbol)
+        return None
 
     def get_deal_margin_details(self, symbol_or_id: Any) -> Optional[Dict[str, Any]]:
         """Query margin requirements for an instrument."""
+        if not self.connected and self._last_401_ts > 0 and (time.time() - self._last_401_ts) < 30:
+            return None
+
         inst_id = INSTRUMENT_MAP.get(str(symbol_or_id).upper().replace("/", "").replace(" ", ""), symbol_or_id)
         url = f"{self.base_url}/Deals/GetDealMarginDetails"
         try:
-            resp = self.session.get(url, params={"instrumentId": inst_id}, timeout=10)
+            resp = self.session.get(url, params={"instrumentId": inst_id}, timeout=3.0)
             if resp.status_code == 200:
                 self.connected = True
                 try:
@@ -189,6 +309,7 @@ class IForexAccount:
                     return {"raw": resp.text}
             elif resp.status_code == 401:
                 self.connected = False
+                self._last_401_ts = time.time()
                 logger.warning("[%s] iFOREX session expired (401 Unauthorized)", self.account_id)
         except Exception as e:
             self.connected = False
@@ -200,7 +321,7 @@ class IForexAccount:
         inst_id = INSTRUMENT_MAP.get(str(symbol_or_id).upper().replace("/", ""), symbol_or_id)
         url = f"{self.base_url}/Deals/GetDealRiskDetails"
         try:
-            resp = self.session.get(url, params={"instrumentId": inst_id}, timeout=10)
+            resp = self.session.get(url, params={"instrumentId": inst_id}, timeout=3.0)
             if resp.status_code == 200:
                 self.connected = True
                 return resp.json()
@@ -208,12 +329,13 @@ class IForexAccount:
             logger.error("[%s] GetDealRiskDetails error: %s", self.account_id, e)
         return None
 
-    def get_overnight_financing(self, symbol_or_id: Any, amount: float = 10000.0) -> Optional[Dict[str, Any]]:
+    def get_overnight_financing(self, symbol_or_id: Any, amount: float = 1.0) -> Optional[Dict[str, Any]]:
         """Query long/short overnight swap/financing rates."""
         inst_id = INSTRUMENT_MAP.get(str(symbol_or_id).upper().replace("/", ""), symbol_or_id)
+        notional_amount = lot_to_notional(str(symbol_or_id), amount)
         url = f"{self.base_url}/Deals/GetOvernightFinancing"
         try:
-            resp = self.session.get(url, params={"instrumentId": inst_id, "amount": int(amount)}, timeout=10)
+            resp = self.session.get(url, params={"instrumentId": inst_id, "amount": int(notional_amount)}, timeout=3.0)
             if resp.status_code == 200:
                 return resp.json()
         except Exception as e:
@@ -224,7 +346,7 @@ class IForexAccount:
                    other_rate: Optional[float] = None, tp_rate: float = 0.0, sl_rate: float = 0.0) -> Dict[str, Any]:
         """
         Open a new position directly via HTTP POST.
-        amount: units (e.g. 100,000 for 1.0 lot, 10,000 for 0.1 lot, 1,000 for 0.01 lot)
+        amount: lot size or notional quantity (for Forex pairs, 1 lot = 100,000 units of base currency)
         """
         sym_clean = symbol.upper().replace("/", "")
         inst_id = INSTRUMENT_MAP.get(sym_clean, 3631)
@@ -232,11 +354,13 @@ class IForexAccount:
         if other_rate is None:
             other_rate = market_rate
 
+        notional_amount = lot_to_notional(symbol, amount)
+
         url = f"{self.base_url}/Deals/OpenDeal"
         payload = {
             "DealType": 2,  # Spot
             "InstrumentId": inst_id,
-            "Amount": int(amount),
+            "Amount": int(notional_amount),
             "MarketRate": market_rate,
             "OtherRateSeen": other_rate,
             "OrderDirection": dir_code,
@@ -246,15 +370,28 @@ class IForexAccount:
         }
         
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
-        logger.info("[%s] Submitting OpenDeal: %s", self.account_id, payload)
+        logger.info("[%s] Submitting OpenDeal (%s %s, input=%s -> notional=%d): %s", 
+                    self.account_id, symbol, direction, amount, notional_amount, payload)
         try:
-            resp = self.session.post(url, data=payload, headers=headers, timeout=15)
+            resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
             try:
                 res_json = resp.json()
-                return {"status": "ok" if resp.status_code == 200 else "error", "data": res_json, "raw": resp.text}
+                is_ok = (resp.status_code == 200 and
+                         isinstance(res_json, dict) and
+                         res_json.get("status") == 1 and
+                         (res_json.get("itemId") or 0) > 0)
+                if is_ok:
+                    return {"status": "ok", "data": res_json, "raw": resp.text}
+                else:
+                    err_msg = res_json.get("result") if isinstance(res_json, dict) else resp.text
+                    if "OrderError103" in str(err_msg) or "market is closed" in str(resp.text).lower():
+                        self.is_market_closed = True
+                        if "ea_account_info" in self.dd:
+                            self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = True
+                    return {"status": "error", "message": str(err_msg), "data": res_json, "raw": resp.text}
             except Exception:
-                return {"status": "ok" if resp.status_code == 200 else "error", "raw": resp.text}
+                return {"status": "error", "message": "Invalid JSON response", "raw": resp.text}
         except Exception as e:
             logger.error("[%s] OpenDeal exception: %s", self.account_id, e)
             return {"status": "error", "message": str(e)}
@@ -274,7 +411,7 @@ class IForexAccount:
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
         logger.info("[%s] Submitting CloseDeals: %s", self.account_id, payload)
         try:
-            resp = self.session.post(url, data=payload, headers=headers, timeout=15)
+            resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
             try:
                 res_json = resp.json()
@@ -301,19 +438,75 @@ class IForexAccount:
                 # 2. Query EUR/USD margin to check connection & maintain session keep-alive
                 self.get_deal_margin_details(3631)
 
-                # 3. Update ea_account_info dictionary
+                # 3. Poll active symbols from sessions for live quotes (non-blocking for dashboard lock)
+                sessions = self.dd.get("sessions", {})
+                active_pairs = set()
+                for sess in sessions.values():
+                    if sess.get("status") in ("active", "partial_close"):
+                        sides = sess.get("sides", {})
+                        if self.account_id in sides:
+                            pair = (sides[self.account_id].get("pair") or sess.get("pair", "")).strip()
+                            if pair:
+                                active_pairs.add(pair)
+                
+                if not active_pairs:
+                    active_pairs.add("EUR/USD")
+
+                for pair in active_pairs:
+                    self.fetch_quote_live(pair)
+
+                # 4. Update ea_account_info dictionary
                 if "ea_account_info" in self.dd:
                     info = self.dd["ea_account_info"].setdefault(self.account_id, {})
                     info["conn_type"] = "iforex_direct"
                     info["account_number"] = self.account_number
                     info["connected"] = self.connected
                     
+                    # Check weekend market hours (Friday >= 20:00 UTC through Sunday < 21:00 UTC)
+                    now_utc = datetime.now(timezone.utc)
+                    is_weekend = (now_utc.weekday() == 4 and now_utc.hour >= 20) or (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 21)
+                    if is_weekend:
+                        self.is_market_closed = True
+                        self._market_closed_by_weekend = True
+                    elif getattr(self, '_market_closed_by_weekend', False):
+                        self.is_market_closed = False
+                        self._market_closed_by_weekend = False
+                    info["market_closed"] = self.is_market_closed
+                    
                     # Margin & Balance
-                    info.setdefault("balance", float(self.config.get("balance", 0.0)))
-                    info.setdefault("equity", float(self.config.get("equity", 0.0)))
-                    info.setdefault("margin", float(self.config.get("margin", 0.0)))
-                    info.setdefault("free_margin", float(self.config.get("free_margin", 0.0)))
+                    summ = getattr(self, "_account_summary", {})
+                    if summ.get("balance", 0.0) > 0:
+                        info["balance"] = summ["balance"]
+                    else:
+                        info.setdefault("balance", float(self.config.get("balance", 0.0)))
+
+                    if summ.get("equity", 0.0) > 0:
+                        info["equity"] = summ["equity"]
+                    else:
+                        info.setdefault("equity", float(self.config.get("equity", 0.0)))
+
+                    if "margin" in summ and summ["margin"] is not None:
+                        info["margin"] = summ["margin"]
+                    else:
+                        info.setdefault("margin", float(self.config.get("margin", 0.0)))
+
+                    if "free_margin" in summ and summ["free_margin"] is not None:
+                        info["free_margin"] = summ["free_margin"]
+                    else:
+                        info.setdefault("free_margin", float(self.config.get("free_margin", 0.0)))
+
                     info.setdefault("leverage", int(self.config.get("leverage", 400)))
+
+                    # Update spread / bid / ask in info
+                    for pair in active_pairs:
+                        q = self.get_quote(pair, allow_live=False)
+                        if q:
+                            info["bid"] = q[0]
+                            info["ask"] = q[1]
+                            pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
+                            info["spread"] = round((q[1] - q[0]) * pip_mult, 1)
+                            info["symbol"] = pair
+                            break
                     
                     # Position tracking for hedge balancing
                     orders = self._get_open_orders()
@@ -321,22 +514,139 @@ class IForexAccount:
                     info["open_tickets"] = tickets
                     info["positions"] = len(tickets)
                     info["pos_details"] = orders
+                    info["position_details"] = [
+                        {
+                            "ticket": str(o.get("Ticket")),
+                            "symbol": o.get("Symbol", "EURUSD"),
+                            "type": str(o.get("Type", "buy")),
+                            "lots": float(o.get("Lots", 0.01)),
+                            "open_price": float(o.get("OpenPrice", 0.0)),
+                            "profit": float(o.get("Profit", 0.0))
+                        }
+                        for o in orders if o.get("Ticket")
+                    ]
 
                     # Lots calculation
                     _lbi = {}
+                    tot_lots = 0.0
                     for o in orders:
                         sym = o.get("Symbol", "Unknown")
-                        lots = o.get("Lots", 0.0)
+                        lots = o.get("Lots")
+                        if lots is None or lots == 0.0:
+                            amt = float(o.get("Amount") or o.get("amount") or 0.0)
+                            lots = notional_to_lots(sym, amt)
                         if sym not in _lbi:
                             _lbi[sym] = {"buy": 0.0, "sell": 0.0}
                         if str(o.get("Type", "")).lower() in ("buy", "0", "op_buy"):
                             _lbi[sym]["buy"] = round(_lbi[sym]["buy"] + lots, 2)
+                            tot_lots += lots
                         else:
                             _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
+                            tot_lots -= lots
                     info["lots_by_instrument"] = _lbi
+                    info["total_lots"] = round(tot_lots, 2)
+                    now_ts = time.time()
+                    info["last_update"] = now_ts
+                    if "ea_heartbeats" in self.dd:
+                        self.dd["ea_heartbeats"][self.account_id] = now_ts
 
             except Exception as e:
                 logger.debug("[%s] Poll loop error: %s", self.account_id, e)
+            time.sleep(3.0)
+
+    def _position_sync_loop(self):
+        """
+        Background thread that continuously synchronizes active positions from the iFOREX platform.
+        Uses headless Playwright to inspect React DOM for live positions.
+        If a position was closed externally in iFOREX GUI, this updates _open_orders,
+        which immediately triggers ea_account_info update and hedge monitor rebalancing!
+        """
+        time.sleep(5)  # Initial wait for platform settlement
+        while self._running:
+            try:
+                from iforex_auto_login import fetch_active_deals_and_summary
+                deals, summary = fetch_active_deals_and_summary(timeout_sec=25)
+                if not self._running:
+                    break
+                if summary:
+                    with self._lock:
+                        self._account_summary = summary
+                    if summary.get("balance", 0.0) > 0:
+                        self.config["balance"] = summary["balance"]
+                    if summary.get("equity", 0.0) > 0:
+                        self.config["equity"] = summary["equity"]
+                    # Propagate market_closed from Playwright DOM check
+                    if "market_closed" in summary:
+                        self.is_market_closed = bool(summary["market_closed"])
+                        if "ea_account_info" in self.dd:
+                            self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = self.is_market_closed
+                if deals is not None:
+                    with self._lock:
+                        prev_tickets = set(str(o.get("Ticket")) for o in self._open_orders if o.get("Ticket"))
+                        new_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
+                        
+                        # Check if any ticket disappeared (e.g. manual closure on iFOREX)
+                        closed_externally = prev_tickets - new_tickets
+                        if closed_externally:
+                            logger.info("[%s] Detected %d position(s) closed externally in iFOREX: %s",
+                                        self.account_id, len(closed_externally), closed_externally)
+
+                        # Update open orders list
+                        self._open_orders = deals
+                        
+                        # Also refresh ea_account_info right away so hedge monitor sees change immediately
+                        if "ea_account_info" in self.dd:
+                            info = self.dd["ea_account_info"].setdefault(self.account_id, {})
+                            if summary:
+                                if summary.get("balance", 0.0) > 0:
+                                    info["balance"] = summary["balance"]
+                                if summary.get("equity", 0.0) > 0:
+                                    info["equity"] = summary["equity"]
+                                if "margin" in summary and summary["margin"] is not None:
+                                    info["margin"] = summary["margin"]
+                                if "free_margin" in summary and summary["free_margin"] is not None:
+                                    info["free_margin"] = summary["free_margin"]
+                                if "open_pl" in summary and summary["open_pl"] is not None:
+                                    info["profit"] = summary["open_pl"]
+                            tickets = [o.get("Ticket") for o in deals if o.get("Ticket")]
+                            info["open_tickets"] = tickets
+                            info["positions"] = len(tickets)
+                            info["pos_details"] = deals
+                            info["position_details"] = [
+                                {
+                                    "ticket": str(o.get("Ticket")),
+                                    "symbol": o.get("Symbol", "EURUSD"),
+                                    "type": str(o.get("Type", "buy")),
+                                    "lots": float(o.get("Lots", 0.01)),
+                                    "open_price": float(o.get("OpenPrice", 0.0)),
+                                    "profit": float(o.get("Profit", 0.0))
+                                }
+                                for o in deals if o.get("Ticket")
+                            ]
+                            _lbi = {}
+                            tot_lots = 0.0
+                            for o in deals:
+                                sym = o.get("Symbol", "Unknown")
+                                lots = float(o.get("Lots") or 0.01)
+                                if sym not in _lbi:
+                                    _lbi[sym] = {"buy": 0.0, "sell": 0.0}
+                                if str(o.get("Type", "")).lower() in ("buy", "0", "op_buy"):
+                                    _lbi[sym]["buy"] = round(_lbi[sym]["buy"] + lots, 2)
+                                    tot_lots += lots
+                                else:
+                                    _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
+                                    tot_lots -= lots
+                            info["lots_by_instrument"] = _lbi
+                            info["total_lots"] = round(tot_lots, 2)
+                            now_t = time.time()
+                            info["last_update"] = now_t
+                            if "ea_heartbeats" in self.dd:
+                                self.dd["ea_heartbeats"][self.account_id] = now_t
+
+            except Exception as e:
+                logger.debug("[%s] Position sync error: %s", self.account_id, e)
+
+            # Sleep between position synchronization passes
             time.sleep(5.0)
 
 
@@ -347,6 +657,8 @@ class IForexAccountManager:
         self.config_dir = config_dir
         self.config_file = os.path.join(config_dir, "iforex_accounts.json")
         self.accounts: Dict[str, IForexAccount] = {}
+        self._running = False
+        self._cmd_thread = None
         self.load_accounts()
 
     def load_accounts(self):
@@ -397,31 +709,277 @@ class IForexAccountManager:
         if account_id in self.accounts:
             self.accounts[account_id].stop()
             del self.accounts[account_id]
+            self.dd.get("ea_account_info", {}).pop(account_id, None)
+            self.dd.get("ea_heartbeats", {}).pop(account_id, None)
             self.save_config()
             return True
         return False
+
+    def start(self):
+        """Start all account poll threads and the command loop."""
+        self._running = True
+        self._cmd_thread = threading.Thread(
+            target=self._command_loop, daemon=True, name="IForex-CmdLoop"
+        )
+        self._cmd_thread.start()
+        logger.info("IForexAccountManager command loop started")
+
+    def stop(self):
+        """Stop the command loop and all account threads."""
+        self._running = False
+        for acct in self.accounts.values():
+            acct.stop()
+
+    def _command_loop(self):
+        """Poll active sessions and dispatch orders for iFOREX accounts."""
+        while self._running:
+            try:
+                self._process_commands()
+            except Exception as e:
+                logger.error("IForex command loop error: %s", e)
+            time.sleep(0.25)
+
+    def _process_commands(self):
+        """Check each active session for iFOREX accounts that need orders sent."""
+        should_issue = self.dd.get("should_issue_command")
+        if not should_issue:
+            return
+
+        with self.dd.get("lock", threading.Lock()):
+            sessions = self.dd.get("sessions", {})
+            in_flight = self.dd.get("in_flight_commands", {})
+
+            for session_id, session in list(sessions.items()):
+                if session.get("status") not in ("active", "partial_close"):
+                    continue
+
+                sides = session.get("sides", {})
+                action = session.get("action", "open")
+
+                for account_id, side_info in sides.items():
+                    acct = self.accounts.get(account_id)
+                    if not acct or not acct.connected:
+                        continue
+
+                    # Spread gate using iFOREX native cached get_quote (non-blocking)
+                    pair = (side_info.get("pair") or session.get("pair", "")).strip()
+                    max_spread = side_info.get("max_spread") if side_info.get("max_spread") is not None else session.get("max_spread_points")
+                    try:
+                        max_spread = float(max_spread) if max_spread is not None else None
+                    except (ValueError, TypeError):
+                        max_spread = None
+
+                    if action in ("open", "open_limit") and max_spread is not None and pair:
+                        q = acct.get_quote(pair, allow_live=False)
+                        if q is None:
+                            _gate_key = ("iforex_gate_noquote", account_id, session_id)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] IFOREX SPREAD GATE: no cached quote for %s — blocking session %s",
+                                            account_id, pair, session_id[:8])
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
+                            continue
+                        pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
+                        cur_sp = round((q[1] - q[0]) * pip_mult, 1)
+                        if cur_sp > max_spread:
+                            _gate_key = ("iforex_gate_highspread", account_id, session_id)
+                            _gate_last = getattr(self, '_gate_log_ts', {})
+                            if time.time() - _gate_last.get(_gate_key, 0) > 30:
+                                logger.info("[%s] IFOREX SPREAD GATE: spread %.1f > max %.1f for %s — blocking session %s",
+                                            account_id, cur_sp, max_spread, pair, session_id[:8])
+                                _gate_last[_gate_key] = time.time()
+                                self._gate_log_ts = _gate_last
+                            session.setdefault("spread_rejects", {})[account_id] = \
+                                session.get("spread_rejects", {}).get(account_id, 0) + 1
+                            continue
+
+                    result = should_issue(session, account_id)
+                    if result is False:
+                        continue
+
+                    lot_size = side_info.get("lot_size") or session.get("lot_size", 0.01)
+                    trade_side = side_info.get("action", "buy")
+
+                    in_flight[(session_id, account_id)] = time.time()
+
+                    # Execute outside the lock in a thread
+                    def _exec(acct_=acct, sid_=session_id, aid_=account_id,
+                               pair_=pair, ls_=lot_size, side_=trade_side,
+                               sess_=session, act_=action, res_=result):
+                        try:
+                            report = self.dd.get("report_trade_result")
+                            q2 = acct_.get_quote(pair_, allow_live=True)
+                            if not q2:
+                                logger.warning("[%s] iFOREX open aborted — no live quote for %s", aid_, pair_)
+                                in_flight.pop((sid_, aid_), None)
+                                return
+                            market_rate = q2[1] if side_ == "buy" else q2[0]
+
+                            if act_ in ("close", "rollback") or res_ == "rollback":
+                                # Close: find the iFOREX position ticket to close
+                                open_pos = acct_._get_open_orders()
+                                closed = {str(f.get("ticket")) for f in sess_.get("close_fills", []) if f.get("account") == aid_}
+
+                                target = None
+                                # 1. If rollback specifically nominated a ticket, try that first
+                                rb_specific = sess_.get("rollback_tickets", {}).get(aid_, [])
+                                if rb_specific:
+                                    for rbt in rb_specific:
+                                        if str(rbt) not in closed:
+                                            target = {"Ticket": str(rbt)}
+                                            logger.info("[%s] iFOREX rollback: using specifically queued ticket %s", aid_, rbt)
+                                            break
+
+                                # 2. Try _open_orders first (live from iFOREX DOM or open_order)
+                                if not target:
+                                    target = next((o for o in open_pos if str(o.get("Ticket")) not in closed), None)
+
+                                if not target:
+                                    # 3. Fallback: find ticket from session fills for this account
+                                    fills = sess_.get("fills", [])
+                                    for fill in fills:
+                                        if fill.get("account") == aid_ and str(fill.get("ticket")) not in closed:
+                                            target = {"Ticket": fill.get("ticket")}
+                                            logger.info("[%s] iFOREX close: found ticket %s from session fills", aid_, fill.get("ticket"))
+                                            break
+
+                                if not target:
+                                    logger.warning("[%s] iFOREX close: no open position found to close for session %s "
+                                                   "(open_orders=%d, fills=%d, closed=%d)",
+                                                   aid_, sid_[:8], len(open_pos),
+                                                   len([f for f in sess_.get("fills", []) if f.get("account") == aid_]),
+                                                   len(closed))
+                                    in_flight.pop((sid_, aid_), None)
+                                    return
+                                ticket = target.get("Ticket")
+                                logger.info("[%s] iFOREX closing position ticket=%s rate=%s", aid_, ticket, market_rate)
+                                close_res = acct_.close_order(ticket, market_rate)
+                                logger.info("[%s] iFOREX close result: %s", aid_, close_res)
+                                status = "rollback_closed" if res_ == "rollback" else "closed"
+                                if close_res.get("status") == "ok":
+                                    # Remove from _open_orders
+                                    with acct_._lock:
+                                        acct_._open_orders = [o for o in acct_._open_orders if str(o.get("Ticket")) != str(ticket)]
+
+                                    # Extract executed rate from iFOREX CloseDeals response
+                                    exec_price = market_rate
+                                    res_data = close_res.get("data")
+                                    close_item = None
+                                    if isinstance(res_data, list) and len(res_data) > 0:
+                                        close_item = res_data[0]
+                                    elif isinstance(res_data, dict):
+                                        close_item = res_data.get("Result") or res_data
+                                    if isinstance(close_item, dict):
+                                        sr = close_item.get("serverRate") or close_item.get("rateCalc")
+                                        if sr:
+                                            try:
+                                                exec_price = float(str(sr).replace(",", ""))
+                                            except Exception:
+                                                pass
+
+                                    if report:
+                                        report({"session_id": sid_, "account": aid_, "status": status,
+                                                "ticket": str(ticket), "fill_price": exec_price,
+                                                "quote_price": market_rate, "lots": ls_})
+                                else:
+                                    logger.error("[%s] iFOREX close_order failed: %s", aid_, close_res)
+                                    if report:
+                                        report({"session_id": sid_, "account": aid_, "status": "error",
+                                                "detail": str(close_res.get("raw", close_res)), "ticket": str(ticket)})
+                                    in_flight.pop((sid_, aid_), None)
+                            else:
+                                open_res = acct_.open_order(pair_, side_, ls_, market_rate)
+                                if open_res.get("status") == "ok":
+                                    data = open_res.get("data", {})
+                                    res_inner = data
+                                    if isinstance(data, list) and len(data) > 0:
+                                        res_inner = data[0]
+                                    elif isinstance(data, dict):
+                                        res_inner = data.get("Result") or data
+
+                                    # itemId is the iFOREX position number needed for CloseDeals
+                                    ticket = res_inner.get("itemId") or res_inner.get("DealId") or res_inner.get("Id") or res_inner.get("PositionId")
+                                    if not ticket:
+                                        logger.error("[%s] iFOREX OpenDeal response missing valid ticket: %s", aid_, open_res)
+                                        in_flight.pop((sid_, aid_), None)
+                                        if report:
+                                            report({"session_id": sid_, "account": aid_, "status": "error",
+                                                    "detail": f"Missing ticket in response: {res_inner}", "ticket": None})
+                                        return
+
+                                    # Extract executed rate from iFOREX OpenDeal response
+                                    exec_price = market_rate
+                                    sr = res_inner.get("serverRate") or res_inner.get("rateCalc")
+                                    if sr:
+                                        try:
+                                            exec_price = float(str(sr).replace(",", ""))
+                                        except Exception:
+                                            pass
+
+                                    logger.info("[%s] iFOREX order filled: ticket=%s pair=%s side=%s lots=%s quoted=%s exec=%s",
+                                                aid_, ticket, pair_, side_, ls_, market_rate, exec_price)
+                                    # Track in _open_orders for close lookups
+                                    with acct_._lock:
+                                        acct_._open_orders.append({
+                                            "Ticket": str(ticket), "Symbol": pair_,
+                                            "Type": side_, "Lots": ls_,
+                                            "OpenPrice": exec_price, "OpenTime": time.time()
+                                        })
+
+                                    pip_mult = 100.0 if "JPY" in pair_.upper() else 10000.0
+                                    spread = round((q2[1] - q2[0]) * pip_mult, 1) if (q2 and len(q2) >= 2) else 0
+
+                                    if report:
+                                        report({"session_id": sid_, "account": aid_, "status": "filled",
+                                                "ticket": str(ticket), "fill_price": exec_price,
+                                                "quote_price": market_rate, "spread": spread, "lots": ls_})
+                                else:
+                                    logger.error("[%s] iFOREX open_order failed: %s", aid_, open_res)
+                                    in_flight.pop((sid_, aid_), None)
+                                    if report:
+                                        report({"session_id": sid_, "account": aid_, "status": "error",
+                                                "detail": str(open_res.get("raw", open_res)), "ticket": None})
+                        except Exception as ex:
+                            logger.error("[%s] iFOREX _exec error: %s", aid_, ex)
+                            in_flight.pop((sid_, aid_), None)
+
+                    threading.Thread(target=_exec, daemon=True,
+                                     name=f"iforex-exec-{account_id[:12]}").start()
 
     def get_status(self) -> Dict[str, Any]:
         """Get status of all iFOREX direct accounts."""
         result = {}
         for acct_id, acct in self.accounts.items():
             info = self.dd.get("ea_account_info", {}).get(acct_id, {})
+            tot_l = info.get("total_lots")
+            if tot_l is None or isinstance(tot_l, dict):
+                lbi = info.get("lots_by_instrument", {})
+                if isinstance(lbi, dict) and lbi:
+                    tot_l = round(sum((v.get("buy", 0) - v.get("sell", 0)) for v in lbi.values()), 2)
+                else:
+                    tot_l = 0.0
             result[acct_id] = {
                 "label": acct.label,
                 "group_label": acct.config.get("group_label", acct.label),
                 "type": acct.conn_type,
-                "connected": acct.connected,
+                "connected": bool(acct.connected and acct._running),
                 "account_number": acct.account_number,
                 "balance": info.get("balance"),
                 "equity": info.get("equity"),
+                "margin": info.get("margin"),
+                "margin_used": info.get("margin"),
                 "free_margin": info.get("free_margin"),
+                "total_pnl": info.get("profit", 0.0),
                 "positions": info.get("positions", 0),
                 "leverage": acct.config.get("leverage", 400),
-                "total_lots": info.get("lots_by_instrument"),
+                "total_lots": tot_l,
                 "swapfree": acct.config.get("swapfree", False),
                 "stop_out_level": acct.config.get("stop_out_level"),
                 "alert_email": acct.config.get("alert_email"),
                 "alert_telegram": acct.config.get("alert_telegram"),
+                "auto_connect_start": acct.config.get("auto_connect_start", True),
+                "market_closed": bool(acct.is_market_closed),
             }
         return result
 
