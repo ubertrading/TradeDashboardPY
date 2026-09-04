@@ -157,6 +157,7 @@
     "alert_email": null,
     "alert_telegram": null,
     "stop_out_level": null,
-    "notes": ""
+    "notes": "",
+    "swapfree": true
   }
 }

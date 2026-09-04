@@ -1163,6 +1163,8 @@ class MT4DirectAccount:
             # Uppercase fee keywords for case-insensitive matching
             fee_kw_upper = [kw.upper() for kw in fee_keywords if kw]
 
+            deals_list = []
+
             for o in raw_orders:
                 try:
                     with _clr_lock:
@@ -1175,8 +1177,12 @@ class MT4DirectAccount:
                         comment = str(getattr(o, 'Comment', ''))
                         otype = str(getattr(o, 'Type', '')).lower()
                         close_time_raw = getattr(o, 'CloseTime', None)
+                        open_time_raw = getattr(o, 'OpenTime', None)
                         sym = str(getattr(o, 'Symbol', '') or '').upper().strip()
-                        # Try every common attribute name for lot size on closed MT4 orders.
+                        open_price = float(getattr(o, 'OpenPrice', 0) or 0)
+                        close_price = float(getattr(o, 'ClosePrice', 0) or 0)
+                        sl_val = float(getattr(o, 'StopLoss', 0) or 0)
+                        tp_val = float(getattr(o, 'TakeProfit', 0) or 0)
                         lots = float(getattr(o, 'Lots', getattr(o, 'Volume', getattr(o, 'CloseVolume', getattr(o, 'OpenVolume', 0)))) or 0) / self.lot_divisor
                         
                         if lots == 0 and otype in ('buy', 'sell', '0', '1', 'op_buy', 'op_sell'):
@@ -1195,12 +1201,9 @@ class MT4DirectAccount:
                                 _lot_diag = {'error': 'diag_failed'}
 
                     # Filter by close time within exact [from_ts, to_ts] range
-                    # (we padded the download range, so filter precisely here)
                     if close_time_raw:
                         close_epoch = _parse_open_time(close_time_raw)
                         if close_epoch:
-                            # _parse_open_time adjusts naive broker time to NY time (-7h offset).
-                            # Check if either raw parsed epoch or UTC-equivalent (+7h offset) falls in [from_ts, to_ts].
                             in_range = (from_ts <= close_epoch <= to_ts) or \
                                        (from_ts <= close_epoch + 25200 <= to_ts) or \
                                        (from_ts <= close_epoch + 21600 <= to_ts) or \
@@ -1218,15 +1221,49 @@ class MT4DirectAccount:
                         total_fees += commission + taxes + fee
                         deal_count += 1
                         
-                        # Per-symbol accumulation
                         if sym:
                             entry = by_symbol.setdefault(sym, {"pnl": 0.0, "lots": 0.0})
                             entry["pnl"] += profit
                             entry["lots"] += lots
+
+                        deals_list.append({
+                            "ticket": ticket,
+                            "symbol": sym,
+                            "type": otype,
+                            "lots": round(lots, 2),
+                            "open_price": open_price,
+                            "close_price": close_price,
+                            "open_time": str(open_time_raw or ""),
+                            "close_time": str(close_time_raw or ""),
+                            "profit": round(profit, 2),
+                            "swap": round(swap, 2),
+                            "commission": round(commission + taxes + fee, 2),
+                            "taxes": round(taxes, 2),
+                            "comment": comment,
+                            "sl": sl_val,
+                            "tp": tp_val,
+                        })
                     elif not is_balance:
                         # Non-trade deal (e.g. charge, storage fee)
                         total_fees += profit + commission + taxes + fee
                         deal_count += 1
+                        deals_list.append({
+                            "ticket": ticket,
+                            "symbol": sym or "FEES",
+                            "type": otype,
+                            "lots": 0.0,
+                            "open_price": 0.0,
+                            "close_price": 0.0,
+                            "open_time": str(open_time_raw or ""),
+                            "close_time": str(close_time_raw or ""),
+                            "profit": round(profit, 2),
+                            "swap": 0.0,
+                            "commission": round(commission + taxes + fee, 2),
+                            "taxes": round(taxes, 2),
+                            "comment": comment,
+                            "sl": 0.0,
+                            "tp": 0.0,
+                        })
 
                 except Exception as e:
                     logger.warning("[%s] Error processing history order: %s", self.account_id, e)
@@ -1248,11 +1285,13 @@ class MT4DirectAccount:
                 "fees": round(total_fees, 2),
                 "deal_count": deal_count,
                 "by_symbol": by_symbol_final,
+                "deals": deals_list,
                 "_lot_diag": _lot_diag,  # routed to app.logger by trade_dashboard.py
             }
             logger.info("[%s] MT4 deal history: %d raw orders, %d closed deals → pnl=%.2f swap=%.2f fees=%.2f pairs=%d",
                         self.account_id, len(raw_orders), deal_count,
                         result["pnl"], result["swap"], result["fees"], len(by_symbol_final))
+            return result
             return result
 
         except Exception as e:
@@ -2872,28 +2911,31 @@ class MT5DirectAccount:
                         pass
                 logger.info("[%s] MT5 history order[0] diagnostic: %s", self.account_id, attrs)
 
+            deals_list = []
+
             for o in raw_orders:
                 try:
                     with _clr_lock:
                         ticket = _normalize_ticket(getattr(o, 'Ticket', getattr(o, 'Id', 0)))
                         profit = float(getattr(o, 'Profit', 0))
                         swap = float(getattr(o, 'Swap', 0))
-                        # Commission: some brokers use 'Commission', others use 'Fee'
                         commission = float(getattr(o, 'Commission', 0) or 0)
                         fee = float(getattr(o, 'Fee', 0) or 0)
                         comment = str(getattr(o, 'Comment', ''))
                         deal_type = str(getattr(o, 'DealType', getattr(o, 'Type', ''))).lower()
                         close_time_raw = getattr(o, 'CloseTime', getattr(o, 'TimeCreate', None))
+                        open_time_raw = getattr(o, 'OpenTime', None)
                         sym = str(getattr(o, 'Symbol', '') or '').upper().strip()
-                        # MT5 uses Volume (in lots); fall back to Lots attribute
+                        open_price = float(getattr(o, 'OpenPrice', getattr(o, 'Price', 0)) or 0)
+                        close_price = float(getattr(o, 'ClosePrice', getattr(o, 'Price', 0)) or 0)
+                        sl_val = float(getattr(o, 'StopLoss', 0) or 0)
+                        tp_val = float(getattr(o, 'TakeProfit', 0) or 0)
                         lots = float(getattr(o, 'Volume', None) or getattr(o, 'Lots', 0) or 0) / self.lot_divisor
 
                     # Filter by close time within exact [from_ts, to_ts] range
                     if close_time_raw:
                         close_epoch = _parse_open_time(close_time_raw)
                         if close_epoch:
-                            # _parse_open_time adjusts naive broker time to NY time (-7h offset).
-                            # Check if either raw parsed epoch or UTC-equivalent (+7h offset) falls in [from_ts, to_ts].
                             in_range = (from_ts <= close_epoch <= to_ts) or \
                                        (from_ts <= close_epoch + 25200 <= to_ts) or \
                                        (from_ts <= close_epoch + 21600 <= to_ts) or \
@@ -2915,10 +2957,45 @@ class MT5DirectAccount:
                             entry = by_symbol.setdefault(sym, {"pnl": 0.0, "lots": 0.0})
                             entry["pnl"] += profit
                             entry["lots"] += lots
+
+                        deals_list.append({
+                            "ticket": ticket,
+                            "symbol": sym,
+                            "type": deal_type,
+                            "lots": round(lots, 2),
+                            "open_price": open_price,
+                            "close_price": close_price,
+                            "open_time": str(open_time_raw or ""),
+                            "close_time": str(close_time_raw or ""),
+                            "profit": round(profit, 2),
+                            "swap": round(swap, 2),
+                            "commission": round(commission + fee, 2),
+                            "taxes": 0.0,
+                            "comment": comment,
+                            "sl": sl_val,
+                            "tp": tp_val,
+                        })
                     elif not is_balance:
                         # Non-trade deal (e.g. charge, storage fee)
                         total_fees += profit + commission + fee
                         deal_count += 1
+                        deals_list.append({
+                            "ticket": ticket,
+                            "symbol": sym or "FEES",
+                            "type": deal_type,
+                            "lots": 0.0,
+                            "open_price": 0.0,
+                            "close_price": 0.0,
+                            "open_time": str(open_time_raw or ""),
+                            "close_time": str(close_time_raw or ""),
+                            "profit": round(profit, 2),
+                            "swap": 0.0,
+                            "commission": round(commission + fee, 2),
+                            "taxes": 0.0,
+                            "comment": comment,
+                            "sl": 0.0,
+                            "tp": 0.0,
+                        })
                 except Exception as e:
                     logger.warning("[%s] Error processing MT5 history deal: %s", self.account_id, e)
                     continue
@@ -2939,6 +3016,7 @@ class MT5DirectAccount:
                 "fees": round(total_fees, 2),
                 "deal_count": deal_count,
                 "by_symbol": by_symbol_final,
+                "deals": deals_list,
             }
             logger.info("[%s] MT5 deal history: %d raw, %d closed deals → pnl=%.2f swap=%.2f fees=%.2f pairs=%d",
                         self.account_id, len(raw_orders), deal_count,

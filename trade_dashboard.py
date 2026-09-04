@@ -21,7 +21,7 @@ Usage:
   TRADE_PORT=5001 python trade_dashboard.py
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 import time
 import json
 import threading
@@ -2240,16 +2240,344 @@ _snapshot_thread.start()
 _STMTS_DIR = os.path.join(_SCRIPT_DIR, "stmts")
 os.makedirs(_STMTS_DIR, exist_ok=True)
 
+def _render_metatrader_html_statement(stmt):
+    """Render an authentic MetaTrader-formatted HTML account statement matching native MT4 Statement.htm layout."""
+    acct_id = str(stmt.get("account_id", ""))
+    acct_name = str(stmt.get("account_name") or stmt.get("group_label") or acct_id)
+    company_name = str(stmt.get("company") or stmt.get("broker") or stmt.get("server") or "Swissquote Bank SA")
+    date_str = str(stmt.get("date") or datetime.now().strftime("%Y %B %d, %H:%M"))
+    if " " not in date_str and "-" in date_str:
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            date_str = dt.strftime("%Y %B %d, ") + datetime.now().strftime("%H:%M")
+        except Exception:
+            pass
+
+    currency = str(stmt.get("currency", "USD"))
+    leverage_val = stmt.get("leverage") or 100
+    leverage = f"{leverage_val}"
+
+    balance = float(stmt.get("balance", 0.0) if stmt.get("balance") is not None else 0.0)
+    equity = float(stmt.get("equity", 0.0) if stmt.get("equity") is not None else 0.0)
+    margin = float(stmt.get("margin", 0.0) or 0.0)
+    free_margin = float(stmt.get("free_margin", 0.0) if stmt.get("free_margin") is not None else 0.0)
+
+    open_positions = stmt.get("open_positions") or []
+    closed_deals = stmt.get("deals") or []
+
+    def _mspt(val):
+        if val is None:
+            return "0.00"
+        return f"{float(val):,.2f}".replace(",", " ")
+
+    def _mspr(val):
+        if val is None or float(val) == 0.0:
+            return "0.00000"
+        return f"{float(val):.5f}"
+
+    # ── 1. Closed Transactions ──
+    closed_rows = []
+    tot_closed_pnl = 0.0
+    tot_closed_swap = 0.0
+    tot_closed_tax = 0.0
+    tot_closed_comm = 0.0
+
+    for idx, d in enumerate(closed_deals):
+        tkt = d.get("ticket") or d.get("order") or ""
+        o_time = d.get("open_time", "")
+        c_time = d.get("close_time", "")
+        stype = str(d.get("type", "")).lower()
+        size = float(d.get("lots", 0.0) or 0.0)
+        item = str(d.get("symbol", ""))
+        o_price = float(d.get("open_price", 0.0) or 0.0)
+        c_price = float(d.get("close_price", 0.0) or 0.0)
+        sl = float(d.get("sl", 0.0) or 0.0)
+        tp = float(d.get("tp", 0.0) or 0.0)
+        comm = float(d.get("commission", 0.0) or 0.0)
+        tax = float(d.get("taxes", 0.0) or 0.0)
+        swap = float(d.get("swap", 0.0) or 0.0)
+        pnl = float(d.get("profit", 0.0) or 0.0)
+        comment = d.get("comment", "")
+
+        tot_closed_pnl += pnl
+        tot_closed_swap += swap
+        tot_closed_tax += tax
+        tot_closed_comm += comm
+
+        bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
+
+        if stype == "balance" or "deposit" in comment.lower() or "deposit" in stype:
+            closed_rows.append(f'<tr align=right><td title="{comment or "Deposit"}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>balance</td><td colspan=10 align=left>Deposit</td><td class=mspt>{_mspt(pnl)}</td></tr>')
+        else:
+            closed_rows.append(
+                f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>{c_time}</td><td style="mso-number-format:0\\.00000;">{_mspr(c_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+            )
+            if comment:
+                closed_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+
+    if not closed_rows:
+        closed_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+    else:
+        closed_tr_html = "\n".join(closed_rows)
+
+    tot_closed_net = tot_closed_pnl + tot_closed_swap + tot_closed_tax + tot_closed_comm
+
+    # ── 2. Open Trades ──
+    open_rows = []
+    tot_open_pnl = 0.0
+    tot_open_swap = 0.0
+    tot_open_tax = 0.0
+    tot_open_comm = 0.0
+
+    for idx, p in enumerate(open_positions):
+        tkt = p.get("ticket", "")
+        o_time = p.get("open_time") or (datetime.fromtimestamp(p["open_epoch"]).strftime("%Y.%m.%d %H:%M:%S") if p.get("open_epoch") else "")
+        stype = p.get("side") or ("buy" if p.get("type") == 0 else "sell")
+        size = float(p.get("lots", 0.0) or 0.0)
+        item = str(p.get("symbol", ""))
+        o_price = float(p.get("open_price", 0.0) or 0.0)
+        m_price = float(p.get("market_price", o_price) or o_price)
+        sl = float(p.get("sl", 0.0) or 0.0)
+        tp = float(p.get("tp", 0.0) or 0.0)
+        comm = float(p.get("commission", 0.0) or 0.0)
+        tax = float(p.get("taxes", 0.0) or 0.0)
+        swap = float(p.get("swap", 0.0) or 0.0)
+        pnl = float(p.get("profit", 0.0) or 0.0)
+        comment = p.get("comment", "")
+
+        tot_open_pnl += pnl
+        tot_open_swap += swap
+        tot_open_tax += tax
+        tot_open_comm += comm
+
+        bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
+
+        open_rows.append(
+            f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>&nbsp;</td><td style="mso-number-format:0\\.00000;">{_mspr(m_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+        )
+        if comment:
+            open_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+
+    if not open_rows:
+        open_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+    else:
+        open_tr_html = "\n".join(open_rows)
+
+    tot_open_net = tot_open_pnl + tot_open_swap + tot_open_tax + tot_open_comm
+
+    deposit_withdrawal = float(stmt.get("deposit_withdrawal", balance - tot_closed_net) if stmt.get("deposit_withdrawal") is not None else (balance - tot_closed_net))
+
+    html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+  <head>
+    <title>Statement: {acct_id} - {acct_name}</title>
+    <style type="text/css" media="screen">
+    <!--
+    td {{ font: 8pt Tahoma,Arial; }}
+    //-->
+    </style>
+    <style type="text/css" media="print">
+    <!--
+    td {{ font: 7pt Tahoma,Arial; }}
+    //-->
+    </style>
+    <style type="text/css">
+    <!--
+    .msdate {{ mso-number-format:"General Date"; }}
+    .mspt   {{ mso-number-format:\\#\\,\\#\\#0\\.00;  }}
+    //-->
+    </style>
+  </head>
+<body topmargin=1 marginheight=1>
+<div align=center>
+<div style="font: 20pt Times New Roman"><b>{company_name}</b></div><br>
+
+
+<table cellspacing=1 cellpadding=3 border=0>
+<tr align=left>
+    <td colspan=2><b>Account: {acct_id}</b></td>
+    <td colspan=5><b>Name: {acct_name}</b></td>
+    <td colspan=2><b>Currency: {currency}</b></td>
+    <td colspan=2><b>Leverage: 1:{leverage}</b></td>
+    <td colspan=3 align=right><b>{date_str}</b></td></tr>
+
+<tr align=left><td colspan=14><b>Closed Transactions:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+   <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+   <td>Price</td><td>S / L</td><td>T / P</td><td nowrap>Close Time</td>
+   <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
+{closed_tr_html}
+<tr align=right>
+    <td colspan=10>&nbsp;</td>
+    <td class=mspt>{_mspt(tot_closed_comm)}</td>
+    <td class=mspt>{_mspt(tot_closed_tax)}</td>
+    <td class=mspt>{_mspt(tot_closed_swap)}</td>
+    <td class=mspt>{_mspt(tot_closed_pnl)}</td>
+</tr>
+
+<tr align=right>
+    <td colspan=12 align=right><b>Closed P/L:</b></td>
+    <td colspan=2 align=right title="Commission + Swap + Profit + Taxes" class=mspt><b>{_mspt(tot_closed_net)}</b></td>
+</tr>
+
+<tr align=left><td colspan=14><b>Open Trades:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+    <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+    <td>Price</td><td>S / L</td><td>T / P</td><td>&nbsp;</td>
+    <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
+{open_tr_html}
+<tr align=right>
+    <td colspan=10>&nbsp;</td>
+    <td class=mspt>{_mspt(tot_open_comm)}</td>
+    <td class=mspt>{_mspt(tot_open_tax)}</td>
+    <td class=mspt>{_mspt(tot_open_swap)}</td>
+    <td class=mspt>{_mspt(tot_open_pnl)}</td>
+</tr>
+
+<tr><td colspan=10>&nbsp;</td><td colspan=2 align=right><b>Floating P/L:</b></td>
+    <td colspan=2 align=right title="Commission + Swap + Profit + Taxes" class=mspt><b>{_mspt(tot_open_net)}</b></td></tr>
+
+<tr align=left><td colspan=14><b>Working Orders:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+    <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+    <td>Price</td><td>S / L</td><td>T / P</td><td colspan=2 nowrap>Market Price</td><td colspan=4>&nbsp;</td></tr>
+<tr align=right><td colspan=14 align=center>No transactions</td></tr>
+
+<tr><td colspan=14 style="font: 1pt arial">&nbsp;</td></tr>
+
+<tr align=left><td colspan=14><b>Summary:</b></td></tr>
+<tr align=right>
+    <td colspan=2><b>Deposit/Withdrawal:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(deposit_withdrawal)}</b></td>
+    <td colspan=4><b>Credit Facility:</b></td>
+    <td class=mspt><b>0.00</b></td>
+    <td colspan=5>&nbsp;</td></tr>
+    
+<tr align=right>
+    <td colspan=2><b>Closed Trade P/L:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(tot_closed_net)}</b></td>
+    <td colspan=4><b>Floating P/L:</b></td>
+    <td class=mspt><b>{_mspt(tot_open_net)}</b></td>
+    <td colspan=3><b>Margin:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(margin)}</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Balance:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(balance)}</b></td>
+    <td colspan=4><b>Equity:</b></td>
+    <td class=mspt><b>{_mspt(equity)}</b></td>
+    <td colspan=3><b>Free Margin:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(free_margin)}</b></td></tr>
+	
+</table>
+</div></body></html>"""
+    return html_content
+
+
+def _render_summary_index_html(date_str, summary_rows):
+    """Render an HTML index dashboard for all account statements generated on date_str."""
+    rows_html = []
+    tot_balance = 0.0
+    tot_equity = 0.0
+    tot_pnl = 0.0
+    tot_swap = 0.0
+    tot_open = 0
+
+    for idx, r in enumerate(summary_rows):
+        aid = r.get("account_id", "")
+        safe_id = re.sub(r"[^\w\-]", "_", aid)
+        grp = r.get("group_label", "")
+        bal = r.get("balance") or 0.0
+        eq = r.get("equity") or 0.0
+        pnl = r.get("day_pnl") or 0.0
+        swap = r.get("day_swap") or 0.0
+        open_cnt = r.get("open_count") or 0
+
+        tot_balance += bal
+        tot_equity += eq
+        tot_pnl += pnl
+        tot_swap += swap
+        tot_open += open_cnt
+
+        pnl_cls = "profit_pos" if pnl > 0 else ("profit_neg" if pnl < 0 else "")
+        row_cls = "even" if idx % 2 == 0 else "odd"
+
+        rows_html.append(f"""
+        <tr class="{row_cls}">
+            <td><a href="{safe_id}.html" target="_blank" style="font-weight: bold; color: #1a73e8; text-decoration: none;">{aid}</a></td>
+            <td>{grp}</td>
+            <td class="right">{bal:.2f}</td>
+            <td class="right">{eq:.2f}</td>
+            <td class="center">{open_cnt}</td>
+            <td class="right {pnl_cls}">{pnl:.2f}</td>
+            <td class="right">{swap:.2f}</td>
+            <td class="center"><a href="{safe_id}.html" target="_blank" style="color: #4A607A; font-weight: bold;">View Statement (.html)</a></td>
+        </tr>""")
+
+    tot_pnl_cls = "profit_pos" if tot_pnl > 0 else ("profit_neg" if tot_pnl < 0 else "")
+
+    html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Account Statements Index - {date_str}</title>
+<style type="text/css">
+body, td, th, p {{ font-family: Tahoma, Arial, Helvetica, sans-serif; font-size: 12px; }}
+body {{ background-color: #FFFFFF; color: #000000; margin: 20px; }}
+table {{ border: 1px solid #B0B0B0; border-collapse: collapse; width: 100%; margin-top: 15px; }}
+th {{ background-color: #4A607A; color: #FFFFFF; font-weight: bold; text-align: center; padding: 6px 10px; border: 1px solid #334455; }}
+td {{ padding: 6px 10px; border: 1px solid #D0D0D0; }}
+.bold {{ font-weight: bold; }}
+.right {{ text-align: right; }}
+.center {{ text-align: center; }}
+.profit_pos {{ color: #008000; font-weight: bold; }}
+.profit_neg {{ color: #CC0000; font-weight: bold; }}
+tr.odd {{ background-color: #FFFFFF; }}
+tr.even {{ background-color: #F7F9FA; }}
+tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
+</style>
+</head>
+<body>
+<h2 style="color: #2C3E50; margin-bottom: 5px;">MetaTrader Daily Statements Index ({date_str})</h2>
+<p style="color: #666; margin-top: 0;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Total Accounts: {len(summary_rows)}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Account ID</th>
+      <th>Group</th>
+      <th>Balance</th>
+      <th>Equity</th>
+      <th>Open Positions</th>
+      <th>Day Closed P/L</th>
+      <th>Day Swap</th>
+      <th>Report Link</th>
+    </tr>
+  </thead>
+  <tbody>
+    {"".join(rows_html)}
+    <tr class="total_row">
+      <td colspan="2" class="bold">Grand Total ({len(summary_rows)} Accounts):</td>
+      <td class="right">{tot_balance:.2f}</td>
+      <td class="right">{tot_equity:.2f}</td>
+      <td class="center">{tot_open}</td>
+      <td class="right {tot_pnl_cls}">{tot_pnl:.2f}</td>
+      <td class="right">{tot_swap:.2f}</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+</body>
+</html>"""
+    return html_content
+
+
 def _save_daily_statements(date_str=None):
-    """Save full account statements for all connected accounts to stmts/YYYY-MM-DD/.
+    """Save full HTML account statements for all connected accounts to stmts/YYYY-MM-DD/.
 
-    Each statement file contains:
-      - Account ID, date, balance, equity, margin, free_margin, leverage
-      - Open positions (ticket, symbol, side, lots, open_price, open_time, profit, swap, tp, sl)
-      - Today's closed trade PnL from broker deal history (pnl, swap, fees, deal_count)
-      - Lots and PnL breakdown by symbol
-
-    A summary.json is also written in the same directory with totals across all accounts.
+    Each statement file is rendered as a standard MetaTrader HTML report ({account_id}.html).
+    A JSON statement data file ({account_id}.json) and a date index (index.html, summary.json)
+    are also generated in the target date directory.
     """
     try:
         if date_str is None:
@@ -2257,21 +2585,31 @@ def _save_daily_statements(date_str=None):
         day_dir = os.path.join(_STMTS_DIR, date_str)
         os.makedirs(day_dir, exist_ok=True)
 
-        # Date range for today's deal history: midnight → now (UTC)
         today_start = datetime.strptime(date_str, "%Y-%m-%d")
         day_from_ts = today_start.timestamp()
         day_to_ts   = day_from_ts + 86400  # +24 h
 
         all_accounts = {}
 
-        # ── 1. Gather live data from ea_account_info (all connector types) ──
+        # ── 1. Gather live data from ea_account_info and managers ──
         with lock:
             for acct_id, info in ea_account_info.items():
                 all_accounts[acct_id] = dict(info)
-        # Also include manual/FIX accounts that may not appear in ea_account_info
         for acct_id, info in manual_accounts.items():
             if acct_id not in all_accounts:
                 all_accounts[acct_id] = dict(info)
+        if mt_direct_manager:
+            for acct_id in mt_direct_manager.accounts.keys():
+                if acct_id not in all_accounts:
+                    all_accounts[acct_id] = {}
+        if fix_manager:
+            for acct_id in fix_manager.accounts.keys():
+                if acct_id not in all_accounts:
+                    all_accounts[acct_id] = {}
+        if 'iforex_manager' in globals() and iforex_manager:
+            for acct_id in iforex_manager.accounts.keys():
+                if acct_id not in all_accounts:
+                    all_accounts[acct_id] = {}
 
         if not all_accounts:
             logger.info("[STMTS] No accounts found — skipping statement save for %s", date_str)
@@ -2282,17 +2620,48 @@ def _save_daily_statements(date_str=None):
 
         for acct_id, info in all_accounts.items():
             try:
+                acct_obj = None
+                if mt_direct_manager and acct_id in mt_direct_manager.accounts:
+                    acct_obj = mt_direct_manager.accounts.get(acct_id)
+                elif fix_manager and acct_id in fix_manager.accounts:
+                    acct_obj = fix_manager.accounts.get(acct_id)
+                elif 'iforex_manager' in globals() and iforex_manager and acct_id in iforex_manager.accounts:
+                    acct_obj = iforex_manager.accounts.get(acct_id)
+
+                # Sync live info from manager object if available
+                if acct_obj:
+                    if hasattr(acct_obj, "_push_account_info"):
+                        try: acct_obj._push_account_info()
+                        except Exception: pass
+                    if hasattr(acct_obj, "_push_positions"):
+                        try: acct_obj._push_positions()
+                        except Exception: pass
+
+                # Re-read fresh info from ea_account_info if updated
+                with lock:
+                    if acct_id in ea_account_info:
+                        info.update(ea_account_info[acct_id])
+
+                bal_val = info.get("balance")
+                if bal_val is None and acct_obj and hasattr(acct_obj, "balance"):
+                    bal_val = getattr(acct_obj, "balance", 0.0)
+
+                eq_val = info.get("equity")
+                if eq_val is None and acct_obj and hasattr(acct_obj, "equity"):
+                    eq_val = getattr(acct_obj, "equity", 0.0)
+
                 stmt = {
-                    "account_id":  acct_id,
-                    "date":        date_str,
-                    "generated_ts": generated_ts,
-                    "balance":     info.get("balance"),
-                    "equity":      info.get("equity"),
-                    "margin":      info.get("margin"),
-                    "free_margin": info.get("free_margin"),
-                    "leverage":    info.get("leverage"),
-                    "conn_type":   info.get("conn_type", ""),
-                    "group_label": (
+                    "account_id":   acct_id,
+                    "date":         date_str,
+                    "generated_ts":  generated_ts,
+                    "balance":      float(bal_val or 0.0),
+                    "equity":       float(eq_val or 0.0),
+                    "margin":       float(info.get("margin") or (getattr(acct_obj, "margin", 0.0) if acct_obj else 0.0)),
+                    "free_margin":  float(info.get("free_margin") or (getattr(acct_obj, "free_margin", 0.0) if acct_obj else 0.0)),
+                    "leverage":     info.get("leverage") or (getattr(acct_obj, "leverage", 100) if acct_obj else 100),
+                    "conn_type":    info.get("conn_type", getattr(acct_obj, "conn_type", "") if acct_obj else ""),
+                    "currency":     info.get("currency", "USD"),
+                    "group_label":  (
                         manual_accounts.get(acct_id, {}).get("group_label") or
                         info.get("group_label", "")
                     ),
@@ -2300,52 +2669,50 @@ def _save_daily_statements(date_str=None):
 
                 # ── Open positions ──────────────────────────────────────────
                 open_positions = []
+                pos_dict = info.get("positions") or {}  # full position objects
                 pos_val = info.get("position_details") or []
-                pos_dict = info.get("positions") or {}  # bridge uses dict form
-                if isinstance(pos_val, list) and pos_val:
-                    # position_details list (bridge & mt_direct connector format)
-                    for p in pos_val:
-                        open_positions.append({
-                            "ticket":     p.get("ticket"),
-                            "symbol":     p.get("symbol", ""),
-                            "comment":    p.get("comment", ""),
-                            "open_price": p.get("open_price"),
-                            "open_epoch": p.get("open_epoch"),
-                            "profit":     p.get("profit"),
-                            "swap":       p.get("swap"),
-                            "lots":       p.get("lots"),
-                            "tp":         p.get("tp"),
-                            "sl":         p.get("sl"),
-                        })
-                elif isinstance(pos_dict, dict) and pos_dict:
-                    # Bridge positions dict keyed by ticket
+
+                if isinstance(pos_dict, dict) and pos_dict:
                     for ticket, p in pos_dict.items():
                         open_positions.append({
                             "ticket":     ticket,
                             "symbol":     p.get("symbol", ""),
-                            "side":       "buy" if p.get("type") == 0 else "sell",
-                            "lots":       p.get("lots"),
-                            "open_price": p.get("open_price"),
-                            "open_time":  p.get("open_time"),
-                            "profit":     p.get("profit"),
-                            "swap":       p.get("swap"),
-                            "tp":         p.get("tp"),
-                            "sl":         p.get("sl"),
+                            "side":       "buy" if p.get("type") in (0, "0", "buy", "OP_BUY") else "sell",
+                            "lots":       float(p.get("lots", 0.0) or 0.0),
+                            "open_price": float(p.get("open_price", 0.0) or 0.0),
+                            "market_price": float(p.get("market_price", p.get("open_price", 0.0)) or 0.0),
+                            "open_time":  p.get("open_time", ""),
+                            "profit":     float(p.get("profit", 0.0) or 0.0),
+                            "swap":       float(p.get("swap", 0.0) or 0.0),
+                            "tp":         float(p.get("tp", 0.0) or 0.0),
+                            "sl":         float(p.get("sl", 0.0) or 0.0),
+                            "comment":    p.get("comment", ""),
+                        })
+                elif isinstance(pos_val, list) and pos_val:
+                    for p in pos_val:
+                        open_positions.append({
+                            "ticket":     p.get("ticket"),
+                            "symbol":     p.get("symbol", ""),
+                            "side":       p.get("side", "buy"),
+                            "lots":       float(p.get("lots", 0.0) or 0.0),
+                            "open_price": float(p.get("open_price", 0.0) or 0.0),
+                            "comment":    p.get("comment", ""),
+                            "open_epoch": p.get("open_epoch"),
+                            "profit":     float(p.get("profit", 0.0) or 0.0),
+                            "swap":       float(p.get("swap", 0.0) or 0.0),
+                            "tp":         float(p.get("tp", 0.0) or 0.0),
+                            "sl":         float(p.get("sl", 0.0) or 0.0),
                         })
                 stmt["open_positions"]      = open_positions
                 stmt["open_position_count"] = len(open_positions)
                 stmt["lots_by_instrument"]  = info.get("lots_by_instrument", {})
                 stmt["swap_by_instrument"]  = info.get("swap_by_instrument", {})
 
-                # ── Today's closed deal history ─────────────────────────────
+                # ── Closed deal history (All-time or day) ───────────────────
                 deal_hist = None
-                acct_obj  = None
-                if mt_direct_manager:
-                    acct_obj = mt_direct_manager.accounts.get(acct_id)
                 if acct_obj and hasattr(acct_obj, "get_deal_history"):
                     try:
-                        deal_hist = acct_obj.get_deal_history(
-                            day_from_ts, day_to_ts, exclude_balance=True)
+                        deal_hist = acct_obj.get_deal_history(0, day_to_ts, exclude_balance=False)
                     except Exception as _dh_err:
                         logger.warning("[STMTS] deal_history failed for %s: %s", acct_id, _dh_err)
 
@@ -2355,32 +2722,40 @@ def _save_daily_statements(date_str=None):
                     stmt["day_fees"]       = deal_hist.get("fees")
                     stmt["day_deal_count"] = deal_hist.get("deal_count")
                     stmt["day_by_symbol"]  = deal_hist.get("by_symbol", {})
+                    stmt["deals"]          = deal_hist.get("deals", [])
                 else:
                     stmt["day_pnl"] = stmt["day_swap"] = stmt["day_fees"] = stmt["day_deal_count"] = None
                     stmt["day_by_symbol"] = {}
+                    stmt["deals"] = []
 
-                # ── Write per-account file ──────────────────────────────────
-                safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
-                stmt_path = os.path.join(day_dir, f"{safe_id}.json")
-                with open(stmt_path, "w", encoding="utf-8") as _f:
-                    json.dump(stmt, _f, indent=2, default=str)
+                # ── Save per-account HTML Statement and JSON Backup ─────────
+                safe_id = re.sub(r"[^\w\-]", "_", acct_id)
+                html_path = os.path.join(day_dir, f"{safe_id}.html")
+                json_path = os.path.join(day_dir, f"{safe_id}.json")
+
+                html_content = _render_metatrader_html_statement(stmt)
+                with open(html_path, "w", encoding="utf-8") as _fhtml:
+                    _fhtml.write(html_content)
+
+                with open(json_path, "w", encoding="utf-8") as _fjson:
+                    json.dump(stmt, _fjson, indent=2, default=str)
 
                 summary_rows.append({
-                    "account_id":   acct_id,
-                    "group_label":  stmt["group_label"],
-                    "balance":      stmt["balance"],
-                    "equity":       stmt["equity"],
-                    "open_count":   stmt["open_position_count"],
-                    "day_pnl":      stmt["day_pnl"],
-                    "day_swap":     stmt["day_swap"],
-                    "day_fees":     stmt["day_fees"],
+                    "account_id":     acct_id,
+                    "group_label":    stmt["group_label"],
+                    "balance":        stmt["balance"],
+                    "equity":         stmt["equity"],
+                    "open_count":     stmt["open_position_count"],
+                    "day_pnl":        stmt["day_pnl"],
+                    "day_swap":       stmt["day_swap"],
+                    "day_fees":       stmt["day_fees"],
                     "day_deal_count": stmt["day_deal_count"],
                 })
 
             except Exception as _acct_err:
-                logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err)
+                logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err, exc_info=True)
 
-        # ── Write summary ───────────────────────────────────────────────────
+        # ── Write summary.json and index.html ────────────────────────────────
         summary = {
             "date":          date_str,
             "generated_ts":  generated_ts,
@@ -2391,7 +2766,12 @@ def _save_daily_statements(date_str=None):
         with open(summary_path, "w", encoding="utf-8") as _f:
             json.dump(summary, _f, indent=2, default=str)
 
-        logger.info("[STMTS] Saved daily statements for %s: %d accounts → %s",
+        index_path = os.path.join(day_dir, "index.html")
+        index_html = _render_summary_index_html(date_str, summary_rows)
+        with open(index_path, "w", encoding="utf-8") as _findex:
+            _findex.write(index_html)
+
+        logger.info("[STMTS] Saved daily HTML statements for %s: %d accounts → %s",
                     date_str, len(summary_rows), day_dir)
 
     except Exception as e:
@@ -12342,6 +12722,34 @@ def generate_statements():
 
         threading.Thread(target=_run, daemon=True, name="StmtsOnDemand").start()
         return jsonify({"ok": True, "date": date_str or datetime.now().strftime("%Y-%m-%d")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/statements/<date_str>/<filename>', methods=['GET'])
+def get_statement_file(date_str, filename):
+    """Serve a specific HTML or JSON statement file for date_str."""
+    try:
+        day_dir = os.path.join(_STMTS_DIR, date_str)
+        if not os.path.isdir(day_dir):
+            return jsonify({"error": "Statement date directory not found"}), 404
+        return send_from_directory(day_dir, filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/statements/<date_str>', methods=['GET'])
+def view_statement_date_index(date_str):
+    """Serve index.html for a given statement date."""
+    try:
+        day_dir = os.path.join(_STMTS_DIR, date_str)
+        if not os.path.isdir(day_dir):
+            return jsonify({"error": "Statement date directory not found"}), 404
+        index_path = os.path.join(day_dir, "index.html")
+        if os.path.exists(index_path):
+            return send_from_directory(day_dir, "index.html")
+        files = os.listdir(day_dir)
+        return jsonify({"date": date_str, "files": files})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

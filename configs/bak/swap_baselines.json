@@ -39,35 +39,40 @@
     "swap_long": 4.925,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1784574620.788599
+    "ts": 1784574620.788599,
+    "swapfree": true
   },
   "EHERZOG-1-B-ICM-:GBPCHF": {
     "account": "EHERZOG-1-B-ICM-",
     "swap_long": 5.803,
     "swap_short": -18.581,
     "symbol": "GBPCHF",
-    "ts": 1784574620.787738
+    "ts": 1784574620.787738,
+    "swapfree": true
   },
   "EHERZOG-1-B-ICM-:GBPJPY": {
     "account": "EHERZOG-1-B-ICM-",
     "swap_long": 12.035,
     "swap_short": -23.659,
     "symbol": "GBPJPY",
-    "ts": 1784574620.7889185
+    "ts": 1784574620.7889185,
+    "swapfree": true
   },
   "EHERZOG-1-B-ICM-:USDCHF": {
     "account": "EHERZOG-1-B-ICM-",
     "swap_long": 5.455,
     "swap_short": -12.209,
     "symbol": "USDCHF",
-    "ts": 1784574620.7871244
+    "ts": 1784574620.7871244,
+    "swapfree": true
   },
   "EHERZOG-1-B-ICM-:USDJPY": {
     "account": "EHERZOG-1-B-ICM-",
     "swap_long": 8.599,
     "swap_short": -17.442,
     "symbol": "USDJPY",
-    "ts": 1784574620.7881432
+    "ts": 1784574620.7881432,
+    "swapfree": true
   },
   "GO-1-A-SQ651938:AUDCHF": {
     "account": "GO-1-A-SQ651938",
@@ -109,35 +114,40 @@
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7424767
+    "ts": 1782839933.7424767,
+    "swapfree": true
   },
   "GO-1-B-ICM7991931:GBPCHF": {
     "account": "GO-1-B-ICM7991931",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8806794
+    "ts": 1782748980.8806794,
+    "swapfree": true
   },
   "GO-1-B-ICM7991931:GBPJPY": {
     "account": "GO-1-B-ICM7991931",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.880708
+    "ts": 1782748980.880708,
+    "swapfree": true
   },
   "GO-1-B-ICM7991931:USDCHF": {
     "account": "GO-1-B-ICM7991931",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.8806674
+    "ts": 1782748980.8806674,
+    "swapfree": true
   },
   "GO-1-B-ICM7991931:USDJPY": {
     "account": "GO-1-B-ICM7991931",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.8806918
+    "ts": 1782748980.8806918,
+    "swapfree": true
   },
   "HUGO-1-A-SQ649159:AUDCHF": {
     "account": "HUGO-1-A-SQ649159",
@@ -179,35 +189,40 @@
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782843534.047316
+    "ts": 1782843534.047316,
+    "swapfree": true
   },
   "HUGO-1-B-ICT11548824:GBPCHF": {
     "account": "HUGO-1-B-ICT11548824",
     "swap_long": 5.929,
     "swap_short": -18.724,
     "symbol": "GBPCHF",
-    "ts": 1782843534.046714
+    "ts": 1782843534.046714,
+    "swapfree": true
   },
   "HUGO-1-B-ICT11548824:GBPJPY": {
     "account": "HUGO-1-B-ICT11548824",
     "swap_long": 11.657,
     "swap_short": -23.175,
     "symbol": "GBPJPY",
-    "ts": 1782843534.0475144
+    "ts": 1782843534.0475144,
+    "swapfree": true
   },
   "HUGO-1-B-ICT11548824:USDCHF": {
     "account": "HUGO-1-B-ICT11548824",
     "swap_long": 5.689,
     "swap_short": -12.495,
     "symbol": "USDCHF",
-    "ts": 1782843534.046459
+    "ts": 1782843534.046459,
+    "swapfree": true
   },
   "HUGO-1-B-ICT11548824:USDJPY": {
     "account": "HUGO-1-B-ICT11548824",
     "swap_long": 8.608,
     "swap_short": -17.464,
     "symbol": "USDJPY",
-    "ts": 1782843534.0471017
+    "ts": 1782843534.0471017,
+    "swapfree": true
   },
   "HUGO-1-BORB:AUDCHF": {
     "account": "HUGO-1-BORB",
@@ -249,35 +264,40 @@
     "swap_long": 5.07,
     "swap_short": -8.95,
     "symbol": "AUDCHF",
-    "ts": 1785940228.3800151
+    "ts": 1785940228.3800151,
+    "swapfree": true
   },
   "JU-1-A-FXV-537755:GBPCHF": {
     "account": "JU-1-A-FXV-537755",
     "swap_long": 8.42,
     "swap_short": -15.58,
     "symbol": "GBPCHF",
-    "ts": 1785940228.3789463
+    "ts": 1785940228.3789463,
+    "swapfree": true
   },
   "JU-1-A-FXV-537755:GBPJPY": {
     "account": "JU-1-A-FXV-537755",
     "swap_long": 11.03,
     "swap_short": -24.98,
     "symbol": "GBPJPY",
-    "ts": 1785940228.3801432
+    "ts": 1785940228.3801432,
+    "swapfree": true
   },
   "JU-1-A-FXV-537755:USDCHF": {
     "account": "JU-1-A-FXV-537755",
     "swap_long": 6.19,
     "swap_short": -11.43,
     "symbol": "USDCHF",
-    "ts": 1785940228.3779097
+    "ts": 1785940228.3779097,
+    "swapfree": true
   },
   "JU-1-A-FXV-537755:USDJPY": {
     "account": "JU-1-A-FXV-537755",
     "swap_long": 7.24,
     "swap_short": -19.61,
     "symbol": "USDJPY",
-    "ts": 1785940228.3797996
+    "ts": 1785940228.3797996,
+    "swapfree": true
   },
   "JU-1-A-SQ651189:AUDCHF": {
     "account": "JU-1-A-SQ651189",
@@ -319,175 +339,200 @@
     "swap_long": 5.07,
     "swap_short": -8.95,
     "symbol": "AUDCHF",
-    "ts": 1785940228.3834693
+    "ts": 1785940228.3834693,
+    "swapfree": true
   },
   "JU-1-B-FXV-537856:GBPCHF": {
     "account": "JU-1-B-FXV-537856",
     "swap_long": 8.42,
     "swap_short": -15.58,
     "symbol": "GBPCHF",
-    "ts": 1785940228.383081
+    "ts": 1785940228.383081,
+    "swapfree": true
   },
   "JU-1-B-FXV-537856:GBPJPY": {
     "account": "JU-1-B-FXV-537856",
     "swap_long": 11.03,
     "swap_short": -24.98,
     "symbol": "GBPJPY",
-    "ts": 1785940228.3836427
+    "ts": 1785940228.3836427,
+    "swapfree": true
   },
   "JU-1-B-FXV-537856:USDCHF": {
     "account": "JU-1-B-FXV-537856",
     "swap_long": 6.19,
     "swap_short": -11.43,
     "symbol": "USDCHF",
-    "ts": 1785940228.3828
+    "ts": 1785940228.3828,
+    "swapfree": true
   },
   "JU-1-B-FXV-537856:USDJPY": {
     "account": "JU-1-B-FXV-537856",
     "swap_long": 7.24,
     "swap_short": -19.61,
     "symbol": "USDJPY",
-    "ts": 1785940228.3832865
+    "ts": 1785940228.3832865,
+    "swapfree": true
   },
   "JU-1-B-ICM11609373:AUDCHF": {
     "account": "JU-1-B-ICM11609373",
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7443044
+    "ts": 1782839933.7443044,
+    "swapfree": true
   },
   "JU-1-B-ICM11609373:GBPCHF": {
     "account": "JU-1-B-ICM11609373",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8808746
+    "ts": 1782748980.8808746,
+    "swapfree": true
   },
   "JU-1-B-ICM11609373:GBPJPY": {
     "account": "JU-1-B-ICM11609373",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.8809016
+    "ts": 1782748980.8809016,
+    "swapfree": true
   },
   "JU-1-B-ICM11609373:USDCHF": {
     "account": "JU-1-B-ICM11609373",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.880862
+    "ts": 1782748980.880862,
+    "swapfree": true
   },
   "JU-1-B-ICM11609373:USDJPY": {
     "account": "JU-1-B-ICM11609373",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.880886
+    "ts": 1782748980.880886,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211:AUDCHF": {
     "account": "JU-1-B-ICM7905211",
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7443523
+    "ts": 1782839933.7443523,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211:GBPCHF": {
     "account": "JU-1-B-ICM7905211",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8809361
+    "ts": 1782748980.8809361,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211:GBPJPY": {
     "account": "JU-1-B-ICM7905211",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.881066
+    "ts": 1782748980.881066,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211:USDCHF": {
     "account": "JU-1-B-ICM7905211",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.8809242
+    "ts": 1782748980.8809242,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211:USDJPY": {
     "account": "JU-1-B-ICM7905211",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.88105
+    "ts": 1782748980.88105,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844:AUDCHF": {
     "account": "JU-1-B-ICM7969844",
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7425106
+    "ts": 1782839933.7425106,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844:GBPCHF": {
     "account": "JU-1-B-ICM7969844",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8807333
+    "ts": 1782748980.8807333,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844:GBPJPY": {
     "account": "JU-1-B-ICM7969844",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.8807611
+    "ts": 1782748980.8807611,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844:USDCHF": {
     "account": "JU-1-B-ICM7969844",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.88072
+    "ts": 1782748980.88072,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844:USDJPY": {
     "account": "JU-1-B-ICM7969844",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.8807452
+    "ts": 1782748980.8807452,
+    "swapfree": true
   },
   "JU-1-B-ICM7992910:AUDCHF": {
     "account": "JU-1-B-ICM7992910",
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7442088
+    "ts": 1782839933.7442088,
+    "swapfree": true
   },
   "JU-1-B-ICM7992910:GBPCHF": {
     "account": "JU-1-B-ICM7992910",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8807876
+    "ts": 1782748980.8807876,
+    "swapfree": true
   },
   "JU-1-B-ICM7992910:GBPJPY": {
     "account": "JU-1-B-ICM7992910",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.8808224
+    "ts": 1782748980.8808224,
+    "swapfree": true
   },
   "JU-1-B-ICM7992910:USDCHF": {
     "account": "JU-1-B-ICM7992910",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.880775
+    "ts": 1782748980.880775,
+    "swapfree": true
   },
   "JU-1-B-ICM7992910:USDJPY": {
     "account": "JU-1-B-ICM7992910",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.880799
+    "ts": 1782748980.880799,
+    "swapfree": true
   },
   "JU-2-A-SQ651572:AUDCHF": {
     "account": "JU-2-A-SQ651572",
@@ -529,35 +574,40 @@
     "swap_long": 4.898,
     "swap_short": -9.359,
     "symbol": "AUDCHF",
-    "ts": 1782839933.7424378
+    "ts": 1782839933.7424378,
+    "swapfree": true
   },
   "JU-2-B-ICM8024646:GBPCHF": {
     "account": "JU-2-B-ICM8024646",
     "swap_long": 6.397,
     "swap_short": -19.285,
     "symbol": "GBPCHF",
-    "ts": 1782748980.8788662
+    "ts": 1782748980.8788662,
+    "swapfree": true
   },
   "JU-2-B-ICM8024646:GBPJPY": {
     "account": "JU-2-B-ICM8024646",
     "swap_long": 11.783,
     "swap_short": -23.351,
     "symbol": "GBPJPY",
-    "ts": 1782748980.8806546
+    "ts": 1782748980.8806546,
+    "swapfree": true
   },
   "JU-2-B-ICM8024646:USDCHF": {
     "account": "JU-2-B-ICM8024646",
     "swap_long": 6.058,
     "swap_short": -12.946,
     "symbol": "USDCHF",
-    "ts": 1782748980.8786266
+    "ts": 1782748980.8786266,
+    "swapfree": true
   },
   "JU-2-B-ICM8024646:USDJPY": {
     "account": "JU-2-B-ICM8024646",
     "swap_long": 8.716,
     "swap_short": -17.585,
     "symbol": "USDJPY",
-    "ts": 1782748980.8806336
+    "ts": 1782748980.8806336,
+    "swapfree": true
   },
   "JU-3-A-DERIV80536168:AUDCHF": {
     "account": "JU-3-A-DERIV80536168",
@@ -599,49 +649,56 @@
     "swap_long": -4.25,
     "swap_short": -6.7,
     "symbol": "USDCHF",
-    "ts": 1781881401.5292509
+    "ts": 1781881401.5292509,
+    "swapfree": true
   },
   "JU-4-B-NOOR9434169:USDJPY": {
     "account": "JU-4-B-NOOR9434169",
     "swap_long": -13.4,
     "swap_short": -19.32,
     "symbol": "USDJPY",
-    "ts": 1781881401.5292625
+    "ts": 1781881401.5292625,
+    "swapfree": true
   },
   "MA-1-A-ICM-11596323:AUDCHF": {
     "account": "MA-1-A-ICM-11596323",
     "swap_long": 4.79,
     "swap_short": -9.26,
     "symbol": "AUDCHF",
-    "ts": 1784123881.5866885
+    "ts": 1784123881.5866885,
+    "swapfree": true
   },
   "MA-1-A-ICM-11596323:GBPCHF": {
     "account": "MA-1-A-ICM-11596323",
     "swap_long": 5.695,
     "swap_short": -18.438,
     "symbol": "GBPCHF",
-    "ts": 1784123881.5815427
+    "ts": 1784123881.5815427,
+    "swapfree": true
   },
   "MA-1-A-ICM-11596323:GBPJPY": {
     "account": "MA-1-A-ICM-11596323",
     "swap_long": 11.486,
     "swap_short": -22.988,
     "symbol": "GBPJPY",
-    "ts": 1784123881.587819
+    "ts": 1784123881.587819,
+    "swapfree": true
   },
   "MA-1-A-ICM-11596323:USDCHF": {
     "account": "MA-1-A-ICM-11596323",
     "swap_long": 5.5,
     "swap_short": -12.275,
     "symbol": "USDCHF",
-    "ts": 1784123881.5783994
+    "ts": 1784123881.5783994,
+    "swapfree": true
   },
   "MA-1-A-ICM-11596323:USDJPY": {
     "account": "MA-1-A-ICM-11596323",
     "swap_long": 8.5,
     "swap_short": -17.321,
     "symbol": "USDJPY",
-    "ts": 1784123881.582746
+    "ts": 1784123881.582746,
+    "swapfree": true
   },
   "MA-1-A-SQ-2119864:AUDCHF": {
     "account": "MA-1-A-SQ-2119864",
@@ -718,34 +775,39 @@
     "swap_long": 5.006,
     "swap_short": -9.502,
     "symbol": "AUDCHF",
-    "ts": 1786540098.7959597
+    "ts": 1786540098.7959597,
+    "swapfree": true
   },
   "MLOCKEY-1-B-ICT-11644478:GBPCHF": {
     "account": "MLOCKEY-1-B-ICT-11644478",
     "swap_long": 6.019,
     "swap_short": -18.878,
     "symbol": "GBPCHF",
-    "ts": 1786540098.7955914
+    "ts": 1786540098.7955914,
+    "swapfree": true
   },
   "MLOCKEY-1-B-ICT-11644478:GBPJPY": {
     "account": "MLOCKEY-1-B-ICT-11644478",
     "swap_long": 11.855,
     "swap_short": -23.582,
     "symbol": "GBPJPY",
-    "ts": 1786540098.796754
+    "ts": 1786540098.796754,
+    "swapfree": true
   },
   "MLOCKEY-1-B-ICT-11644478:USDCHF": {
     "account": "MLOCKEY-1-B-ICT-11644478",
     "swap_long": 5.599,
     "swap_short": -12.385,
     "symbol": "USDCHF",
-    "ts": 1786540098.7952764
+    "ts": 1786540098.7952764,
+    "swapfree": true
   },
   "MLOCKEY-1-B-ICT-11644478:USDJPY": {
     "account": "MLOCKEY-1-B-ICT-11644478",
     "swap_long": 8.464,
     "swap_short": -17.376,
     "symbol": "USDJPY",
-    "ts": 1786540098.7957916
+    "ts": 1786540098.7957916,
+    "swapfree": true
   }
 }

@@ -1720,6 +1720,7 @@ public class MtAccount
                 int count = 0;
                 int skippedBalance = 0;
                 var bySymbol = new Dictionary<string, double[]>(); // [pnl, swap, fees, count, lots]
+                var dealsList = new List<object>();
                 if (hist?.InternalDeals != null)
                 {
                     foreach (var deal in hist.InternalDeals)
@@ -1746,6 +1747,29 @@ public class MtAccount
                             bySymbol[dealSymbol][2] += dealFees;
                             bySymbol[dealSymbol][3] += 1;
                             bySymbol[dealSymbol][4] += deal.Lots;
+
+                            ulong dTicket = 0;
+                            try { dTicket = (ulong)((dynamic)deal).Deal; } catch { try { dTicket = (ulong)((dynamic)deal).Ticket; } catch {} }
+                            ulong dOrder = 0;
+                            try { dOrder = (ulong)((dynamic)deal).Order; } catch {}
+                            string dTimeStr = "";
+                            try { dTimeStr = ((DateTime)((dynamic)deal).Time).ToString("yyyy.MM.dd HH:mm:ss"); } catch { try { dTimeStr = ((DateTime)((dynamic)deal).Date).ToString("yyyy.MM.dd HH:mm:ss"); } catch { dTimeStr = DateTime.UtcNow.ToString("yyyy.MM.dd HH:mm:ss"); } }
+
+                            dealsList.Add(new {
+                                ticket = dTicket,
+                                order = dOrder,
+                                symbol = dealSymbol,
+                                type = dealTypeStr,
+                                lots = Math.Round(deal.Lots, 2),
+                                open_price = deal.Price,
+                                close_price = deal.Price,
+                                open_time = dTimeStr,
+                                close_time = dTimeStr,
+                                profit = Math.Round(deal.Profit, 2),
+                                swap = Math.Round(deal.Swap, 2),
+                                commission = Math.Round(dealFees, 2),
+                                comment = deal.Comment ?? ""
+                            });
                         }
                         else
                         {
@@ -1771,6 +1795,29 @@ public class MtAccount
                                 bySymbol[feeSymbol] = new double[5];
                             bySymbol[feeSymbol][2] += deal.Profit + deal.Commission + deal.Fee;
                             bySymbol[feeSymbol][3] += 1;
+
+                            ulong dTicket = 0;
+                            try { dTicket = (ulong)((dynamic)deal).Deal; } catch { try { dTicket = (ulong)((dynamic)deal).Ticket; } catch {} }
+                            ulong dOrder = 0;
+                            try { dOrder = (ulong)((dynamic)deal).Order; } catch {}
+                            string dTimeStr = "";
+                            try { dTimeStr = ((DateTime)((dynamic)deal).Time).ToString("yyyy.MM.dd HH:mm:ss"); } catch { try { dTimeStr = ((DateTime)((dynamic)deal).Date).ToString("yyyy.MM.dd HH:mm:ss"); } catch { dTimeStr = DateTime.UtcNow.ToString("yyyy.MM.dd HH:mm:ss"); } }
+
+                            dealsList.Add(new {
+                                ticket = dTicket,
+                                order = dOrder,
+                                symbol = feeSymbol,
+                                type = dealTypeStr,
+                                lots = 0.0,
+                                open_price = 0.0,
+                                close_price = 0.0,
+                                open_time = dTimeStr,
+                                close_time = dTimeStr,
+                                profit = Math.Round(deal.Profit, 2),
+                                swap = 0.0,
+                                commission = Math.Round(deal.Commission + deal.Fee, 2),
+                                comment = dealComment
+                            });
                         }
                     }
                 }
@@ -1788,7 +1835,7 @@ public class MtAccount
                         lots = Math.Round(vals[4], 2)
                     };
                 }
-                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult };
+                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult, deals = dealsList };
             }
             else if (_mt4 != null)
             {
@@ -1796,6 +1843,7 @@ public class MtAccount
                 double pnl = 0, swap = 0, fees = 0;
                 int count = 0;
                 var bySymbol = new Dictionary<string, double[]>(); // [pnl, swap, fees, count, lots]
+                var dealsList = new List<object>();
                 foreach (var order in hist)
                 {
                     if (order.Type == TradingAPI.MT4Server.Op.Buy || order.Type == TradingAPI.MT4Server.Op.Sell)
@@ -1813,6 +1861,21 @@ public class MtAccount
                         bySymbol[dealSymbol][2] += order.Commission;
                         bySymbol[dealSymbol][3] += 1;
                         bySymbol[dealSymbol][4] += order.Lots;
+
+                        dealsList.Add(new {
+                            ticket = order.Ticket,
+                            symbol = dealSymbol,
+                            type = order.Type.ToString(),
+                            lots = Math.Round(order.Lots, 2),
+                            open_price = order.OpenPrice,
+                            close_price = order.ClosePrice,
+                            open_time = order.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            close_time = order.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            profit = Math.Round(order.Profit, 2),
+                            swap = Math.Round(order.Swap, 2),
+                            commission = Math.Round(order.Commission, 2),
+                            comment = order.Comment ?? ""
+                        });
                     }
                     else
                     {
@@ -1845,6 +1908,21 @@ public class MtAccount
                             bySymbol[feeSymbol] = new double[5];
                         bySymbol[feeSymbol][2] += order.Profit;
                         bySymbol[feeSymbol][3] += 1;
+
+                        dealsList.Add(new {
+                            ticket = order.Ticket,
+                            symbol = feeSymbol,
+                            type = opStr,
+                            lots = 0.0,
+                            open_price = 0.0,
+                            close_price = 0.0,
+                            open_time = order.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            close_time = order.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            profit = Math.Round(order.Profit, 2),
+                            swap = 0.0,
+                            commission = Math.Round(order.Commission, 2),
+                            comment = comment
+                        });
                     }
                 }
                 var bySymbolResult = new Dictionary<string, object>();
@@ -1858,7 +1936,7 @@ public class MtAccount
                         lots = Math.Round(vals[4], 2)
                     };
                 }
-                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult };
+                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult, deals = dealsList };
             }
             return null;
         }

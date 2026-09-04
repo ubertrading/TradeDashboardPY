@@ -16,7 +16,8 @@
     "auto_cycle_enabled": false,
     "alert_telegram": "1216942883",
     "alert_email": "juangecko@gmail.com",
-    "stop_out_level": null
+    "stop_out_level": null,
+    "swapfree": true
   },
   "HUGO-1-B-ICT11548824": {
     "label": "HUGO-1-B-ICT11548824",
@@ -30,7 +31,8 @@
     "login": "11548824",
     "alert_email": null,
     "alert_telegram": null,
-    "lot_multiplier": 100000
+    "lot_multiplier": 100000,
+    "swapfree": true
   },
   "JU-1-A-SQ651189": {
     "login": "651189",
@@ -63,7 +65,8 @@
     "label": "MLOCKEY-1-B-ICT-11644478",
     "alert_email": null,
     "alert_telegram": null,
-    "type": "mt5"
+    "type": "mt5",
+    "swapfree": true
   },
   "MA-1-A-SQ-2119864": {
     "label": "MA-1-A-SQ-2119864",
@@ -102,7 +105,8 @@
     "auto_cycle_enabled": false,
     "alert_email": "juangecko@gmail.com",
     "alert_telegram": "1216942883",
-    "stop_out_level": null
+    "stop_out_level": null,
+    "swapfree": true
   },
   "GO-1-A-SQ651938": {
     "login": "651938",
@@ -135,7 +139,8 @@
     "label": "JU-1-A-FXV-537755",
     "alert_email": null,
     "alert_telegram": null,
-    "type": "mt5"
+    "type": "mt5",
+    "swapfree": true
   },
   "JU-1-B-ICM11609373": {
     "login": "11609373",
@@ -154,7 +159,8 @@
     "auto_cycle_enabled": false,
     "alert_email": "juangecko@gmail.com",
     "alert_telegram": "1216942883",
-    "stop_out_level": null
+    "stop_out_level": null,
+    "swapfree": true
   },
   "JU-1-B-ICM7905211": {
     "login": "7905211",
@@ -173,11 +179,12 @@
     "cycle_reminder_enabled": false,
     "cycle_reminder_days": null,
     "cycle_max_days": null,
-    "auto_cycle_enabled": false
+    "auto_cycle_enabled": false,
+    "swapfree": true
   },
   "JU-1-B-ICM7969844": {
     "login": "7969844",
-    "password": "0eegZeer3\u0026\u0026efy",
+    "password": "0eegZeer3&&efy",
     "server": "194.164.176.167",
     "port": 443,
     "auto_connect_start": false,
@@ -192,7 +199,8 @@
     "auto_cycle_enabled": false,
     "alert_email": "juangecko@gmail.com",
     "alert_telegram": "1216942883",
-    "stop_out_level": null
+    "stop_out_level": null,
+    "swapfree": true
   },
   "GO-1-B-ICM7991931": {
     "login": "7991931",
@@ -210,7 +218,8 @@
     "cycle_max_days": 5,
     "auto_cycle_enabled": false,
     "alert_email": "gbguimaraes@outlook.pt",
-    "alert_telegram": "1754651516"
+    "alert_telegram": "1754651516",
+    "swapfree": true
   },
   "HUGO-1-BORB": {
     "label": "HUGO-1-B-ORB91033",
@@ -229,7 +238,8 @@
     "cycle_reminder_days": null,
     "cycle_max_days": null,
     "auto_cycle_enabled": false,
-    "lot_multiplier": 100000
+    "lot_multiplier": 100000,
+    "swapfree": true
   },
   "HUGO-1-A-SQ649159": {
     "login": "649159",
@@ -306,7 +316,7 @@
     "auto_connect_start": false,
     "port": 443,
     "server": "79.127.198.121",
-    "password": "p[/w7SXcm5$?0\u003C",
+    "password": "p[/w7SXcm5$?0<",
     "type": "mt4",
     "slippage": 3,
     "magic_number": 777888,
@@ -333,7 +343,8 @@
     "cycle_max_days": 5,
     "auto_cycle_enabled": false,
     "notes": "",
-    "lot_multiplier": 100000
+    "lot_multiplier": 100000,
+    "swapfree": true
   },
   "JU-1-B-FXV-537856": {
     "login": "537856",
@@ -353,7 +364,8 @@
     "cycle_max_days": 10,
     "auto_cycle_enabled": false,
     "notes": "",
-    "type": "mt5"
+    "type": "mt5",
+    "swapfree": true
   },
   "JU-3-A-MEX950059": {
     "login": "950059",
@@ -392,7 +404,8 @@
     "cycle_max_days": 5,
     "auto_cycle_enabled": false,
     "notes": "",
-    "lot_multiplier": 100000
+    "lot_multiplier": 100000,
+    "swapfree": true
   },
   "HUGO-1-B-ORB91033": {
     "login": "808723",
@@ -412,7 +425,8 @@
     "alert_email": "hugo_eekhout@hotmail.com",
     "alert_telegram": "5574882772",
     "stop_out_level": null,
-    "notes": ""
+    "notes": "",
+    "swapfree": true
   },
   "JU-4-A-MEX952372": {
     "login": "952372",
@@ -451,6 +465,7 @@
     "cycle_reminder_days": null,
     "cycle_max_days": 2,
     "auto_cycle_enabled": false,
-    "notes": ""
+    "notes": "",
+    "swapfree": true
   }
 }
