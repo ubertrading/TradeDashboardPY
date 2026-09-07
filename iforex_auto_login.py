@@ -229,7 +229,11 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
             )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto("https://trader.iforex.com/webpl4/trading/new-transaction", wait_until="domcontentloaded", timeout=timeout_sec * 1000)
-            time.sleep(3.5)
+            try:
+                page.wait_for_selector("#accSummaryAccountBalance", timeout=12000)
+            except Exception:
+                pass  # Best-effort wait; proceed anyway
+            time.sleep(1.0)  # Allow deal rows to render after summary appears
 
             raw_data = page.evaluate("""
                 (() => {
@@ -335,7 +339,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
             return out, parsed_summary
         except Exception as e:
             logger.debug("fetch_active_deals_and_summary error: %s", e)
-            return [], {}
+            return None, {}
 
 
 def fetch_active_deals(timeout_sec: int = 25) -> list:

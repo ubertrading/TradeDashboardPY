@@ -566,6 +566,8 @@ class IForexAccount:
         which immediately triggers ea_account_info update and hedge monitor rebalancing!
         """
         time.sleep(5)  # Initial wait for platform settlement
+        _consecutive_empty = 0  # Debounce: require multiple empty reads before accepting 0 positions
+        _EMPTY_THRESHOLD = 3    # Number of consecutive empty reads needed to trust deals=[]
         while self._running:
             try:
                 from iforex_auto_login import fetch_active_deals_and_summary
@@ -585,10 +587,33 @@ class IForexAccount:
                         if "ea_account_info" in self.dd:
                             self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = self.is_market_closed
                 if deals is not None:
+                    # --- Sanity guard: never trust deals=[] if margin/open_pl says we're still in positions ---
+                    _margin = summary.get("margin", 0.0) or 0.0
+                    _open_pl = summary.get("open_pl", 0.0) or 0.0
+                    _suspicious_empty = (len(deals) == 0 and (abs(_margin) > 1.0 or abs(_open_pl) > 0.01))
+                    if _suspicious_empty:
+                        _consecutive_empty = 0  # Reset — margin says we still have positions
+                        logger.warning("[%s] deals=[] but margin=%.2f open_pl=%.2f — skipping update (likely render lag)",
+                                       self.account_id, _margin, _open_pl)
+                    elif len(deals) == 0 and self._open_orders:
+                        # Empty read with no margin evidence — require N consecutive reads before wiping
+                        _consecutive_empty += 1
+                        if _consecutive_empty < _EMPTY_THRESHOLD:
+                            logger.warning("[%s] deals=[] (empty read %d/%d) — deferring position wipe",
+                                           self.account_id, _consecutive_empty, _EMPTY_THRESHOLD)
+                            deals = None  # Treat as None to skip update this cycle
+                        else:
+                            logger.info("[%s] deals=[] confirmed after %d consecutive reads — accepting closure",
+                                        self.account_id, _consecutive_empty)
+                            _consecutive_empty = 0
+                    else:
+                        _consecutive_empty = 0  # Non-empty result — reset counter
+
+                if deals is not None:
                     with self._lock:
                         prev_tickets = set(str(o.get("Ticket")) for o in self._open_orders if o.get("Ticket"))
                         new_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
-                        
+
                         # Check if any ticket disappeared (e.g. manual closure on iFOREX)
                         closed_externally = prev_tickets - new_tickets
                         if closed_externally:
