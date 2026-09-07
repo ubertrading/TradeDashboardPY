@@ -3974,6 +3974,31 @@ def _get_live_position_count(account, session):
                     session_open_count += 1
 
         if session_fills_exist:
+            # ── Cycle gap guard ──────────────────────────────────────────────
+            # When a cycle has just closed the old position (ticket is in close_set)
+            # but the new fill hasn't been recorded yet (session["fills"] still has
+            # the old ticket), _get_live_position_count returns 0 for the cycled
+            # account even though a live position exists on the broker.
+            # This causes a false imbalance vs the other side → spurious rollback.
+            # Fix: if the cycle is currently in "open" phase for this account and
+            # session_open_count is 0, count any live broker tickets that are NOT in
+            # close_set — these are the freshly-opened positions whose tickets the
+            # cycle hasn't yet written back to session["fills"].
+            if session_open_count == 0 and live_tickets:
+                _prog = session.get("cycle_progress", {})
+                _cycle_acct = session.get("cycle_account", "")
+                _in_cycle_open = (
+                    session.get("action", "").startswith("cycle_") and
+                    _prog.get("phase") == "open" and
+                    _cycle_acct == account
+                )
+                if _in_cycle_open:
+                    _gap_count = sum(1 for t in live_tickets if t not in close_set)
+                    if _gap_count > 0:
+                        print(f"[LIVE-POS-CHECK] Cycle gap detected for {account}: "
+                              f"{_gap_count} live ticket(s) not yet in session fills "
+                              f"(cycle mid-open-phase) — using broker count")
+                        session_open_count = _gap_count
             return session_open_count
 
         # Fallback if session has no fills recorded yet: count live positions matching symbol & comment
@@ -10302,6 +10327,10 @@ def trade_result():
                                 session["cycle_progress"] = {}
                                 
                                 # Auto-rollback on cycle fail (with Position Reality Check)
+                                # Brief pause: allow broker position list to settle after close
+                                # before querying live counts (avoids transient 0-count on the
+                                # cycled account right after close is confirmed).
+                                time.sleep(1.5)
                                 acct_live = _get_live_position_count(account, session)
                                 for other_acc in session.get("sides", {}):
                                     if other_acc == account:
@@ -23892,6 +23921,10 @@ if __name__ == '__main__':
                                     session["cycle_fail_ts"] = time.time()
                                     
                                     # Auto-rollback on cycle fail (with Position Reality Check)
+                                    # Brief pause: allow broker position list to settle after close
+                                    # before querying live counts (avoids transient 0-count on the
+                                    # cycled account right after close is confirmed).
+                                    time.sleep(1.5)
                                     acct_live = _get_live_position_count(account, session)
                                     for other_acc in session.get("sides", {}):
                                         if other_acc == account:
