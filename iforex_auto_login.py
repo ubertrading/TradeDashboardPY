@@ -87,6 +87,13 @@ def refresh_iforex_session(account_id: str = "12141021",
             except Exception:
                 pass
 
+            # If redirected to connectivity-issue or login page not reached, go directly to login URL
+            if "connectivity-issue" in page.url or "trader.iforex.com" not in page.url or not page.query_selector("#txtUName"):
+                if not (page.evaluate("() => Boolean(window.systemInfo && window.systemInfo.securityToken)") or False):
+                    logger.info("Directing to login URL: https://trader.iforex.com/webpl4/Account/Login/Lang/English")
+                    page.goto("https://trader.iforex.com/webpl4/Account/Login/Lang/English", wait_until="domcontentloaded", timeout=25000)
+                    time.sleep(2.0)
+
             # 2. Check if login form is displayed
             uname_input = page.query_selector("#txtUName")
             pass_input = page.query_selector("#txtPass")
