@@ -54,7 +54,7 @@
     },
     "spread_rejects": {
       "DEMO-CT-OPENAPI-9040256": 0,
-      "DEMO-MT4-1218954455": 112066
+      "DEMO-MT4-1218954455": 143125
     },
     "status": "active",
     "strategy_id": "ef9158d4-1c1e-4746-9479-634fee08af47",
@@ -117,7 +117,7 @@
       }
     },
     "spread_rejects": {
-      "DEMO-MT4-1218954455": 112078,
+      "DEMO-MT4-1218954455": 143137,
       "DUKA-DEMO-DEMO2uotdK": 0
     },
     "status": "active",
@@ -4109,11 +4109,15 @@
   },
   "de1a21af-16a5-4209-9871-68f36dbaa000": {
     "_rb_exec_history": [
-      1788796954.8226106
+      1788802031.1065753,
+      1788802031.7635186,
+      1788802032.4245358,
+      1788802033.0797527
     ],
     "action": "monitor",
     "avoid_news": false,
     "close_count": null,
+    "close_deal_ts": 1788801815.4758086,
     "close_fills": [
       {
         "account": "12141021",
@@ -4345,14 +4349,396 @@
         "ts": "2026-09-07 12:02:35",
         "ts_epoch": 1788796955.3258953,
         "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801800.1372557,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914109398,
+        "ts": "2026-09-07 13:23:20",
+        "ts_epoch": 1788801800.6477697,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801800.7977319,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914109414,
+        "ts": "2026-09-07 13:23:21",
+        "ts_epoch": 1788801801.3055274,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801801.4627576,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914109429,
+        "ts": "2026-09-07 13:23:21",
+        "ts_epoch": 1788801801.9687574,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801802.119169,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914109450,
+        "ts": "2026-09-07 13:23:22",
+        "ts_epoch": 1788801802.6254294,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801802.776409,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914145377,
+        "ts": "2026-09-07 13:23:23",
+        "ts_epoch": 1788801803.2824178,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801814.5387037,
+        "lots": 0.01,
+        "price": 1.35414,
+        "quote_price": 1.35439,
+        "ticket": "395094453",
+        "ts": "2026-09-07 13:23:34",
+        "ts_epoch": 1788801814.6692495,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801814.7903304,
+        "lots": 0.01,
+        "price": 1.35414,
+        "quote_price": 1.35439,
+        "ticket": "395094454",
+        "ts": "2026-09-07 13:23:34",
+        "ts_epoch": 1788801814.9059336,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801815.0417643,
+        "lots": 0.01,
+        "price": 1.35414,
+        "quote_price": 1.35439,
+        "ticket": "395094455",
+        "ts": "2026-09-07 13:23:35",
+        "ts_epoch": 1788801815.167879,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801815.2925644,
+        "lots": 0.01,
+        "price": 1.35414,
+        "quote_price": 1.35439,
+        "ticket": "395094456",
+        "ts": "2026-09-07 13:23:35",
+        "ts_epoch": 1788801815.3981087,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801815.543607,
+        "lots": 0.01,
+        "price": 1.35414,
+        "quote_price": 1.35439,
+        "ticket": "395094458",
+        "ts": "2026-09-07 13:23:35",
+        "ts_epoch": 1788801815.7049372,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": null,
+        "price": null,
+        "ticket": 395094458,
+        "timeout_recovery": true,
+        "ts": "2026-09-07 13:24:05",
+        "ts_epoch": 1788801845.785168
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801872.2885842,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35438,
+        "ticket": "395096034",
+        "ts": "2026-09-07 13:24:32",
+        "ts_epoch": 1788801872.4127128,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801872.840987,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35438,
+        "ticket": "395096035",
+        "ts": "2026-09-07 13:24:33",
+        "ts_epoch": 1788801873.0510046,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801873.3967237,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35438,
+        "ticket": "395096036",
+        "ts": "2026-09-07 13:24:33",
+        "ts_epoch": 1788801873.5755208,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801874.1932867,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35437,
+        "ticket": "395096037",
+        "ts": "2026-09-07 13:24:34",
+        "ts_epoch": 1788801874.4263535,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801874.7756171,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35437,
+        "ticket": "395096038",
+        "ts": "2026-09-07 13:24:34",
+        "ts_epoch": 1788801874.915749,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801886.9334047,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35437,
+        "ticket": "395096042",
+        "ts": "2026-09-07 13:24:47",
+        "ts_epoch": 1788801887.2730973,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801887.6897545,
+        "cycle": true,
+        "price": 1.35413,
+        "quote_price": 1.35437,
+        "ticket": "395096044",
+        "ts": "2026-09-07 13:24:47",
+        "ts_epoch": 1788801887.804823,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801888.193037,
+        "cycle": true,
+        "price": 1.35412,
+        "quote_price": 1.35437,
+        "ticket": "395096046",
+        "ts": "2026-09-07 13:24:48",
+        "ts_epoch": 1788801888.3094604,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801888.6948018,
+        "cycle": true,
+        "price": 1.35412,
+        "quote_price": 1.35437,
+        "ticket": "395096048",
+        "ts": "2026-09-07 13:24:48",
+        "ts_epoch": 1788801888.8160741,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801889.4478881,
+        "cycle": true,
+        "price": 1.35412,
+        "quote_price": 1.35437,
+        "ticket": "395096050",
+        "ts": "2026-09-07 13:24:49",
+        "ts_epoch": 1788801889.5900655,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801945.7344654,
+        "cycle": true,
+        "price": 1.35416,
+        "quote_price": 1.35441,
+        "ticket": "395096052",
+        "ts": "2026-09-07 13:25:46",
+        "ts_epoch": 1788801946.0137613,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801946.4929914,
+        "cycle": true,
+        "price": 1.35416,
+        "quote_price": 1.35441,
+        "ticket": "395096054",
+        "ts": "2026-09-07 13:25:46",
+        "ts_epoch": 1788801946.6145308,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801947.0339534,
+        "cycle": true,
+        "price": 1.35416,
+        "quote_price": 1.35441,
+        "ticket": "395096056",
+        "ts": "2026-09-07 13:25:47",
+        "ts_epoch": 1788801947.3040931,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801947.795057,
+        "cycle": true,
+        "price": 1.35416,
+        "quote_price": 1.35441,
+        "ticket": "395096058",
+        "ts": "2026-09-07 13:25:47",
+        "ts_epoch": 1788801947.9309738,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "cmd_ts": 1788801948.3483737,
+        "cycle": true,
+        "price": 1.35416,
+        "quote_price": 1.35441,
+        "ticket": "395096060",
+        "ts": "2026-09-07 13:25:48",
+        "ts_epoch": 1788801948.4602194,
+        "verified": true
+      },
+      {
+        "account": "12141021",
+        "external": true,
+        "price": null,
+        "ticket": 395096073,
+        "ts": "2026-09-07 13:27:10",
+        "ts_epoch": 1788802030.888736,
+        "verified": false
+      },
+      {
+        "account": "12141021",
+        "external": true,
+        "price": null,
+        "ticket": 395096075,
+        "ts": "2026-09-07 13:27:10",
+        "ts_epoch": 1788802030.888804,
+        "verified": false
+      },
+      {
+        "account": "12141021",
+        "external": true,
+        "price": null,
+        "ticket": 395096069,
+        "ts": "2026-09-07 13:27:10",
+        "ts_epoch": 1788802030.888804,
+        "verified": false
+      },
+      {
+        "account": "12141021",
+        "external": true,
+        "price": null,
+        "ticket": 395096071,
+        "ts": "2026-09-07 13:27:10",
+        "ts_epoch": 1788802030.888804,
+        "verified": false
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788802031.107278,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914212022,
+        "ts": "2026-09-07 13:27:11",
+        "ts_epoch": 1788802031.613422,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788802031.7635186,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914212267,
+        "ts": "2026-09-07 13:27:12",
+        "ts_epoch": 1788802032.2697363,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788802032.4245358,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914212279,
+        "ts": "2026-09-07 13:27:12",
+        "ts_epoch": 1788802032.9311137,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788802033.0797527,
+        "lots": 0.01,
+        "price": null,
+        "quote_price": null,
+        "ticket": 1914212290,
+        "ts": "2026-09-07 13:27:13",
+        "ts_epoch": 1788802033.5872967,
+        "verified": true
       }
     ],
     "closed": {
-      "12141021": 20,
-      "DEMO-MT5-52769010": 1
+      "12141021": 29,
+      "DEMO-MT5-52769010": 10
+    },
+    "closed_lots": {
+      "12141021": 0.0
     },
     "comment": "12330940-52769010",
     "created_at": "2026-09-07 12:01:04",
+    "cycle_account": "12141021",
+    "cycle_complete_ts": 1788801948.7826772,
+    "cycle_days": 0,
+    "cycle_progress": {
+      "confirmed_closed_tickets": [
+        "395096052",
+        "395096054",
+        "395096056",
+        "395096058",
+        "395096060"
+      ],
+      "cycle_total": 5,
+      "cycled": 5,
+      "total_spread_cost": 0.0012499999999993072
+    },
     "diff_to_close": -99,
     "diff_to_open": -99,
     "errors": {
@@ -4361,8 +4747,8 @@
     },
     "execution_order": "simultaneous",
     "filled": {
-      "12141021": 25,
-      "DEMO-MT5-52769010": 6
+      "12141021": 30,
+      "DEMO-MT5-52769010": 11
     },
     "fills": [
       {
@@ -4745,14 +5131,124 @@
         "ticket": 1914145377,
         "ts": "2026-09-07 12:29:51",
         "ts_epoch": 1788798591.1536655
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801828.790915,
+        "lots": 0.01,
+        "price": 1.35423,
+        "quote_price": 1.35423,
+        "spread": null,
+        "ticket": 1914212022,
+        "ts": "2026-09-07 13:23:49",
+        "ts_epoch": 1788801829.2996912
+      },
+      {
+        "_matched_closed": "395096052",
+        "account": "12141021",
+        "cmd_ts": 1788801946.237099,
+        "price": 1.35441,
+        "quote_price": 1.35441,
+        "spread": 2,
+        "ticket": "395096069",
+        "ts": "2026-09-07 13:25:46",
+        "ts_epoch": 1788801946.3981128
+      },
+      {
+        "_matched_closed": "395096054",
+        "account": "12141021",
+        "cmd_ts": 1788801946.7435648,
+        "price": 1.35441,
+        "quote_price": 1.35441,
+        "spread": 2,
+        "ticket": "395096071",
+        "ts": "2026-09-07 13:25:46",
+        "ts_epoch": 1788801946.9514532
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801846.328822,
+        "lots": 0.01,
+        "price": 1.35423,
+        "quote_price": 1.35423,
+        "spread": null,
+        "ticket": 1914212267,
+        "ts": "2026-09-07 13:24:06",
+        "ts_epoch": 1788801846.8362956
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801846.9873092,
+        "lots": 0.01,
+        "price": 1.35423,
+        "quote_price": 1.35423,
+        "spread": null,
+        "ticket": 1914212279,
+        "ts": "2026-09-07 13:24:07",
+        "ts_epoch": 1788801847.4937735
+      },
+      {
+        "_matched_closed": "395096056",
+        "account": "12141021",
+        "cmd_ts": 1788801947.5425394,
+        "price": 1.35441,
+        "quote_price": 1.35441,
+        "spread": 2,
+        "ticket": "395096073",
+        "ts": "2026-09-07 13:25:47",
+        "ts_epoch": 1788801947.6676083
+      },
+      {
+        "_matched_closed": "395096058",
+        "account": "12141021",
+        "cmd_ts": 1788801948.046245,
+        "price": 1.35441,
+        "quote_price": 1.35441,
+        "spread": 2,
+        "ticket": "395096075",
+        "ts": "2026-09-07 13:25:48",
+        "ts_epoch": 1788801948.2658732
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801847.6487174,
+        "lots": 0.01,
+        "price": 1.35423,
+        "quote_price": 1.35423,
+        "spread": null,
+        "ticket": 1914212290,
+        "ts": "2026-09-07 13:24:08",
+        "ts_epoch": 1788801848.1559117
+      },
+      {
+        "_matched_closed": "395096060",
+        "account": "12141021",
+        "cmd_ts": 1788801948.599132,
+        "price": 1.35441,
+        "quote_price": 1.35441,
+        "spread": 2,
+        "ticket": "395096078",
+        "ts": "2026-09-07 13:25:48",
+        "ts_epoch": 1788801948.7821138
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "cmd_ts": 1788801848.3142192,
+        "lots": 0.01,
+        "price": 1.35423,
+        "quote_price": 1.35423,
+        "spread": null,
+        "ticket": 1914212302,
+        "ts": "2026-09-07 13:24:08",
+        "ts_epoch": 1788801848.8204436
       }
     ],
     "hedge_monitor_start_ts": 1788796870.4299626,
     "id": "de1a21af-16a5-4209-9871-68f36dbaa000",
     "imported": true,
     "last_trade_ts": {
-      "12141021": 1788796946.154455,
-      "DEMO-MT5-52769010": 1788798591.1536655
+      "12141021": 1788801948.7826207,
+      "DEMO-MT5-52769010": 1788802033.5872967
     },
     "lot_size": 0.01,
     "match_mode": "ticket",
@@ -4763,7 +5259,7 @@
     "max_spread_points": 0,
     "max_ticks_per_5s": 0,
     "pair": "GBPUSD",
-    "post_open_settle_ts": 1788798591.1536655,
+    "post_open_settle_ts": 1788801848.8204436,
     "require_diff_skew_close": "",
     "require_diff_skew_open": "",
     "rollback_needed": {},
@@ -4796,7 +5292,7 @@
     "strategy_id": "6077c319-16f4-4f01-a92d-ffe18a7812e8",
     "total_positions": 5,
     "trade_pause": 0.0,
-    "updated_at": "2026-09-07 12:29:51"
+    "updated_at": "2026-09-07 13:27:13"
   },
   "e786f62b-96de-47d7-89ad-0f5a7c076f8b": {
     "_last_trail_ts": 1787106757.4691136,

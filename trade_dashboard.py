@@ -5786,16 +5786,9 @@ def _run_hedge_monitor_all():
                                     has_verified = False
                                     
                                 if tickets_to_close:
-                                    # ── IMBALANCE PERSISTENCE DEBOUNCE (dynamic buffer) ──
-                                    # Require imbalance to persist to absorb transient snapshot drops on all account types.
-                                    # For REST/browser accounts like iforex_direct, Playwright sync cycles take 10-25s,
-                                    # so debounce must be at least 25.0s unless confirmed by deal history.
-                                    is_poll_based = any(
-                                        ea_account_info.get(a, {}).get("conn_type") == "iforex_direct"
-                                        or session.get("sides", {}).get(a, {}).get("connection_type") == "iforex_direct"
-                                        for a in accs
-                                    )
-                                    debounce_sec = 25.0 if is_poll_based else 4.0
+                                    # ── IMBALANCE PERSISTENCE DEBOUNCE (4.0s buffer) ──
+                                    # Require imbalance to persist for 4.0s (~8 polls) to absorb transient single-tick glitches
+                                    debounce_sec = 4.0
                                     # BUT if closed tickets have been verified in broker deal history, bypass debounce!
                                     if not has_verified:
                                         imbalance_start = session.get("_imbalance_first_seen_ts", 0)
@@ -6417,8 +6410,8 @@ def _run_hedge_monitor_all():
                     # to ensure INSTANT limit reopening when a TP is hit.
                     threshold = 0
                 elif info.get("conn_type") == "iforex_direct":
-                    # iFOREX Playwright scraper cycles take ~10-25s. Use 40 polls (~20s)
-                    threshold = 40
+                    # iFOREX debounce: 4 polls (2.0s) is sufficient since post-fill grace period already guards opening
+                    threshold = 4
                 elif session.get("action") == "monitor" or session.get("imported"):
                     # Moderate debounce (10 polls = 5.0s) for monitor/imported sessions so transient socket drops don't trigger false mass liquidations
                     threshold = 10

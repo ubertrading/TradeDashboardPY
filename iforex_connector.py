@@ -786,8 +786,8 @@ class IForexAccount:
             except Exception as e:
                 logger.warning("[%s] Position sync error: %s", self.account_id, e)
 
-            # Sleep between position synchronization passes
-            time.sleep(5.0)
+            # Sleep between position synchronization passes (1.0s for prompt detection)
+            time.sleep(1.0)
 
 
 # ─── Account Manager ────────────────────────────────────────────────────────
