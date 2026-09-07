@@ -276,7 +276,7 @@ class IForexAccount:
 
         threading.Thread(target=_worker, daemon=True, name=f"iforex_reauth_{self.account_id}").start()
 
-    def get_quote(self, symbol: str, allow_live: bool = False) -> Optional[Tuple[float, float]]:
+    def get_quote(self, symbol: str, allow_live: bool = True) -> Optional[Tuple[float, float]]:
         """Return (bid, ask) for symbol from cache or live fetch if allow_live=True."""
         sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
         with self._lock:
@@ -442,12 +442,11 @@ class IForexAccount:
                 sessions = self.dd.get("sessions", {})
                 active_pairs = set()
                 for sess in sessions.values():
-                    if sess.get("status") in ("active", "partial_close"):
-                        sides = sess.get("sides", {})
-                        if self.account_id in sides:
-                            pair = (sides[self.account_id].get("pair") or sess.get("pair", "")).strip()
-                            if pair:
-                                active_pairs.add(pair)
+                    sides = sess.get("sides", {})
+                    if self.account_id in sides:
+                        pair = (sides[self.account_id].get("pair") or sess.get("pair", "")).strip()
+                        if pair:
+                            active_pairs.add(pair)
                 
                 if not active_pairs:
                     active_pairs.add("EUR/USD")
@@ -498,15 +497,20 @@ class IForexAccount:
                     info.setdefault("leverage", int(self.config.get("leverage", 400)))
 
                     # Update spread / bid / ask in info
+                    syms_dict = info.setdefault("symbols", {})
                     for pair in active_pairs:
                         q = self.get_quote(pair, allow_live=False)
                         if q:
-                            info["bid"] = q[0]
-                            info["ask"] = q[1]
                             pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
-                            info["spread"] = round((q[1] - q[0]) * pip_mult, 1)
-                            info["symbol"] = pair
-                            break
+                            spread_pts = round((q[1] - q[0]) * pip_mult, 1)
+                            sym_clean = pair.upper().replace("/", "").replace(" ", "")
+                            syms_dict[pair] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
+                            syms_dict[sym_clean] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
+                            if "symbol" not in info or info.get("symbol") == pair or not info.get("bid"):
+                                info["bid"] = q[0]
+                                info["ask"] = q[1]
+                                info["spread"] = spread_pts
+                                info["symbol"] = pair
                     
                     # Position tracking for hedge balancing
                     orders = self._get_open_orders()
