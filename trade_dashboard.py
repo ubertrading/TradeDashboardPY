@@ -23918,8 +23918,15 @@ if __name__ == '__main__':
 
     app.logger.info("Starting Trade Dashboard on %s:%d", TRADE_HOST, TRADE_PORT)
     try:
-        from waitress import serve
+        try:
+            from waitress import serve
+        except ImportError:
+            app.logger.info("Waitress not installed — attempting auto-installation via pip...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "waitress"])
+            from waitress import serve
+            app.logger.info("Waitress successfully installed.")
         serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=16)
     except Exception as e:
-        app.logger.warning("Waitress not available: %s — falling back to Flask dev server", e)
+        app.logger.warning("Waitress not available or failed to start: %s — falling back to Flask dev server", e)
         app.run(host=TRADE_HOST, port=TRADE_PORT, threaded=True)
+
