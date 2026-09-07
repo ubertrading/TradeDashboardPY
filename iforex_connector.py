@@ -149,23 +149,59 @@ class IForexAccount:
         self._account_summary: Dict[str, float] = {}
         self.is_market_closed: bool = False
         self._last_401_ts = 0.0
+        self._last_relogin_attempt_ts = 0.0
         self._running = False
         self._poll_thread = None
         self._pos_sync_thread = None
         self._lock = threading.Lock()
 
+        # Position persistence file
+        self.positions_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "configs",
+            f"iforex_positions_{self.account_id}.json"
+        )
+        self._load_persisted_positions()
+
+    def _load_persisted_positions(self):
+        """Load open positions saved from previous runs."""
+        if os.path.exists(self.positions_file):
+            try:
+                with open(self.positions_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    with self._lock:
+                        self._open_orders = data
+                        for o in data:
+                            t = o.get("Ticket") or o.get("ticket")
+                            if t:
+                                self._seen_ticket_ids.add(str(t))
+                    logger.info("[%s] Restored %d persisted open position(s) from %s",
+                                self.account_id, len(data), self.positions_file)
+            except Exception as ex:
+                logger.warning("[%s] Could not load persisted positions: %s", self.account_id, ex)
+
+    def _save_open_orders(self):
+        """Save open positions to disk for crash/restart recovery."""
+        try:
+            os.makedirs(os.path.dirname(self.positions_file), exist_ok=True)
+            with self._lock:
+                snapshot = list(self._open_orders)
+            with open(self.positions_file, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+        except Exception as ex:
+            logger.warning("[%s] Could not save open positions: %s", self.account_id, ex)
+
     def start(self):
-        """Start the background polling loop and position sync loop."""
+        """Start the background polling loop (pure HTTP mode, no continuous browser scraper)."""
         self._running = True
         self.connected = True
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name=f"iforex_poll_{self.account_id}")
         self._poll_thread.start()
-        self._pos_sync_thread = threading.Thread(target=self._position_sync_loop, daemon=True, name=f"iforex_possync_{self.account_id}")
-        self._pos_sync_thread.start()
-        logger.info("[%s] iFOREX Direct polling and position sync threads started", self.account_id)
+        logger.info("[%s] iFOREX Direct polling thread started (pure HTTP mode)", self.account_id)
 
     def stop(self):
-        """Stop background polling and position sync."""
+        """Stop background polling."""
         self._running = False
         self.connected = False
         with self._lock:
@@ -200,12 +236,14 @@ class IForexAccount:
                             self._quotes_cache[sym_clean] = {"bid": bid, "ask": ask, "ts": time.time()}
                         return (bid, ask)
             elif r_bid.status_code == 401 or r_ask.status_code == 401:
-                self.connected = False
-                now_ts = time.time()
-                if now_ts - self._last_401_ts > 45:
-                    self._last_401_ts = now_ts
-                    logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
-                    self._trigger_auto_relogin()
+                # Try fast in-memory HTTP token refresh first
+                if not self.refresh_security_token_http():
+                    self.connected = False
+                    now_ts = time.time()
+                    if now_ts - self._last_401_ts > 60:
+                        self._last_401_ts = now_ts
+                        logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
+                        self._trigger_auto_relogin()
                 return None
         except Exception as e:
             logger.debug("[%s] FeedsHistory/GetTicks error for %s: %s", self.account_id, symbol, e)
@@ -230,21 +268,58 @@ class IForexAccount:
                 except Exception:
                     pass
             elif resp.status_code == 401:
-                self.connected = False
-                now_ts = time.time()
-                if now_ts - self._last_401_ts > 45:
-                    self._last_401_ts = now_ts
-                    logger.warning("[%s] iFOREX session expired (401) on margin check — initiating auto-recovery...", self.account_id)
-                    self._trigger_auto_relogin()
+                if not self.refresh_security_token_http():
+                    self.connected = False
+                    now_ts = time.time()
+                    if now_ts - self._last_401_ts > 60:
+                        self._last_401_ts = now_ts
+                        logger.warning("[%s] iFOREX session expired (401) on margin check — initiating auto-recovery...", self.account_id)
+                        self._trigger_auto_relogin()
         except Exception:
             pass
 
         return None
 
+    def refresh_security_token_http(self) -> Optional[int]:
+        """Fast in-memory token refresh via GET /webpl4/InitialData/GetData (< 300ms, NO BROWSER)."""
+        try:
+            url = f"{self.base_url}/InitialData/GetData?rnd={time.time()}"
+            r = self.session.get(url, timeout=5.0)
+            if r.status_code == 200:
+                data = r.json()
+                tok = data.get("systemInfo", {}).get("securityToken")
+                if tok:
+                    self.security_token = int(tok)
+                    self.config["security_token"] = self.security_token
+                    self.connected = True
+                    self._last_401_ts = 0.0
+                    # Also persist to configs/iforex_accounts.json
+                    try:
+                        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "iforex_accounts.json")
+                        if os.path.exists(cfg_path):
+                            with open(cfg_path, "r", encoding="utf-8") as f:
+                                cfgs = json.load(f)
+                            if self.account_id in cfgs:
+                                cfgs[self.account_id]["security_token"] = self.security_token
+                                with open(cfg_path, "w", encoding="utf-8") as f:
+                                    json.dump(cfgs, f, indent=2)
+                    except Exception:
+                        pass
+                    logger.info("[%s] Refreshed security token via fast HTTP: %s", self.account_id, self.security_token)
+                    return self.security_token
+        except Exception as e:
+            logger.warning("[%s] Fast HTTP token refresh failed: %s", self.account_id, e)
+        return None
+
     def _trigger_auto_relogin(self):
-        """Trigger background Playwright auto-login if credentials or profile exist."""
+        """Trigger background Playwright auto-login if credentials or profile exist with 60s cooldown."""
+        now = time.time()
+        if now - getattr(self, "_last_relogin_attempt_ts", 0.0) < 60.0:
+            logger.warning("[%s] Auto-relogin debounced (cooldown 60s)", self.account_id)
+            return
         if getattr(self, "_relogin_in_progress", False):
             return
+        self._last_relogin_attempt_ts = now
         self._relogin_in_progress = True
 
         def _worker():
@@ -311,12 +386,13 @@ class IForexAccount:
                 except Exception:
                     return {"raw": resp.text}
             elif resp.status_code == 401:
-                self.connected = False
-                now_ts = time.time()
-                if now_ts - self._last_401_ts > 45:
-                    self._last_401_ts = now_ts
-                    logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
-                    self._trigger_auto_relogin()
+                if not self.refresh_security_token_http():
+                    self.connected = False
+                    now_ts = time.time()
+                    if now_ts - self._last_401_ts > 60:
+                        self._last_401_ts = now_ts
+                        logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
+                        self._trigger_auto_relogin()
         except Exception as e:
             self.connected = False
             logger.error("[%s] GetDealMarginDetails error: %s", self.account_id, e)
@@ -375,6 +451,14 @@ class IForexAccount:
             "SecurityToken": self.security_token
         }
         
+        # If auto-relogin is currently running, wait briefly for it to finish first
+        if getattr(self, "_relogin_in_progress", False):
+            wait_st = time.time()
+            logger.info("[%s] Auto-relogin in progress — waiting before OpenDeal...", self.account_id)
+            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 20.0:
+                time.sleep(0.5)
+            payload["SecurityToken"] = self.security_token
+
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
         logger.info("[%s] Submitting OpenDeal (%s %s, input=%s -> notional=%d): %s", 
                     self.account_id, symbol, direction, amount, notional_amount, payload)
@@ -382,13 +466,49 @@ class IForexAccount:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
             if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
-                self.connected = False
-                now_ts = time.time()
-                if now_ts - getattr(self, "_last_401_ts", 0) > 30:
-                    self._last_401_ts = now_ts
-                    logger.warning("[%s] iFOREX session terminated on OpenDeal (%d) — triggering auto-relogin...", self.account_id, resp.status_code)
+                logger.warning("[%s] iFOREX session terminated on OpenDeal (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
+                refreshed_token = self.refresh_security_token_http()
+                if refreshed_token:
+                    logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying OpenDeal immediately...", self.account_id, refreshed_token)
+                    fresh_q = self.get_quote(symbol, allow_live=True)
+                    if fresh_q and fresh_q[0] > 0:
+                        fresh_rate = fresh_q[1] if dir_code == 1 else fresh_q[0]
+                        fresh_other = fresh_q[0] if dir_code == 1 else fresh_q[1]
+                        payload["MarketRate"] = fresh_rate
+                        payload["OtherRateSeen"] = fresh_other
+                    payload["SecurityToken"] = refreshed_token
+                    try:
+                        resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                        logger.info("[%s] Retried OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
+                    except Exception as retry_e:
+                        return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                else:
+                    self.connected = False
+                    logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
                     self._trigger_auto_relogin()
-                return {"status": "error", "message": "iFOREX session terminated — auto-relogin triggered", "raw": resp.text}
+                    
+                    # Wait for auto-relogin to complete
+                    wait_st = time.time()
+                    time.sleep(0.5)
+                    while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 25.0:
+                        time.sleep(0.5)
+                    
+                    if self.connected and self.security_token:
+                        logger.info("[%s] Auto-relogin succeeded! Retrying OpenDeal with fresh credentials...", self.account_id)
+                        fresh_q = self.get_quote(symbol, allow_live=True)
+                        if fresh_q and fresh_q[0] > 0:
+                            fresh_rate = fresh_q[1] if dir_code == 1 else fresh_q[0]
+                            fresh_other = fresh_q[0] if dir_code == 1 else fresh_q[1]
+                            payload["MarketRate"] = fresh_rate
+                            payload["OtherRateSeen"] = fresh_other
+                        payload["SecurityToken"] = self.security_token
+                        try:
+                            resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                            logger.info("[%s] Retried OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
+                        except Exception as retry_e:
+                            return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                    else:
+                        return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
             try:
                 res_json = resp.json()
                 is_ok = (resp.status_code == 200 and
@@ -396,6 +516,30 @@ class IForexAccount:
                          res_json.get("status") == 1 and
                          (res_json.get("itemId") or 0) > 0)
                 if is_ok:
+                    ticket_id = str(res_json.get("itemId"))
+                    now_epoch = time.time()
+                    new_order = {
+                        "Ticket": ticket_id,
+                        "ticket": ticket_id,
+                        "Symbol": symbol,
+                        "symbol": symbol,
+                        "Type": "buy" if dir_code == 1 else "sell",
+                        "direction": "buy" if dir_code == 1 else "sell",
+                        "Lots": amount,
+                        "lots": amount,
+                        "Amount": notional_amount,
+                        "OpenPrice": float(res_json.get("serverRate") or market_rate),
+                        "open_price": float(res_json.get("serverRate") or market_rate),
+                        "OpenTime": now_epoch,
+                        "open_epoch": now_epoch,
+                        "Profit": 0.0,
+                        "comment": ""
+                    }
+                    with self._lock:
+                        if not any(str(o.get("Ticket")) == ticket_id for o in self._open_orders):
+                            self._open_orders.append(new_order)
+                        self._seen_ticket_ids.add(ticket_id)
+                    self._save_open_orders()
                     return {"status": "ok", "data": res_json, "raw": resp.text}
                 else:
                     err_msg = res_json.get("result") if isinstance(res_json, dict) else resp.text
@@ -416,6 +560,13 @@ class IForexAccount:
         position_number: Deal position ticket ID
         spot_rate: Current closing market rate
         """
+        # If auto-relogin is currently running, wait briefly for it to finish first
+        if getattr(self, "_relogin_in_progress", False):
+            wait_st = time.time()
+            logger.info("[%s] Auto-relogin in progress — waiting before CloseDeals...", self.account_id)
+            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 20.0:
+                time.sleep(0.5)
+
         url = f"{self.base_url}/Deals/CloseDeals"
         positions_str = f"{position_number}#{spot_rate}#{fw_pips}"
         payload = {
@@ -428,19 +579,38 @@ class IForexAccount:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
             if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
-                self.connected = False
-                now_ts = time.time()
-                if now_ts - getattr(self, "_last_401_ts", 0) > 30:
-                    self._last_401_ts = now_ts
-                    logger.warning("[%s] iFOREX session terminated (%d) — triggering auto-relogin...", self.account_id, resp.status_code)
+                logger.warning("[%s] iFOREX session terminated on CloseDeals (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
+                refreshed_token = self.refresh_security_token_http()
+                if refreshed_token:
+                    logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying CloseDeals immediately...", self.account_id, refreshed_token)
+                    payload["SecurityToken"] = refreshed_token
+                    try:
+                        resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                        logger.info("[%s] Retried CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
+                    except Exception as retry_e:
+                        return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                else:
+                    self.connected = False
+                    logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
                     self._trigger_auto_relogin()
-                return {"status": "error", "message": "iFOREX session terminated — auto-relogin triggered", "raw": resp.text}
+                    
+                    wait_st = time.time()
+                    time.sleep(0.5)
+                    while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 25.0:
+                        time.sleep(0.5)
+                    
+                    if self.connected and self.security_token:
+                        logger.info("[%s] Auto-relogin succeeded! Retrying CloseDeals with fresh credentials...", self.account_id)
+                        payload["SecurityToken"] = self.security_token
+                        try:
+                            resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                            logger.info("[%s] Retried CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
+                        except Exception as retry_e:
+                            return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                    else:
+                        return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
             try:
                 res_json = resp.json()
-                # iFOREX returns HTTP 200 even for business-logic errors (e.g.
-                # OrderError8 = "position already closed").  Check the response
-                # body for status:0 / OrderError* to avoid treating duplicate
-                # close attempts as successful closes.
                 iforex_ok = resp.status_code == 200
                 if iforex_ok and isinstance(res_json, list) and len(res_json) > 0:
                     item = res_json[0] if isinstance(res_json[0], dict) else {}
@@ -449,14 +619,25 @@ class IForexAccount:
                     if item_result == "OrderError8":
                         logger.info("[%s] CloseDeals ticket %s was already closed on broker (OrderError8) — treating as closed",
                                     self.account_id, position_number)
+                        with self._lock:
+                            self._open_orders = [o for o in self._open_orders if str(o.get("Ticket")) != str(position_number)]
+                        self._save_open_orders()
                         return {"status": "ok", "already_closed": True, "data": res_json, "raw": resp.text}
                     if item_status == 0 or item_result.startswith("OrderError"):
                         logger.warning("[%s] CloseDeals returned iFOREX error: status=%s result=%s (ticket=%s)",
                                         self.account_id, item_status, item_result, position_number)
                         return {"status": "error", "data": res_json, "raw": resp.text,
                                 "iforex_error": item_result}
+                if iforex_ok:
+                    with self._lock:
+                        self._open_orders = [o for o in self._open_orders if str(o.get("Ticket")) != str(position_number)]
+                    self._save_open_orders()
                 return {"status": "ok" if iforex_ok else "error", "data": res_json, "raw": resp.text}
             except Exception:
+                if resp.status_code == 200:
+                    with self._lock:
+                        self._open_orders = [o for o in self._open_orders if str(o.get("Ticket")) != str(position_number)]
+                    self._save_open_orders()
                 return {"status": "ok" if resp.status_code == 200 else "error", "raw": resp.text}
         except Exception as e:
             logger.error("[%s] CloseDeals exception: %s", self.account_id, e)
@@ -664,166 +845,11 @@ class IForexAccount:
 
     def _position_sync_loop(self):
         """
-        Background thread that continuously synchronizes active positions from the iFOREX platform.
-        Uses headless Playwright to inspect React DOM for live positions.
-        If a position was closed externally in iFOREX GUI, this updates _open_orders,
-        which immediately triggers ea_account_info update and hedge monitor rebalancing!
+        Dormant in pure HTTP mode. Positions are maintained with 100% determinism via
+        HTTP OpenDeal / CloseDeals and saved to configs/iforex_positions_{account_id}.json.
         """
-        time.sleep(5)  # Initial wait for platform settlement
-        _consecutive_empty = 0  # Debounce: require confirmation only for ambiguous empty reads
-        _EMPTY_THRESHOLD = 2    # Only for ambiguous reads without clear summary margin
-        _consecutive_sync_failures = 0
         while self._running:
-            try:
-                from iforex_auto_login import fetch_active_deals_and_summary
-                deals, summary = fetch_active_deals_and_summary(timeout_sec=25)
-                if not self._running:
-                    break
-                if deals is None:
-                    _consecutive_sync_failures += 1
-                    if _consecutive_sync_failures >= 3:
-                        logger.warning("[%s] Position sync failed %d consecutive times — triggering auto-relogin",
-                                       self.account_id, _consecutive_sync_failures)
-                        self._trigger_auto_relogin()
-                        _consecutive_sync_failures = 0
-                else:
-                    _consecutive_sync_failures = 0
-
-                if summary:
-                    with self._lock:
-                        self._account_summary = summary
-                    if summary.get("balance") is not None and summary.get("balance", 0.0) > 0:
-                        self.config["balance"] = summary["balance"]
-                    if summary.get("equity") is not None and summary.get("equity", 0.0) > 0:
-                        self.config["equity"] = summary["equity"]
-                    # Propagate market_closed from Playwright DOM check
-                    if "market_closed" in summary:
-                        self.is_market_closed = bool(summary["market_closed"])
-                        if "ea_account_info" in self.dd:
-                            self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = self.is_market_closed
-                if deals is not None:
-                    # --- Sanity guard: never trust deals=[] if margin/open_pl says we're still in positions ---
-                    _margin = summary.get("margin")
-                    _open_pl = summary.get("open_pl")
-                    _balance = summary.get("balance")
-                    _has_valid_summary = (_balance is not None and _balance > 0 and _margin is not None)
-
-                    _suspicious_empty = (len(deals) == 0 and _margin is not None and (abs(_margin) > 1.0 or (_open_pl is not None and abs(_open_pl) > 0.01)))
-                    if _suspicious_empty:
-                        _consecutive_empty = 0  # Reset — margin says we still have positions
-                        logger.warning("[%s] deals=[] but margin=%s open_pl=%s — skipping update (likely render lag)",
-                                       self.account_id, _margin, _open_pl)
-                    elif len(deals) == 0 and self._open_orders:
-                        # If summary margin and open_pl are zero AND summary is verified valid with positive balance,
-                        # broker account confirms 0 positions — accept IMMEDIATELY!
-                        if _has_valid_summary and abs(_margin) <= 0.01 and (_open_pl is None or abs(_open_pl) <= 0.01):
-                            logger.info("[%s] deals=[] confirmed by margin=%.2f open_pl=%s balance=%.2f — accepting closure immediately",
-                                        self.account_id, _margin, _open_pl, _balance)
-                            _consecutive_empty = 0
-                        else:
-                            _consecutive_empty += 1
-                            if _consecutive_empty < _EMPTY_THRESHOLD:
-                                logger.warning("[%s] deals=[] (empty read %d/%d) — deferring position wipe",
-                                               self.account_id, _consecutive_empty, _EMPTY_THRESHOLD)
-                                deals = None  # Treat as None to skip update this cycle
-                            else:
-                                logger.info("[%s] deals=[] confirmed after %d consecutive reads — accepting closure",
-                                            self.account_id, _consecutive_empty)
-                                _consecutive_empty = 0
-                    else:
-                        _consecutive_empty = 0  # Non-empty result — reset counter
-
-                if deals is not None:
-                    with self._lock:
-                        now_epoch = time.time()
-                        deal_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
-                        # Track all tickets seen in broker deals
-                        self._seen_ticket_ids.update(deal_tickets)
-
-                        # Only preserve unrendered fresh orders that have NEVER appeared in broker deals yet,
-                        # to allow brief DOM rendering lag right after OpenDeal returns (max 8s).
-                        # Once an order has appeared in broker deals at least once, it is NEVER preserved if missing!
-                        for fo in list(self._open_orders):
-                            fo_t = str(fo.get("Ticket"))
-                            fo_time = fo.get("open_epoch") or fo.get("OpenTime") or 0
-                            if not isinstance(fo_time, (int, float)):
-                                fo_time = 0
-                            if (fo_t and fo_t not in deal_tickets and 
-                                fo_t not in self._seen_ticket_ids and 
-                                (now_epoch - fo_time) < 8.0):
-                                deals.append(fo)
-                                deal_tickets.add(fo_t)
-                                logger.info("[%s] Preserving unrendered fresh local order ticket=%s in position sync (age=%.1fs < 8s)",
-                                            self.account_id, fo_t, now_epoch - fo_time)
-
-                        prev_tickets = set(str(o.get("Ticket")) for o in self._open_orders if o.get("Ticket"))
-                        new_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
-
-                        # Check if any ticket disappeared (e.g. manual closure on iFOREX)
-                        closed_externally = prev_tickets - new_tickets
-                        if closed_externally:
-                            logger.info("[%s] Detected %d position(s) closed externally in iFOREX: %s",
-                                        self.account_id, len(closed_externally), closed_externally)
-
-                        # Update open orders list
-                        self._open_orders = deals
-                        
-                        # Also refresh ea_account_info right away so hedge monitor sees change immediately
-                        if "ea_account_info" in self.dd:
-                            info = self.dd["ea_account_info"].setdefault(self.account_id, {})
-                            if summary:
-                                if summary.get("balance", 0.0) > 0:
-                                    info["balance"] = summary["balance"]
-                                if summary.get("equity", 0.0) > 0:
-                                    info["equity"] = summary["equity"]
-                                if "margin" in summary and summary["margin"] is not None:
-                                    info["margin"] = summary["margin"]
-                                if "free_margin" in summary and summary["free_margin"] is not None:
-                                    info["free_margin"] = summary["free_margin"]
-                                if "open_pl" in summary and summary["open_pl"] is not None:
-                                    info["profit"] = summary["open_pl"]
-                            tickets = [o.get("Ticket") for o in deals if o.get("Ticket")]
-                            info["open_tickets"] = tickets
-                            info["positions"] = len(tickets)
-                            info["pos_details"] = deals
-                            info["position_details"] = [
-                                {
-                                    "ticket": str(o.get("Ticket")),
-                                    "symbol": o.get("Symbol", "EURUSD"),
-                                    "type": str(o.get("Type", "buy")),
-                                    "lots": float(o.get("Lots", 0.01)),
-                                    "open_price": float(o.get("OpenPrice", 0.0)),
-                                    "profit": float(o.get("Profit", 0.0))
-                                }
-                                for o in deals if o.get("Ticket")
-                            ]
-                            _lbi = {}
-                            tot_lots = 0.0
-                            for o in deals:
-                                sym = o.get("Symbol", "Unknown")
-                                lots = float(o.get("Lots") or 0.01)
-                                if sym not in _lbi:
-                                    _lbi[sym] = {"buy": 0.0, "sell": 0.0}
-                                if str(o.get("Type", "")).lower() in ("buy", "0", "op_buy"):
-                                    _lbi[sym]["buy"] = round(_lbi[sym]["buy"] + lots, 2)
-                                    tot_lots += lots
-                                else:
-                                    _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
-                                    tot_lots -= lots
-                            info["lots_by_instrument"] = _lbi
-                            info["total_lots"] = round(tot_lots, 2)
-                            now_t = time.time()
-                            info["last_update"] = now_t
-                            if "ea_heartbeats" in self.dd:
-                                self.dd["ea_heartbeats"][self.account_id] = now_t
-                        logger.info("[%s] Position sync: updated %d open positions (tickets: %s)",
-                                    self.account_id, len(deals), [d.get("Ticket") for d in deals])
-
-            except Exception as e:
-                logger.warning("[%s] Position sync error: %s", self.account_id, e)
-
-            # Sleep between position synchronization passes (0.5s for prompt detection)
-            time.sleep(0.5)
+            time.sleep(10.0)
 
 
 # ─── Account Manager ────────────────────────────────────────────────────────
@@ -1082,6 +1108,7 @@ class IForexAccountManager:
                                             info["positions"] = len(tks)
                                             info["position_details"] = [p for p in (info.get("position_details") or []) if str(p.get("ticket")) != str(ticket)]
                                             info["last_update"] = time.time()
+                                    acct_._save_open_orders()
 
                                     # Extract executed rate from iFOREX CloseDeals response
                                     exec_price = market_rate
@@ -1177,6 +1204,7 @@ class IForexAccountManager:
                                                 })
                                                 info["position_details"] = pos_list
                                             info["last_update"] = now_fill_epoch
+                                    acct_._save_open_orders()
 
                                     pip_mult = 100.0 if "JPY" in pair_.upper() else 10000.0
                                     spread = round((q2[1] - q2[0]) * pip_mult, 1) if (q2 and len(q2) >= 2) else 0

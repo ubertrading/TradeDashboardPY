@@ -52,3 +52,10 @@ temp/
 
 # Data configs
 configs/reporting_data.json
+configs/iforex_positions_*.json
+
+# iFOREX browser profiles
+iforex_edge_profile/
+iforex_edge_profile_test/
+iforex_accounts.json
+*.bak

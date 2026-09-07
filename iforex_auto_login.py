@@ -87,35 +87,53 @@ def refresh_iforex_session(account_id: str = "12141021",
             except Exception:
                 pass
 
-            # If redirected to connectivity-issue or login page not reached, go directly to login URL
-            if "connectivity-issue" in page.url or "trader.iforex.com" not in page.url or not page.query_selector("#txtUName"):
-                if not (page.evaluate("() => Boolean(window.systemInfo && window.systemInfo.securityToken)") or False):
-                    logger.info("Directing to login URL: https://trader.iforex.com/webpl4/Account/Login/Lang/English")
-                    page.goto("https://trader.iforex.com/webpl4/Account/Login/Lang/English", wait_until="domcontentloaded", timeout=25000)
-                    time.sleep(2.0)
-
-            # 2. Check if login form is displayed
-            uname_input = page.query_selector("#txtUName")
-            pass_input = page.query_selector("#txtPass")
-
-            if uname_input and pass_input and username and password:
-                logger.info("Login form detected — entering username and password automatically...")
+            # Check if we are already logged in (window.systemInfo.securityToken present)
+            sec_token_check = False
+            for _ in range(5):
                 try:
-                    uname_input.fill(str(username))
-                    pass_input.fill(str(password))
-                    
-                    # Check autologin checkbox
-                    autologin_chk = page.query_selector("#autologin")
-                    if autologin_chk and not autologin_chk.is_checked():
-                        autologin_chk.check()
+                    if page.evaluate("() => Boolean(window.systemInfo && window.systemInfo.securityToken)"):
+                        sec_token_check = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1.0)
 
-                    time.sleep(0.5)
-                    login_btn = page.query_selector("#btnOkLogin")
-                    if login_btn:
-                        login_btn.click()
+            # If not logged in and on connectivity-issue or login required, go to login URL
+            if not sec_token_check:
+                if "connectivity-issue" in page.url or "trader.iforex.com" not in page.url or not page.query_selector("#txtUName"):
+                    logger.info("Session not active — navigating to login URL: https://trader.iforex.com/webpl4/Account/Login/Lang/English")
+                    page.goto("https://trader.iforex.com/webpl4/Account/Login/Lang/English", wait_until="domcontentloaded", timeout=25000)
+                    time.sleep(1.5)
+
+                # Check if login form is displayed
+                try:
+                    page.wait_for_selector("#txtUName", timeout=8000)
+                except Exception:
+                    pass
+
+                uname_input = page.query_selector("#txtUName")
+                pass_input = page.query_selector("#txtPass")
+
+                if uname_input and pass_input and username and password:
+                    logger.info("Login form detected — entering credentials for %s...", username)
+                    try:
+                        uname_input.fill(str(username))
+                        pass_input.fill(str(password))
+                        
+                        # Check autologin checkbox
+                        autologin_chk = page.query_selector("#autologin")
+                        if autologin_chk and not autologin_chk.is_checked():
+                            autologin_chk.check()
+
+                        time.sleep(0.5)
+                        login_btn = page.query_selector("#btnOkLogin")
+                        if login_btn:
+                            login_btn.click()
+                        else:
+                            page.evaluate("() => { const f = document.getElementById('LoginForm'); if (f) f.submit(); }")
                         logger.info("Login form submitted, waiting for platform session...")
-                except Exception as ex:
-                    logger.warning("Error submitting login form: %s", ex)
+                    except Exception as ex:
+                        logger.warning("Error submitting login form: %s", ex)
 
             # 3. Wait for login completion and securityToken detection
             account_number = None
@@ -127,10 +145,14 @@ def refresh_iforex_session(account_id: str = "12141021",
                 try:
                     is_logged_in = page.evaluate("""
                         (() => {
-                            if (window.systemInfo && window.systemInfo.securityToken && window.$customer && window.$customer.prop) {
+                            if (window.systemInfo && window.systemInfo.securityToken) {
+                                let acc = null;
+                                if (window.$customer && window.$customer.prop && window.$customer.prop.accountNumber) {
+                                    acc = window.$customer.prop.accountNumber;
+                                }
                                 return {
                                     loggedIn: true,
-                                    accountNumber: window.$customer.prop.accountNumber,
+                                    accountNumber: acc,
                                     securityToken: window.systemInfo.securityToken
                                 };
                             }
@@ -138,7 +160,7 @@ def refresh_iforex_session(account_id: str = "12141021",
                         })()
                     """)
                     if is_logged_in.get("loggedIn"):
-                        account_number = str(is_logged_in.get("accountNumber"))
+                        account_number = str(is_logged_in.get("accountNumber") or account_id)
                         security_token = int(is_logged_in.get("securityToken"))
                         logger.info("Login confirmed! Account #%s, SecurityToken: %s", account_number, security_token)
                         break

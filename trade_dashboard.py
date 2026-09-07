@@ -10380,13 +10380,21 @@ def trade_result():
 
                 # ── Max-errors + rollback logic ──
                 max_errors = session.get("max_errors", 1)
-                total_errors = sum(len(v) for v in session.get("errors", {}).values())
+                def _is_transient_err(err_entry):
+                    det = str(err_entry.get("detail", "") if isinstance(err_entry, dict) else err_entry).lower()
+                    return any(k in det for k in ("auto-relogin", "session terminated", "security violation", "transient", "re-auth in progress"))
+
+                non_transient_errors = sum(
+                    1 for err_list in session.get("errors", {}).values()
+                    for err in (err_list if isinstance(err_list, list) else [err_list])
+                    if not _is_transient_err(err)
+                )
                 # Don't let max_errors pause during cycle open-phase — retry logic handles that
                 in_cycle_open = (
                     session.get("action", "").startswith("cycle_") and
                     session.get("cycle_progress", {}).get("phase") == "open"
                 )
-                should_pause = max_errors > 0 and total_errors >= max_errors and not in_cycle_open
+                should_pause = max_errors > 0 and non_transient_errors >= max_errors and not in_cycle_open
 
                 if should_pause and session.get("action") == "open":
                     sides = session.get("sides", {})
@@ -23974,12 +23982,20 @@ if __name__ == '__main__':
 
                     # ── Max-errors + rollback logic ──
                     max_errors = session.get("max_errors", 1)
-                    total_errors = sum(len(v) for v in session.get("errors", {}).values())
+                    def _is_transient_mt_err(err_entry):
+                        det = str(err_entry.get("detail", "") if isinstance(err_entry, dict) else err_entry).lower()
+                        return any(k in det for k in ("auto-relogin", "session terminated", "security violation", "transient", "re-auth in progress"))
+
+                    non_transient_errors = sum(
+                        1 for err_list in session.get("errors", {}).values()
+                        for err in (err_list if isinstance(err_list, list) else [err_list])
+                        if not _is_transient_mt_err(err)
+                    )
                     in_cycle_open = (
                         _mt_action.startswith("cycle_") and
                         session.get("cycle_progress", {}).get("phase") == "open"
                     )
-                    should_pause = max_errors > 0 and total_errors >= max_errors and not in_cycle_open
+                    should_pause = max_errors > 0 and non_transient_errors >= max_errors and not in_cycle_open
 
                     if should_pause and session.get("action") == "open":
                         sides = session.get("sides", {})
