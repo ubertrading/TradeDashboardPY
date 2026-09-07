@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -2239,6 +2239,338 @@ _snapshot_thread.start()
 # ─── Daily Account Statements ────────────────────────────────────────────────
 _STMTS_DIR = os.path.join(_SCRIPT_DIR, "stmts")
 os.makedirs(_STMTS_DIR, exist_ok=True)
+
+def _render_metatrader_html_statement(stmt):
+    """Render an authentic MetaTrader-formatted HTML account statement matching native MT4 Statement.htm layout."""
+    acct_id = str(stmt.get("account_id", ""))
+    acct_name = str(stmt.get("account_name") or stmt.get("group_label") or acct_id)
+    company_name = str(stmt.get("company") or stmt.get("broker") or stmt.get("server") or "Swissquote Bank SA")
+    date_str = str(stmt.get("date") or datetime.now().strftime("%Y %B %d, %H:%M"))
+    if " " not in date_str and "-" in date_str:
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            date_str = dt.strftime("%Y %B %d, ") + datetime.now().strftime("%H:%M")
+        except Exception:
+            pass
+
+    currency = str(stmt.get("currency", "USD"))
+    leverage_val = stmt.get("leverage") or 100
+    leverage = f"{leverage_val}"
+
+    balance = float(stmt.get("balance", 0.0) if stmt.get("balance") is not None else 0.0)
+    equity = float(stmt.get("equity", 0.0) if stmt.get("equity") is not None else 0.0)
+    margin = float(stmt.get("margin", 0.0) or 0.0)
+    free_margin = float(stmt.get("free_margin", 0.0) if stmt.get("free_margin") is not None else 0.0)
+
+    open_positions = stmt.get("open_positions") or []
+    closed_deals = stmt.get("deals") or []
+
+    def _mspt(val):
+        if val is None:
+            return "0.00"
+        return f"{float(val):,.2f}".replace(",", " ")
+
+    def _mspr(val):
+        if val is None or float(val) == 0.0:
+            return "0.00000"
+        return f"{float(val):.5f}"
+
+    # ΓöÇΓöÇ 1. Closed Transactions ΓöÇΓöÇ
+    closed_rows = []
+    tot_closed_pnl = 0.0
+    tot_closed_swap = 0.0
+    tot_closed_tax = 0.0
+    tot_closed_comm = 0.0
+
+    for idx, d in enumerate(closed_deals):
+        tkt = d.get("ticket") or d.get("order") or ""
+        o_time = d.get("open_time", "")
+        c_time = d.get("close_time", "")
+        stype = str(d.get("type", "")).lower()
+        size = float(d.get("lots", 0.0) or 0.0)
+        item = str(d.get("symbol", ""))
+        o_price = float(d.get("open_price", 0.0) or 0.0)
+        c_price = float(d.get("close_price", 0.0) or 0.0)
+        sl = float(d.get("sl", 0.0) or 0.0)
+        tp = float(d.get("tp", 0.0) or 0.0)
+        comm = float(d.get("commission", 0.0) or 0.0)
+        tax = float(d.get("taxes", 0.0) or 0.0)
+        swap = float(d.get("swap", 0.0) or 0.0)
+        pnl = float(d.get("profit", 0.0) or 0.0)
+        comment = d.get("comment", "")
+
+        tot_closed_pnl += pnl
+        tot_closed_swap += swap
+        tot_closed_tax += tax
+        tot_closed_comm += comm
+
+        bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
+
+        if stype == "balance" or "deposit" in comment.lower() or "deposit" in stype:
+            closed_rows.append(f'<tr align=right><td title="{comment or "Deposit"}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>balance</td><td colspan=10 align=left>Deposit</td><td class=mspt>{_mspt(pnl)}</td></tr>')
+        else:
+            closed_rows.append(
+                f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>{c_time}</td><td style="mso-number-format:0\\.00000;">{_mspr(c_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+            )
+            if comment:
+                closed_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+
+    if not closed_rows:
+        closed_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+    else:
+        closed_tr_html = "\n".join(closed_rows)
+
+    tot_closed_net = tot_closed_pnl + tot_closed_swap + tot_closed_tax + tot_closed_comm
+
+    # ΓöÇΓöÇ 2. Open Trades ΓöÇΓöÇ
+    open_rows = []
+    tot_open_pnl = 0.0
+    tot_open_swap = 0.0
+    tot_open_tax = 0.0
+    tot_open_comm = 0.0
+
+    for idx, p in enumerate(open_positions):
+        tkt = p.get("ticket", "")
+        o_time = p.get("open_time") or (datetime.fromtimestamp(p["open_epoch"]).strftime("%Y.%m.%d %H:%M:%S") if p.get("open_epoch") else "")
+        stype = p.get("side") or ("buy" if p.get("type") == 0 else "sell")
+        size = float(p.get("lots", 0.0) or 0.0)
+        item = str(p.get("symbol", ""))
+        o_price = float(p.get("open_price", 0.0) or 0.0)
+        m_price = float(p.get("market_price", o_price) or o_price)
+        sl = float(p.get("sl", 0.0) or 0.0)
+        tp = float(p.get("tp", 0.0) or 0.0)
+        comm = float(p.get("commission", 0.0) or 0.0)
+        tax = float(p.get("taxes", 0.0) or 0.0)
+        swap = float(p.get("swap", 0.0) or 0.0)
+        pnl = float(p.get("profit", 0.0) or 0.0)
+        comment = p.get("comment", "")
+
+        tot_open_pnl += pnl
+        tot_open_swap += swap
+        tot_open_tax += tax
+        tot_open_comm += comm
+
+        bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
+
+        open_rows.append(
+            f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>&nbsp;</td><td style="mso-number-format:0\\.00000;">{_mspr(m_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+        )
+        if comment:
+            open_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+
+    if not open_rows:
+        open_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+    else:
+        open_tr_html = "\n".join(open_rows)
+
+    tot_open_net = tot_open_pnl + tot_open_swap + tot_open_tax + tot_open_comm
+
+    deposit_withdrawal = float(stmt.get("deposit_withdrawal", balance - tot_closed_net) if stmt.get("deposit_withdrawal") is not None else (balance - tot_closed_net))
+
+    html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+  <head>
+    <title>Statement: {acct_id} - {acct_name}</title>
+    <style type="text/css" media="screen">
+    <!--
+    td {{ font: 8pt Tahoma,Arial; }}
+    //-->
+    </style>
+    <style type="text/css" media="print">
+    <!--
+    td {{ font: 7pt Tahoma,Arial; }}
+    //-->
+    </style>
+    <style type="text/css">
+    <!--
+    .msdate {{ mso-number-format:"General Date"; }}
+    .mspt   {{ mso-number-format:\\#\\,\\#\\#0\\.00;  }}
+    //-->
+    </style>
+  </head>
+<body topmargin=1 marginheight=1>
+<div align=center>
+<div style="font: 20pt Times New Roman"><b>{company_name}</b></div><br>
+
+
+<table cellspacing=1 cellpadding=3 border=0>
+<tr align=left>
+    <td colspan=2><b>Account: {acct_id}</b></td>
+    <td colspan=5><b>Name: {acct_name}</b></td>
+    <td colspan=2><b>Currency: {currency}</b></td>
+    <td colspan=2><b>Leverage: 1:{leverage}</b></td>
+    <td colspan=3 align=right><b>{date_str}</b></td></tr>
+
+<tr align=left><td colspan=14><b>Closed Transactions:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+   <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+   <td>Price</td><td>S / L</td><td>T / P</td><td nowrap>Close Time</td>
+   <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
+{closed_tr_html}
+<tr align=right>
+    <td colspan=10>&nbsp;</td>
+    <td class=mspt>{_mspt(tot_closed_comm)}</td>
+    <td class=mspt>{_mspt(tot_closed_tax)}</td>
+    <td class=mspt>{_mspt(tot_closed_swap)}</td>
+    <td class=mspt>{_mspt(tot_closed_pnl)}</td>
+</tr>
+
+<tr align=right>
+    <td colspan=12 align=right><b>Closed P/L:</b></td>
+    <td colspan=2 align=right title="Commission + Swap + Profit + Taxes" class=mspt><b>{_mspt(tot_closed_net)}</b></td>
+</tr>
+
+<tr align=left><td colspan=14><b>Open Trades:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+    <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+    <td>Price</td><td>S / L</td><td>T / P</td><td>&nbsp;</td>
+    <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
+{open_tr_html}
+<tr align=right>
+    <td colspan=10>&nbsp;</td>
+    <td class=mspt>{_mspt(tot_open_comm)}</td>
+    <td class=mspt>{_mspt(tot_open_tax)}</td>
+    <td class=mspt>{_mspt(tot_open_swap)}</td>
+    <td class=mspt>{_mspt(tot_open_pnl)}</td>
+</tr>
+
+<tr><td colspan=10>&nbsp;</td><td colspan=2 align=right><b>Floating P/L:</b></td>
+    <td colspan=2 align=right title="Commission + Swap + Profit + Taxes" class=mspt><b>{_mspt(tot_open_net)}</b></td></tr>
+
+<tr align=left><td colspan=14><b>Working Orders:</b></td></tr>
+<tr align=center bgcolor="#C0C0C0">
+    <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
+    <td>Price</td><td>S / L</td><td>T / P</td><td colspan=2 nowrap>Market Price</td><td colspan=4>&nbsp;</td></tr>
+<tr align=right><td colspan=14 align=center>No transactions</td></tr>
+
+<tr><td colspan=14 style="font: 1pt arial">&nbsp;</td></tr>
+
+<tr align=left><td colspan=14><b>Summary:</b></td></tr>
+<tr align=right>
+    <td colspan=2><b>Deposit/Withdrawal:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(deposit_withdrawal)}</b></td>
+    <td colspan=4><b>Credit Facility:</b></td>
+    <td class=mspt><b>0.00</b></td>
+    <td colspan=5>&nbsp;</td></tr>
+    
+<tr align=right>
+    <td colspan=2><b>Closed Trade P/L:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(tot_closed_net)}</b></td>
+    <td colspan=4><b>Floating P/L:</b></td>
+    <td class=mspt><b>{_mspt(tot_open_net)}</b></td>
+    <td colspan=3><b>Margin:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(margin)}</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Balance:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(balance)}</b></td>
+    <td colspan=4><b>Equity:</b></td>
+    <td class=mspt><b>{_mspt(equity)}</b></td>
+    <td colspan=3><b>Free Margin:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(free_margin)}</b></td></tr>
+	
+</table>
+</div></body></html>"""
+    return html_content
+
+
+def _render_summary_index_html(date_str, summary_rows):
+    """Render an HTML index dashboard for all account statements generated on date_str."""
+    rows_html = []
+    tot_balance = 0.0
+    tot_equity = 0.0
+    tot_pnl = 0.0
+    tot_swap = 0.0
+    tot_open = 0
+
+    for idx, r in enumerate(summary_rows):
+        aid = r.get("account_id", "")
+        safe_id = re.sub(r"[^\w\-]", "_", aid)
+        grp = r.get("group_label", "")
+        bal = r.get("balance") or 0.0
+        eq = r.get("equity") or 0.0
+        pnl = r.get("day_pnl") or 0.0
+        swap = r.get("day_swap") or 0.0
+        open_cnt = r.get("open_count") or 0
+
+        tot_balance += bal
+        tot_equity += eq
+        tot_pnl += pnl
+        tot_swap += swap
+        tot_open += open_cnt
+
+        pnl_cls = "profit_pos" if pnl > 0 else ("profit_neg" if pnl < 0 else "")
+        row_cls = "even" if idx % 2 == 0 else "odd"
+
+        rows_html.append(f"""
+        <tr class="{row_cls}">
+            <td><a href="{safe_id}.html" target="_blank" style="font-weight: bold; color: #1a73e8; text-decoration: none;">{aid}</a></td>
+            <td>{grp}</td>
+            <td class="right">{bal:.2f}</td>
+            <td class="right">{eq:.2f}</td>
+            <td class="center">{open_cnt}</td>
+            <td class="right {pnl_cls}">{pnl:.2f}</td>
+            <td class="right">{swap:.2f}</td>
+            <td class="center"><a href="{safe_id}.html" target="_blank" style="color: #4A607A; font-weight: bold;">View Statement (.html)</a></td>
+        </tr>""")
+
+    tot_pnl_cls = "profit_pos" if tot_pnl > 0 else ("profit_neg" if tot_pnl < 0 else "")
+
+    html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Account Statements Index - {date_str}</title>
+<style type="text/css">
+body, td, th, p {{ font-family: Tahoma, Arial, Helvetica, sans-serif; font-size: 12px; }}
+body {{ background-color: #FFFFFF; color: #000000; margin: 20px; }}
+table {{ border: 1px solid #B0B0B0; border-collapse: collapse; width: 100%; margin-top: 15px; }}
+th {{ background-color: #4A607A; color: #FFFFFF; font-weight: bold; text-align: center; padding: 6px 10px; border: 1px solid #334455; }}
+td {{ padding: 6px 10px; border: 1px solid #D0D0D0; }}
+.bold {{ font-weight: bold; }}
+.right {{ text-align: right; }}
+.center {{ text-align: center; }}
+.profit_pos {{ color: #008000; font-weight: bold; }}
+.profit_neg {{ color: #CC0000; font-weight: bold; }}
+tr.odd {{ background-color: #FFFFFF; }}
+tr.even {{ background-color: #F7F9FA; }}
+tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
+</style>
+</head>
+<body>
+<h2 style="color: #2C3E50; margin-bottom: 5px;">MetaTrader Daily Statements Index ({date_str})</h2>
+<p style="color: #666; margin-top: 0;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Total Accounts: {len(summary_rows)}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Account ID</th>
+      <th>Group</th>
+      <th>Balance</th>
+      <th>Equity</th>
+      <th>Open Positions</th>
+      <th>Day Closed P/L</th>
+      <th>Day Swap</th>
+      <th>Report Link</th>
+    </tr>
+  </thead>
+  <tbody>
+    {"".join(rows_html)}
+    <tr class="total_row">
+      <td colspan="2" class="bold">Grand Total ({len(summary_rows)} Accounts):</td>
+      <td class="right">{tot_balance:.2f}</td>
+      <td class="right">{tot_equity:.2f}</td>
+      <td class="center">{tot_open}</td>
+      <td class="right {tot_pnl_cls}">{tot_pnl:.2f}</td>
+      <td class="right">{tot_swap:.2f}</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+</body>
+</html>"""
+    return html_content
+
 
 def _save_daily_statements(date_str=None):
     """Save full account statements for all connected accounts to stmts/YYYY-MM-DD/.
