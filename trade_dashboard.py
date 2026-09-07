@@ -2018,10 +2018,18 @@ def _load_sessions():
                                 _repaired_any = True
                     
                     # Auto-complete sessions where all filled positions are closed
+                    # SAFETY GUARD: do not complete if closed count relies on unverified external closes
                     if s.get("status") in ("active", "paused", "running"):
                         filled_map = s.get("filled", {})
                         closed_map = s.get("closed", {})
-                        if sides and all(closed_map.get(acc, 0) >= filled_map.get(acc, 0) for acc in sides) and any(filled_map.get(acc, 0) > 0 for acc in sides):
+                        has_unverified_close = any(
+                            cf.get("external") is True and not cf.get("verified", False)
+                            for cf in s.get("close_fills", [])
+                        )
+                        if (not has_unverified_close
+                                and sides
+                                and all(closed_map.get(acc, 0) >= filled_map.get(acc, 0) for acc in sides)
+                                and any(filled_map.get(acc, 0) > 0 for acc in sides)):
                             s["status"] = "completed"
                             app.logger.info("Auto-marked session %s as completed (all positions closed)", sid[:8])
                             _repaired_any = True
@@ -5383,6 +5391,59 @@ def _run_hedge_monitor_all():
     with lock:
         _check_fee_alerts()
         for sid, session in list(sessions.items()):
+            # ── BROKER SOURCE-OF-TRUTH: REVIVE COMPLETED/PAUSED SESSIONS WITH OPEN POSITIONS ──
+            # If a session was marked 'completed' or 'paused' (e.g. because of a false-close cascade
+            # or partial disconnect), but live broker position reports prove that session tickets
+            # are STILL OPEN on any side, the broker report trumps internal state!
+            # Unmark the unverified close fills, decrement closed count, and revive the session
+            # so the structural imbalance detector can rebalance or close orphaned positions.
+            if session.get("status") in ("completed", "paused"):
+                _revived = False
+                sides = session.get("sides", {})
+                for acc in sides:
+                    info = ea_account_info.get(acc, {})
+                    raw_open = info.get("open_tickets")
+                    if raw_open:
+                        ea_open_set = set(_normalize_ticket(t) for t in raw_open)
+                        # Check if any unverified close_fills for this session account are actually still open
+                        cf_list = session.get("close_fills", [])
+                        for cf in list(cf_list):
+                            if (cf.get("account") == acc
+                                    and cf.get("external") is True
+                                    and not cf.get("verified", False)
+                                    and _normalize_ticket(cf.get("ticket")) in ea_open_set):
+                                gh_ticket = _normalize_ticket(cf["ticket"])
+                                cf_list.remove(cf)
+                                session["closed"][acc] = max(0, session.get("closed", {}).get(acc, 0) - 1)
+                                fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
+                                                  if f.get("account") == acc
+                                                  and _normalize_ticket(f.get("ticket")) == gh_ticket), 0)
+                                if fill_lots:
+                                    cur_cl = session.get("closed_lots", {}).get(acc, 0.0)
+                                    session.setdefault("closed_lots", {})[acc] = max(0.0, round(cur_cl - fill_lots, 4))
+                                _revived = True
+                                print(f"[SESSION-REVIVE] sid={sid[:8]}: ticket {gh_ticket} on {acc} is STILL OPEN at broker! "
+                                      f"Purged false close_fills entry and decremented closed count.")
+
+                        # Also check if session has filled orders that were never properly matched to close_fills
+                        # and are confirmed open at the broker
+                        filled_tks = set(_normalize_ticket(f.get("ticket")) for f in session.get("fills", []) if f.get("account") == acc)
+                        closed_tks = set(_normalize_ticket(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == acc)
+                        open_on_broker = (filled_tks - closed_tks).intersection(ea_open_set)
+                        if open_on_broker and session.get("closed", {}).get(acc, 0) >= session.get("filled", {}).get(acc, 0):
+                            session["closed"][acc] = max(0, session.get("filled", {}).get(acc, 0) - len(open_on_broker))
+                            _revived = True
+                            print(f"[SESSION-REVIVE] sid={sid[:8]}: broker reports {len(open_on_broker)} ticket(s) {open_on_broker} "
+                                  f"still open on {acc}. Adjusted closed count to {session['closed'][acc]}.")
+
+                if _revived:
+                    session["status"] = "active"
+                    session["action"] = "monitor"
+                    session.pop("panic_stop_reason", None)
+                    print(f"[SESSION-REVIVE] sid={sid[:8]}: REVIVED session from {session.get('status')} to ACTIVE "
+                          f"because broker position reports confirm open positions exist!")
+                    _save_sessions()
+
             if session.get("status") not in ("active", "partial_close"):
                 continue
 
