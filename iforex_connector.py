@@ -418,6 +418,14 @@ class IForexAccount:
         try:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
+            if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
+                self.connected = False
+                now_ts = time.time()
+                if now_ts - getattr(self, "_last_401_ts", 0) > 30:
+                    self._last_401_ts = now_ts
+                    logger.warning("[%s] iFOREX session terminated (%d) — triggering auto-relogin...", self.account_id, resp.status_code)
+                    self._trigger_auto_relogin()
+                return {"status": "error", "message": "iFOREX session terminated — auto-relogin triggered", "raw": resp.text}
             try:
                 res_json = resp.json()
                 # iFOREX returns HTTP 200 even for business-logic errors (e.g.
@@ -431,7 +439,7 @@ class IForexAccount:
                     item_result = str(item.get("result", ""))
                     if item_status == 0 or item_result.startswith("OrderError"):
                         logger.warning("[%s] CloseDeals returned iFOREX error: status=%s result=%s (ticket=%s)",
-                                       self.account_id, item_status, item_result, position_number)
+                                        self.account_id, item_status, item_result, position_number)
                         return {"status": "error", "data": res_json, "raw": resp.text,
                                 "iforex_error": item_result}
                 return {"status": "ok" if iforex_ok else "error", "data": res_json, "raw": resp.text}
