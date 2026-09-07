@@ -6431,8 +6431,8 @@ def _run_hedge_monitor_all():
                     print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: missing ticket(s) CONFIRMED CLOSED in broker deal history — bypassing debounce!")
                     threshold = 0
                 elif info.get("conn_type") == "iforex_direct":
-                    # iFOREX debounce: 2 polls (1.0s) is sufficient since position sync thread already polled and confirmed
-                    threshold = 2
+                    # iFOREX debounce: 0 polls because positions are only removed when confirmed in broker closed deals
+                    threshold = 0
                 elif len(ea_open_tickets) == 0:
                     threshold = 10
                 elif _cycle_get_account(session, account):

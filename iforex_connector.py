@@ -944,7 +944,7 @@ class IForexAccount:
                     self._update_ea_account_info()
             except Exception as e:
                 logger.debug("[%s] Fast HTTP position sync loop error: %s", self.account_id, e)
-            time.sleep(1.5)
+            time.sleep(0.8)
 
 
 
