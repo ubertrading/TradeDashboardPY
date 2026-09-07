@@ -11697,6 +11697,19 @@ def connect_iforex_account(account_id):
         with acct._lock:
             acct._quotes_cache.clear()
         q = acct.fetch_quote_live("EUR/USD")
+        if not q and acct.config.get("username") and acct.config.get("password"):
+            # Session expired — automatically run headless auto-login using saved credentials!
+            app.logger.info("iFOREX session expired for %s — running automatic headless login...", account_id)
+            from iforex_auto_login import refresh_iforex_session
+            res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=90, headless=True)
+            if res.get("status") == "ok":
+                acct.cookie = res["cookie"]
+                acct.session.headers["Cookie"] = res["cookie"]
+                acct.security_token = res["security_token"]
+                acct._last_401_ts = 0.0
+                with acct._lock:
+                    acct._quotes_cache.clear()
+                q = acct.fetch_quote_live("EUR/USD")
         if q:
             acct.connected = True
             if not acct._running:
@@ -11707,9 +11720,9 @@ def connect_iforex_account(account_id):
                     ea_account_info[account_id]["bid"] = q[0]
                     ea_account_info[account_id]["ask"] = q[1]
             _log_event(None, account_id, "iforex_account_connected", "")
-            return jsonify({"ok": True, "message": "Connected successfully"})
+            return jsonify({"ok": True, "message": "Connected successfully (auto-authenticated)"})
         else:
-            return jsonify({"error": "Could not connect to iFOREX. Session may be expired — try 'Re-Auth'."}), 400
+            return jsonify({"error": "Could not connect to iFOREX. Automatic login failed — please verify username/password or click 'Re-Auth'."}), 400
     except Exception as e:
         app.logger.error("Error connecting iFOREX account %s: %s", account_id, e)
         return jsonify({"error": str(e)}), 500

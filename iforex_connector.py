@@ -265,6 +265,8 @@ class IForexAccount:
                     self._last_401_ts = 0.0
                     with self._lock:
                         self._quotes_cache.clear()
+                    if "ea_account_info" in self.dd:
+                        self.dd["ea_account_info"].setdefault(self.account_id, {})["connected"] = True
                     logger.info("[%s] Automatic session recovery succeeded! Reconnected to iFOREX.", self.account_id)
                 else:
                     logger.warning("[%s] Headless auto-recovery did not complete: %s (click 'Re-Auth' in UI)",
@@ -309,8 +311,11 @@ class IForexAccount:
                     return {"raw": resp.text}
             elif resp.status_code == 401:
                 self.connected = False
-                self._last_401_ts = time.time()
-                logger.warning("[%s] iFOREX session expired (401 Unauthorized)", self.account_id)
+                now_ts = time.time()
+                if now_ts - self._last_401_ts > 45:
+                    self._last_401_ts = now_ts
+                    logger.warning("[%s] iFOREX session expired (401 Unauthorized) — initiating auto-recovery...", self.account_id)
+                    self._trigger_auto_relogin()
         except Exception as e:
             self.connected = False
             logger.error("[%s] GetDealMarginDetails error: %s", self.account_id, e)

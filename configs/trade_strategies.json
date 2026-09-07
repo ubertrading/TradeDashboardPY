@@ -1,5 +1,17 @@
 {
   "manual_accounts": {
+    "DEMO-CT-FIX-HDBCH2-9040256": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "DEMO-CT-FIX-HDBCH2-9040257": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
     "DEMO-MT4-1218954455": {
       "balance": null,
       "conn_type": "poll",
@@ -7,6 +19,12 @@
       "group_label": ""
     },
     "DEMO-MT5-52769010": {
+      "balance": null,
+      "conn_type": "poll",
+      "equity": null,
+      "group_label": ""
+    },
+    "DUKA-DEMO-DEMO2uotdK": {
       "balance": null,
       "conn_type": "poll",
       "equity": null,
