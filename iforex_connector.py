@@ -1189,6 +1189,7 @@ class IForexAccountManager:
                                                    len(closed))
                                     in_flight.pop((sid_, aid_), None)
                                     return
+                                ticket = target.get("Ticket")
                                 close_rate = q2[0] if side_ == "buy" else q2[1]
                                 logger.info("[%s] iFOREX closing position ticket=%s rate=%s (side=%s, bid=%s, ask=%s)",
                                             aid_, ticket, close_rate, side_, q2[0], q2[1])
