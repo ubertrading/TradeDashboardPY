@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -12686,6 +12686,34 @@ def generate_statements():
 
         threading.Thread(target=_run, daemon=True, name="StmtsOnDemand").start()
         return jsonify({"ok": True, "date": date_str or datetime.now().strftime("%Y-%m-%d")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/statements/<date_str>/<filename>', methods=['GET'])
+def get_statement_file(date_str, filename):
+    """Serve a specific HTML or JSON statement file for date_str."""
+    try:
+        day_dir = os.path.join(_STMTS_DIR, date_str)
+        if not os.path.isdir(day_dir):
+            return jsonify({"error": "Statement date directory not found"}), 404
+        return send_from_directory(day_dir, filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/statements/<date_str>', methods=['GET'])
+def view_statement_date_index(date_str):
+    """Serve index.html for a given statement date."""
+    try:
+        day_dir = os.path.join(_STMTS_DIR, date_str)
+        if not os.path.isdir(day_dir):
+            return jsonify({"error": "Statement date directory not found"}), 404
+        index_path = os.path.join(day_dir, "index.html")
+        if os.path.exists(index_path):
+            return send_from_directory(day_dir, "index.html")
+        files = os.listdir(day_dir)
+        return jsonify({"date": date_str, "files": files})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
