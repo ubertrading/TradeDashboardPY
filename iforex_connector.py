@@ -706,6 +706,20 @@ class IForexAccount:
 
                 if deals is not None:
                     with self._lock:
+                        # Preserve fresh orders opened locally within last 60s that might not yet have appeared in deals
+                        now_epoch = time.time()
+                        deal_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
+                        for fo in list(self._open_orders):
+                            fo_t = str(fo.get("Ticket"))
+                            fo_time = fo.get("open_epoch") or fo.get("OpenTime") or 0
+                            if not isinstance(fo_time, (int, float)):
+                                fo_time = 0
+                            if fo_t and fo_t not in deal_tickets and (now_epoch - fo_time) < 60.0:
+                                deals.append(fo)
+                                deal_tickets.add(fo_t)
+                                logger.info("[%s] Preserving fresh local order ticket=%s in position sync (age=%.1fs < 60s)",
+                                            self.account_id, fo_t, now_epoch - fo_time)
+
                         prev_tickets = set(str(o.get("Ticket")) for o in self._open_orders if o.get("Ticket"))
                         new_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
 
@@ -1020,12 +1034,18 @@ class IForexAccountManager:
                                 ticket = target.get("Ticket")
                                 logger.info("[%s] iFOREX closing position ticket=%s rate=%s", aid_, ticket, market_rate)
                                 close_res = acct_.close_order(ticket, market_rate)
-                                logger.info("[%s] iFOREX close result: %s", aid_, close_res)
                                 status = "cycle_closed" if is_cycle_close else ("rollback_closed" if res_ == "rollback" else "closed")
                                 if close_res.get("status") == "ok":
-                                    # Remove from _open_orders
+                                    # Remove from _open_orders and ea_account_info immediately
                                     with acct_._lock:
                                         acct_._open_orders = [o for o in acct_._open_orders if str(o.get("Ticket")) != str(ticket)]
+                                        if "ea_account_info" in acct_.dd:
+                                            info = acct_.dd["ea_account_info"].setdefault(aid_, {})
+                                            tks = [str(t) for t in (info.get("open_tickets") or []) if str(t) != str(ticket)]
+                                            info["open_tickets"] = tks
+                                            info["positions"] = len(tks)
+                                            info["position_details"] = [p for p in (info.get("position_details") or []) if str(p.get("ticket")) != str(ticket)]
+                                            info["last_update"] = time.time()
 
                                     # Extract executed rate from iFOREX CloseDeals response
                                     exec_price = market_rate
@@ -1092,13 +1112,35 @@ class IForexAccountManager:
 
                                     logger.info("[%s] iFOREX order filled: ticket=%s pair=%s side=%s lots=%s quoted=%s exec=%s",
                                                 aid_, ticket, pair_, side_, ls_, market_rate, exec_price)
-                                    # Track in _open_orders for close lookups
+                                    # Track in _open_orders for close lookups and update ea_account_info immediately
                                     with acct_._lock:
-                                        acct_._open_orders.append({
+                                        now_fill_epoch = time.time()
+                                        new_order_entry = {
                                             "Ticket": str(ticket), "Symbol": pair_,
                                             "Type": side_, "Lots": ls_,
-                                            "OpenPrice": exec_price, "OpenTime": time.time()
-                                        })
+                                            "OpenPrice": exec_price, "OpenTime": now_fill_epoch,
+                                            "open_epoch": now_fill_epoch
+                                        }
+                                        if not any(str(o.get("Ticket")) == str(ticket) for o in acct_._open_orders):
+                                            acct_._open_orders.append(new_order_entry)
+                                        if "ea_account_info" in acct_.dd:
+                                            info = acct_.dd["ea_account_info"].setdefault(aid_, {})
+                                            tks = [str(t) for t in (info.get("open_tickets") or [])]
+                                            if str(ticket) not in tks:
+                                                tks.append(str(ticket))
+                                                info["open_tickets"] = tks
+                                                info["positions"] = len(tks)
+                                                pos_list = list(info.get("position_details") or [])
+                                                pos_list.append({
+                                                    "ticket": str(ticket),
+                                                    "symbol": pair_,
+                                                    "type": side_,
+                                                    "lots": ls_,
+                                                    "open_price": exec_price,
+                                                    "profit": 0.0
+                                                })
+                                                info["position_details"] = pos_list
+                                            info["last_update"] = now_fill_epoch
 
                                     pip_mult = 100.0 if "JPY" in pair_.upper() else 10000.0
                                     spread = round((q2[1] - q2[0]) * pip_mult, 1) if (q2 and len(q2) >= 2) else 0

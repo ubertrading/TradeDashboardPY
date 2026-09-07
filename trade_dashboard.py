@@ -5634,13 +5634,15 @@ def _run_hedge_monitor_all():
                             pass  # One or both sides have stale data — skip
                         elif net_1 != net_2:
                             # ── OPENING / REBALANCING GRACE PERIOD ──
-                            # If session is in OPEN mode and a fill occurred recently (within last 15s),
-                            # grant a grace period for the counterparty leg to execute/pass spread gate.
+                            # If session is in OPEN mode OR a fill occurred recently (within last 30s),
+                            # grant a grace period for broker position sync and counterparty leg to execute/pass spread gate.
                             last_fill_ts = max((f.get("ts_epoch", 0) for f in session.get("fills", [])), default=0)
+                            post_open_settle_ts = session.get("post_open_settle_ts", 0)
+                            recent_fill = (now_ts - last_fill_ts) < 30.0 or (now_ts - post_open_settle_ts) < 30.0
                             in_open_mode = session.get("action", "") in ("open", "open_limit")
-                            if in_open_mode and (now_ts - last_fill_ts) < 15.0:
+                            if (in_open_mode or recent_fill) and (now_ts - last_fill_ts) < 30.0:
                                 print(f"[HEDGE-REBAL] sid={session.get('id', '')[:8]}: SUPPRESSING rollback "
-                                      f"({net_1} vs {net_2}) — in OPEN mode with recent fill (age={round(now_ts - last_fill_ts, 1)}s < 15s grace period)")
+                                      f"({net_1} vs {net_2}) — recent fill or open mode (age={round(now_ts - last_fill_ts, 1)}s < 30s grace period)")
                                 continue
 
                             # ── GLOBAL HEDGE SAFETY CHECK (per-instrument) ──
@@ -5784,20 +5786,28 @@ def _run_hedge_monitor_all():
                                     has_verified = False
                                     
                                 if tickets_to_close:
-                                    # ── IMBALANCE PERSISTENCE DEBOUNCE (3-second buffer) ──
-                                    # Require imbalance to persist for >= 3 seconds to absorb transient snapshot drops on all account types
+                                    # ── IMBALANCE PERSISTENCE DEBOUNCE (dynamic buffer) ──
+                                    # Require imbalance to persist to absorb transient snapshot drops on all account types.
+                                    # For REST/browser accounts like iforex_direct, Playwright sync cycles take 10-25s,
+                                    # so debounce must be at least 25.0s unless confirmed by deal history.
+                                    is_poll_based = any(
+                                        ea_account_info.get(a, {}).get("conn_type") == "iforex_direct"
+                                        or session.get("sides", {}).get(a, {}).get("connection_type") == "iforex_direct"
+                                        for a in accs
+                                    )
+                                    debounce_sec = 25.0 if is_poll_based else 4.0
                                     # BUT if closed tickets have been verified in broker deal history, bypass debounce!
                                     if not has_verified:
                                         imbalance_start = session.get("_imbalance_first_seen_ts", 0)
                                         if imbalance_start == 0:
                                             session["_imbalance_first_seen_ts"] = now_ts
-                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} (excess={excess}) — waiting 3.0s for persistence...")
+                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} (excess={excess}) — waiting {debounce_sec}s for persistence...")
                                             tickets_to_close = []
-                                        elif (now_ts - imbalance_start) < 3.0:
-                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} ({now_ts - imbalance_start:.1f}s / 3.0s)...")
+                                        elif (now_ts - imbalance_start) < debounce_sec:
+                                            print(f"[HEDGE-REBAL] Debouncing imbalance on {max_acc} ({now_ts - imbalance_start:.1f}s / {debounce_sec}s)...")
                                             tickets_to_close = []
                                     else:
-                                        print(f"[HEDGE-REBAL] Imbalance on {max_acc} verified in deal history — bypassing 3s debounce!")
+                                        print(f"[HEDGE-REBAL] Imbalance on {max_acc} verified in deal history — bypassing {debounce_sec}s debounce!")
 
                                 if tickets_to_close:
                                     # Skip if user already rejected a rollback for this account.
@@ -5829,7 +5839,7 @@ def _run_hedge_monitor_all():
                                                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                                     "ts_epoch": now_ts,
                                                     "external": True,
-                                                    "verified": True,
+                                                    "verified": bool(has_verified),
                                                 })
                                                 session.setdefault("closed", {})[min_acc] = session.get("closed", {}).get(min_acc, 0) + 1
                                                 fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
@@ -6359,6 +6369,14 @@ def _run_hedge_monitor_all():
                     session.pop(mismatch_key, None)
                     continue
 
+                # ── POST-FILL STABILIZATION GRACE PERIOD ──
+                # If a fill occurred recently (within last 30s) or session recently transitioned to monitor,
+                # suppress Path 2 missing ticket alerts and actions so broker position sync can settle.
+                _last_fill_ts = max((f.get("ts_epoch", 0) for f in session.get("fills", [])), default=0)
+                _post_open_settle_ts = session.get("post_open_settle_ts", 0)
+                if (now_ts - _last_fill_ts) < 30.0 or (now_ts - _post_open_settle_ts) < 30.0:
+                    continue
+
                 # Log every detection
                 print(f"[HEDGE-MON] acct={account} sid={sid[:8]}: "
                       f"expected={len(expected_open)} ea_has={len(ea_open_tickets)} "
@@ -6398,6 +6416,9 @@ def _run_hedge_monitor_all():
                     # Zero debounce for cycling accounts on partial mismatch
                     # to ensure INSTANT limit reopening when a TP is hit.
                     threshold = 0
+                elif info.get("conn_type") == "iforex_direct":
+                    # iFOREX Playwright scraper cycles take ~10-25s. Use 40 polls (~20s)
+                    threshold = 40
                 elif session.get("action") == "monitor" or session.get("imported"):
                     # Moderate debounce (10 polls = 5.0s) for monitor/imported sessions so transient socket drops don't trigger false mass liquidations
                     threshold = 10
@@ -8699,6 +8720,7 @@ def _check_session_completion(session):
             if session.get("status") == "partial_close":
                 session["status"] = "active"
             session["action"] = "monitor"
+            session["post_open_settle_ts"] = time.time()
             session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _log_event(session["id"], None, "open_targets_reached",
                        f"All sides reached open target ({session.get('total_positions')} each) — auto-switched to MONITOR")
