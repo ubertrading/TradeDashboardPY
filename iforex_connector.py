@@ -937,22 +937,46 @@ class IForexAccountManager:
                                 return
                             market_rate = q2[1] if side_ == "buy" else q2[0]
 
-                            if act_ in ("close", "rollback") or res_ == "rollback":
+                            is_cycle_close = (res_ == "cycle_close")
+                            is_close_op = act_ in ("close", "rollback") or res_ in ("rollback", "cycle_close")
+
+                            if is_close_op:
                                 # Close: find the iFOREX position ticket to close
                                 open_pos = acct_._get_open_orders()
-                                closed = {str(f.get("ticket")) for f in sess_.get("close_fills", []) if f.get("account") == aid_}
+                                closed = {str(f.get("ticket")) for f in sess_.get("close_fills", []) if f.get("account") == aid_ and f.get("ticket") is not None}
 
                                 target = None
-                                # 1. If rollback specifically nominated a ticket, try that first
-                                rb_specific = sess_.get("rollback_tickets", {}).get(aid_, [])
-                                if rb_specific:
-                                    for rbt in rb_specific:
-                                        if str(rbt) not in closed:
-                                            target = {"Ticket": str(rbt)}
-                                            logger.info("[%s] iFOREX rollback: using specifically queued ticket %s", aid_, rbt)
-                                            break
+                                # 1. If cycle_close, select the specific fill at the cycle index (oldest first)
+                                if is_cycle_close:
+                                    progress = sess_.get("cycle_progress", {})
+                                    idx = progress.get("index", 0)
+                                    closed_tickets_cycle = {
+                                        str(f["ticket"]) for f in sess_.get("close_fills", [])
+                                        if f.get("account") == aid_ and f.get("ticket") is not None
+                                    }
+                                    new_cycle_tks = set(str(t) for t in progress.get("new_cycle_tickets", []))
+                                    acct_fills = [
+                                        f for f in sess_.get("fills", [])
+                                        if f.get("account") == aid_
+                                        and str(f.get("ticket")) not in closed_tickets_cycle
+                                        and str(f.get("ticket")) not in new_cycle_tks
+                                    ]
+                                    acct_fills.sort(key=lambda f: (f.get("ts_epoch", 0) or 0, int(f.get("ticket") or 0)))
+                                    if idx < len(acct_fills):
+                                        target = {"Ticket": str(acct_fills[idx].get("ticket"))}
+                                        logger.info("[%s] iFOREX cycle_close: selected ticket %s at index %d", aid_, target["Ticket"], idx)
 
-                                # 2. Find unclosed ticket from session fills for this account
+                                # 2. If rollback specifically nominated a ticket, try that first
+                                if not target:
+                                    rb_specific = sess_.get("rollback_tickets", {}).get(aid_, [])
+                                    if rb_specific:
+                                        for rbt in rb_specific:
+                                            if str(rbt) not in closed:
+                                                target = {"Ticket": str(rbt)}
+                                                logger.info("[%s] iFOREX rollback: using specifically queued ticket %s", aid_, rbt)
+                                                break
+
+                                # 3. Find unclosed ticket from session fills for this account
                                 if not target:
                                     fills = sess_.get("fills", [])
                                     for fill in fills:
@@ -962,7 +986,7 @@ class IForexAccountManager:
                                             logger.info("[%s] iFOREX close: found ticket %s from session fills", aid_, t)
                                             break
 
-                                # 3. Fallback: match open_orders that match the session pair and are not closed
+                                # 4. Fallback: match open_orders that match the session pair and are not closed
                                 if not target:
                                     clean_pair = pair_.upper().replace("/", "").replace(" ", "").replace("-", "")
                                     for o in open_pos:
@@ -985,7 +1009,7 @@ class IForexAccountManager:
                                 logger.info("[%s] iFOREX closing position ticket=%s rate=%s", aid_, ticket, market_rate)
                                 close_res = acct_.close_order(ticket, market_rate)
                                 logger.info("[%s] iFOREX close result: %s", aid_, close_res)
-                                status = "rollback_closed" if res_ == "rollback" else "closed"
+                                status = "cycle_closed" if is_cycle_close else ("rollback_closed" if res_ == "rollback" else "closed")
                                 if close_res.get("status") == "ok":
                                     # Remove from _open_orders
                                     with acct_._lock:
@@ -1018,6 +1042,14 @@ class IForexAccountManager:
                                                 "detail": str(close_res.get("raw", close_res)), "ticket": str(ticket)})
                                     in_flight.pop((sid_, aid_), None)
                             else:
+                                if act_.startswith("cycle_"):
+                                    progress = sess_.get("cycle_progress", {})
+                                    last_lots = progress.get("last_closed_lots")
+                                    if last_lots:
+                                        try:
+                                            ls_ = float(last_lots)
+                                        except (ValueError, TypeError):
+                                            pass
                                 open_res = acct_.open_order(pair_, side_, ls_, market_rate)
                                 if open_res.get("status") == "ok":
                                     data = open_res.get("data", {})
