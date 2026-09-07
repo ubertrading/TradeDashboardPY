@@ -11523,7 +11523,7 @@ def add_mt_direct_account():
             "label": data.get("label", f"MT-{account_id}"),
             "slippage": int(data.get("slippage", 3)),
             "magic_number": int(data.get("magic_number", 777888)),
-            "auto_connect_start": auto_connect,
+            "auto_connect_start": data.get("auto_connect_start", auto_connect),
             "swapfree": bool(data.get("swapfree", False)),
             "cycle_reminder_enabled": data.get("cycle_reminder_enabled", False),
             "cycle_reminder_days": data.get("cycle_reminder_days"),
@@ -23890,13 +23890,13 @@ if __name__ == '__main__':
 
         _mt_direct_dashboard_data["report_trade_result"] = _mt_direct_report_result
         _mt_direct_dashboard_data["save_sessions"] = _save_sessions
-        mt_direct_manager.start(force_connect_all=True)
+        mt_direct_manager.start(force_connect_all=False)
         if USE_MT_BRIDGE and not mt_direct_manager.accounts:
             app.logger.warning("MtBridgeService has no active accounts — falling back to pythonnet in-process MT Direct connector")
             try:
                 from mt_direct_connector import MTDirectManager as PythonnetManager
                 mt_direct_manager = PythonnetManager(_mt_direct_dashboard_data, config_dir=TRADE_CONFIG_DIR)
-                mt_direct_manager.start(force_connect_all=True)
+                mt_direct_manager.start(force_connect_all=False)
                 app.logger.info("pythonnet MT Direct Manager started with %d accounts", len(mt_direct_manager.accounts))
             except Exception as ex:
                 app.logger.error("pythonnet fallback failed: %s", ex)
