@@ -672,18 +672,29 @@ class IForexAccount:
         time.sleep(5)  # Initial wait for platform settlement
         _consecutive_empty = 0  # Debounce: require confirmation only for ambiguous empty reads
         _EMPTY_THRESHOLD = 2    # Only for ambiguous reads without clear summary margin
+        _consecutive_sync_failures = 0
         while self._running:
             try:
                 from iforex_auto_login import fetch_active_deals_and_summary
                 deals, summary = fetch_active_deals_and_summary(timeout_sec=25)
                 if not self._running:
                     break
+                if deals is None:
+                    _consecutive_sync_failures += 1
+                    if _consecutive_sync_failures >= 3:
+                        logger.warning("[%s] Position sync failed %d consecutive times — triggering auto-relogin",
+                                       self.account_id, _consecutive_sync_failures)
+                        self._trigger_auto_relogin()
+                        _consecutive_sync_failures = 0
+                else:
+                    _consecutive_sync_failures = 0
+
                 if summary:
                     with self._lock:
                         self._account_summary = summary
-                    if summary.get("balance", 0.0) > 0:
+                    if summary.get("balance") is not None and summary.get("balance", 0.0) > 0:
                         self.config["balance"] = summary["balance"]
-                    if summary.get("equity", 0.0) > 0:
+                    if summary.get("equity") is not None and summary.get("equity", 0.0) > 0:
                         self.config["equity"] = summary["equity"]
                     # Propagate market_closed from Playwright DOM check
                     if "market_closed" in summary:
@@ -692,18 +703,22 @@ class IForexAccount:
                             self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = self.is_market_closed
                 if deals is not None:
                     # --- Sanity guard: never trust deals=[] if margin/open_pl says we're still in positions ---
-                    _margin = summary.get("margin", 0.0) or 0.0
-                    _open_pl = summary.get("open_pl", 0.0) or 0.0
-                    _suspicious_empty = (len(deals) == 0 and (abs(_margin) > 1.0 or abs(_open_pl) > 0.01))
+                    _margin = summary.get("margin")
+                    _open_pl = summary.get("open_pl")
+                    _balance = summary.get("balance")
+                    _has_valid_summary = (_balance is not None and _balance > 0 and _margin is not None)
+
+                    _suspicious_empty = (len(deals) == 0 and _margin is not None and (abs(_margin) > 1.0 or (_open_pl is not None and abs(_open_pl) > 0.01)))
                     if _suspicious_empty:
                         _consecutive_empty = 0  # Reset — margin says we still have positions
-                        logger.warning("[%s] deals=[] but margin=%.2f open_pl=%.2f — skipping update (likely render lag)",
+                        logger.warning("[%s] deals=[] but margin=%s open_pl=%s — skipping update (likely render lag)",
                                        self.account_id, _margin, _open_pl)
                     elif len(deals) == 0 and self._open_orders:
-                        # If summary margin and open_pl are zero, broker account confirms 0 positions — accept IMMEDIATELY!
-                        if abs(_margin) <= 0.01 and abs(_open_pl) <= 0.01:
-                            logger.info("[%s] deals=[] confirmed by margin=%.2f open_pl=%.2f — accepting closure immediately",
-                                        self.account_id, _margin, _open_pl)
+                        # If summary margin and open_pl are zero AND summary is verified valid with positive balance,
+                        # broker account confirms 0 positions — accept IMMEDIATELY!
+                        if _has_valid_summary and abs(_margin) <= 0.01 and (_open_pl is None or abs(_open_pl) <= 0.01):
+                            logger.info("[%s] deals=[] confirmed by margin=%.2f open_pl=%s balance=%.2f — accepting closure immediately",
+                                        self.account_id, _margin, _open_pl, _balance)
                             _consecutive_empty = 0
                         else:
                             _consecutive_empty += 1

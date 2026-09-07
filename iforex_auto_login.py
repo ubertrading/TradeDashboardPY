@@ -198,10 +198,10 @@ def refresh_iforex_session(account_id: str = "12141021",
             return {"status": "error", "message": str(e)}
 
 
-def _parse_currency(val_str: Any) -> float:
-    """Parse currency strings like 'Fr. 8,997.83' or '-Fr. 0.08' to float."""
-    if not val_str:
-        return 0.0
+def _parse_currency(val_str: Any):
+    """Parse currency strings like 'Fr. 8,997.83' or '-Fr. 0.08' to float. Returns None if missing/empty."""
+    if val_str is None or str(val_str).strip() == "":
+        return None
     s = str(val_str).replace(chr(160), " ").replace(",", "").strip()
     is_neg = "-" in s
     m = re.search(r'\d+(?:\.\d+)?', s)
@@ -210,8 +210,8 @@ def _parse_currency(val_str: Any) -> float:
             val = float(m.group(0))
             return -val if is_neg else val
         except ValueError:
-            return 0.0
-    return 0.0
+            return None
+    return None
 
 
 def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
@@ -232,10 +232,16 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
             )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto("https://trader.iforex.com/webpl4/trading/new-transaction", wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+            if "connectivity-issue" in page.url or "login" in page.url or "trader.iforex.com" not in page.url:
+                logger.warning("fetch_active_deals_and_summary: redirected to %s — session disconnected/login required", page.url)
+                context.close()
+                return None, {}
             try:
                 page.wait_for_selector("#accSummaryAccountBalance", timeout=12000)
-            except Exception:
-                pass  # Best-effort wait; proceed anyway
+            except Exception as e:
+                logger.warning("fetch_active_deals_and_summary: #accSummaryAccountBalance wait timed out on %s: %s", page.url, e)
+                context.close()
+                return None, {}
             time.sleep(0.3)  # Brief settle for deal rows to render after summary appears
 
             raw_data = page.evaluate("""
@@ -414,6 +420,11 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 "open_pl": _parse_currency(raw_summary.get("open_pl")),
                 "market_closed": bool(raw_summary.get("market_closed", False)),
             }
+
+            bal = parsed_summary.get("balance")
+            if bal is None or bal <= 0.0:
+                logger.warning("fetch_active_deals_and_summary: unrendered account summary (balance=%s) — rejecting read", bal)
+                return None, {}
 
             # Map to standard format
             out = []
