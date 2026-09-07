@@ -10153,7 +10153,7 @@ def trade_result():
                         session.setdefault("rollback_start_ts", {})[account] = time.time()
                     _check_session_completion(session)
 
-            elif status == "closed":
+            elif status in ("closed", "cycle_closed"):
                 if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
                     # ── Duplicate close guard: skip if this ticket was already recorded ──
                     if ticket:
@@ -23751,7 +23751,7 @@ if __name__ == '__main__':
                     _save_sessions()
 
 
-                elif status in ("rollback_closed", "closed"):
+                elif status in ("rollback_closed", "closed", "cycle_closed"):
                     if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
                         # ── Duplicate close guard: skip if this ticket was already recorded ──
                         if ticket:
