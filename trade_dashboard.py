@@ -6717,10 +6717,26 @@ def _get_net_open(session, account, ea_info=None):
             ls = 0.01
         return int(round(net_lots / ls))
     else:
-        # Clamp to 0: a corrupted closed counter (e.g. duplicate close events)
-        # must never produce a negative net_open, which would bypass cross-account
-        # hedge sync and allow excess opens.
-        return max(0, session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0))
+        # Ticket mode:
+        # Prefer counting actual unclosed fills by matching session fills against close_fills.
+        # This prevents any scalar counter desynchronization from causing excess opens.
+        session_fills = [f for f in session.get("fills", []) if f.get("account") == account and f.get("ticket") is not None]
+        if session_fills:
+            closed_tickets = set(str(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == account and cf.get("ticket") is not None)
+            unclosed_count = sum(1 for f in session_fills if str(f.get("ticket")) not in closed_tickets)
+            # Synchronize scalar counters so UI and reporting stay consistent
+            if "filled" in session and "closed" in session:
+                cur_filled = session["filled"].get(account, len(session_fills))
+                session["closed"][account] = max(0, cur_filled - unclosed_count)
+            return max(0, unclosed_count)
+        else:
+            # Fallback if no fills recorded yet: use scalar counters with closed capped at filled
+            filled_count = session.get("filled", {}).get(account, 0)
+            closed_count = session.get("closed", {}).get(account, 0)
+            if closed_count > filled_count:
+                session.setdefault("closed", {})[account] = filled_count
+                closed_count = filled_count
+            return max(0, filled_count - closed_count)
 
 
 def _should_issue_command(session, account):
@@ -9330,12 +9346,12 @@ def close_all_deals(session_id):
         if not s:
             return jsonify({"error": "Session not found"}), 404
         accs = list(s.get("sides", {}).keys())
-        already_closed = set(f["ticket"] for f in s.get("close_fills", []))
+        already_closed = set(str(f.get("ticket")) for f in s.get("close_fills", []) if f.get("ticket") is not None)
         for acc in accs:
             acct_fills = [f for f in s.get("fills", []) if f.get("account") == acc]
             for f in acct_fills:
                 ticket = f.get("ticket")
-                if ticket and ticket not in already_closed:
+                if ticket is not None and str(ticket) not in already_closed:
                     rb = s.setdefault("rollback_needed", {})
                     rb[acc] = rb.get(acc, 0) + 1
                     rb_tickets = s.setdefault("rollback_tickets", {})

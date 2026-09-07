@@ -952,17 +952,25 @@ class IForexAccountManager:
                                             logger.info("[%s] iFOREX rollback: using specifically queued ticket %s", aid_, rbt)
                                             break
 
-                                # 2. Try _open_orders first (live from iFOREX DOM or open_order)
+                                # 2. Find unclosed ticket from session fills for this account
                                 if not target:
-                                    target = next((o for o in open_pos if str(o.get("Ticket")) not in closed), None)
-
-                                if not target:
-                                    # 3. Fallback: find ticket from session fills for this account
                                     fills = sess_.get("fills", [])
                                     for fill in fills:
-                                        if fill.get("account") == aid_ and str(fill.get("ticket")) not in closed:
-                                            target = {"Ticket": fill.get("ticket")}
-                                            logger.info("[%s] iFOREX close: found ticket %s from session fills", aid_, fill.get("ticket"))
+                                        t = fill.get("ticket")
+                                        if fill.get("account") == aid_ and t is not None and str(t) not in closed:
+                                            target = {"Ticket": t}
+                                            logger.info("[%s] iFOREX close: found ticket %s from session fills", aid_, t)
+                                            break
+
+                                # 3. Fallback: match open_orders that match the session pair and are not closed
+                                if not target:
+                                    clean_pair = pair_.upper().replace("/", "").replace(" ", "").replace("-", "")
+                                    for o in open_pos:
+                                        sym = str(o.get("Symbol", "")).upper().replace("/", "").replace(" ", "").replace("-", "")
+                                        ot = o.get("Ticket")
+                                        if (clean_pair.startswith(sym) or sym.startswith(clean_pair)) and ot and str(ot) not in closed:
+                                            target = o
+                                            logger.info("[%s] iFOREX close: found position ticket %s from open_orders for %s", aid_, ot, pair_)
                                             break
 
                                 if not target:
