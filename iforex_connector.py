@@ -1189,9 +1189,10 @@ class IForexAccountManager:
                                                    len(closed))
                                     in_flight.pop((sid_, aid_), None)
                                     return
-                                ticket = target.get("Ticket")
-                                logger.info("[%s] iFOREX closing position ticket=%s rate=%s", aid_, ticket, market_rate)
-                                close_res = acct_.close_order(ticket, market_rate)
+                                close_rate = q2[0] if side_ == "buy" else q2[1]
+                                logger.info("[%s] iFOREX closing position ticket=%s rate=%s (side=%s, bid=%s, ask=%s)",
+                                            aid_, ticket, close_rate, side_, q2[0], q2[1])
+                                close_res = acct_.close_order(ticket, close_rate)
                                 status = "cycle_closed" if is_cycle_close else ("rollback_closed" if res_ == "rollback" else "closed")
                                 if close_res.get("status") == "ok":
                                     # Remove from _open_orders and ea_account_info immediately
@@ -1207,7 +1208,7 @@ class IForexAccountManager:
                                     acct_._save_open_orders()
 
                                     # Extract executed rate from iFOREX CloseDeals response
-                                    exec_price = market_rate
+                                    exec_price = close_rate
                                     res_data = close_res.get("data")
                                     close_item = None
                                     if isinstance(res_data, list) and len(res_data) > 0:
