@@ -553,7 +553,7 @@ class IForexAccount:
                     return {"status": "ok", "data": res_json, "raw": resp.text}
                 else:
                     err_msg = res_json.get("result") if isinstance(res_json, dict) else resp.text
-                    if "OrderError103" in str(err_msg) or "market is closed" in str(resp.text).lower():
+                    if "market is closed" in str(resp.text).lower() or "market is closed" in str(err_msg).lower():
                         self.is_market_closed = True
                         if "ea_account_info" in self.dd:
                             self.dd["ea_account_info"].setdefault(self.account_id, {})["market_closed"] = True
@@ -1039,17 +1039,19 @@ class IForexAccountManager:
         """Poll active sessions and dispatch orders for iFOREX accounts."""
         while self._running:
             try:
-                self._process_commands()
+                had_cmd = self._process_commands()
             except Exception as e:
                 logger.error("IForex command loop error: %s", e)
-            time.sleep(0.25)
+                had_cmd = False
+            time.sleep(0.05 if had_cmd else 0.15)
 
-    def _process_commands(self):
+    def _process_commands(self) -> bool:
         """Check each active session for iFOREX accounts that need orders sent."""
         should_issue = self.dd.get("should_issue_command")
         if not should_issue:
-            return
+            return False
 
+        had_cmd = False
         with self.dd.get("lock", threading.Lock()):
             sessions = self.dd.get("sessions", {})
             in_flight = self.dd.get("in_flight_commands", {})
@@ -1107,6 +1109,7 @@ class IForexAccountManager:
                     trade_side = side_info.get("action", "buy")
 
                     in_flight[(session_id, account_id)] = time.time()
+                    had_cmd = True
 
                     # Execute outside the lock in a thread
                     def _exec(acct_=acct, sid_=session_id, aid_=account_id,
@@ -1120,6 +1123,7 @@ class IForexAccountManager:
                                 in_flight.pop((sid_, aid_), None)
                                 return
                             market_rate = q2[1] if side_ == "buy" else q2[0]
+                            other_rate = q2[0] if side_ == "buy" else q2[1]
 
                             is_cycle_close = (res_ == "cycle_close")
                             is_close_op = act_ in ("close", "rollback") or res_ in ("rollback", "cycle_close")
@@ -1243,7 +1247,7 @@ class IForexAccountManager:
                                             ls_ = float(last_lots)
                                         except (ValueError, TypeError):
                                             pass
-                                open_res = acct_.open_order(pair_, side_, ls_, market_rate)
+                                open_res = acct_.open_order(pair_, side_, ls_, market_rate, other_rate=other_rate)
                                 if open_res.get("status") == "ok":
                                     data = open_res.get("data", {})
                                     res_inner = data
@@ -1323,6 +1327,8 @@ class IForexAccountManager:
 
                     threading.Thread(target=_exec, daemon=True,
                                      name=f"iforex-exec-{account_id[:12]}").start()
+
+        return had_cmd
 
     def get_status(self) -> Dict[str, Any]:
         """Get status of all iFOREX direct accounts."""
