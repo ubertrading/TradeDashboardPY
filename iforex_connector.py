@@ -461,64 +461,91 @@ class IForexAccount:
             "SecurityToken": self.security_token
         }
         
-        # If auto-relogin is currently running, wait briefly for it to finish first
+        # If auto-relogin is currently running, wait briefly (max 5s) for it to finish
         if getattr(self, "_relogin_in_progress", False):
             wait_st = time.time()
-            logger.info("[%s] Auto-relogin in progress — waiting before OpenDeal...", self.account_id)
-            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 20.0:
+            logger.info("[%s] Auto-relogin in progress — waiting briefly before OpenDeal...", self.account_id)
+            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 5.0:
                 time.sleep(0.5)
             payload["SecurityToken"] = self.security_token
+
+        # Pacing guard: ensure minimum 250ms between deals to prevent iFOREX WAF rate-limiting
+        deal_elapsed = time.time() - getattr(self, "_last_deal_ts", 0.0)
+        if deal_elapsed < 0.25:
+            time.sleep(0.25 - deal_elapsed)
 
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
         logger.info("[%s] Submitting OpenDeal (%s %s, input=%s -> notional=%d): %s", 
                     self.account_id, symbol, direction, amount, notional_amount, payload)
         try:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+            self._last_deal_ts = time.time()
             logger.info("[%s] OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
             if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
-                logger.warning("[%s] iFOREX session terminated on OpenDeal (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
-                refreshed_token = self.refresh_security_token_http()
-                if refreshed_token:
-                    logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying OpenDeal immediately...", self.account_id, refreshed_token)
+                # Step 1: Fast HTTP backoff retry (1.0s) for transient WAF rate-limit bursts (avoids unnecessary browser launches)
+                if resp.status_code in (403, 503):
+                    logger.warning("[%s] iFOREX OpenDeal burst limit (%d) — pausing 1.0s before fast HTTP retry...", self.account_id, resp.status_code)
+                    time.sleep(1.0)
                     fresh_q = self.get_quote(symbol, allow_live=True)
                     if fresh_q and fresh_q[0] > 0:
-                        fresh_rate = fresh_q[1] if dir_code == 1 else fresh_q[0]
-                        fresh_other = fresh_q[0] if dir_code == 1 else fresh_q[1]
-                        payload["MarketRate"] = fresh_rate
-                        payload["OtherRateSeen"] = fresh_other
-                    payload["SecurityToken"] = refreshed_token
+                        payload["MarketRate"] = fresh_q[1] if dir_code == 1 else fresh_q[0]
+                        payload["OtherRateSeen"] = fresh_q[0] if dir_code == 1 else fresh_q[1]
                     try:
                         resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
-                        logger.info("[%s] Retried OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
-                    except Exception as retry_e:
-                        return {"status": "error", "message": f"Retry failed: {retry_e}"}
-                else:
-                    self.connected = False
-                    logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
-                    self._trigger_auto_relogin()
-                    
-                    # Wait for auto-relogin to complete
-                    wait_st = time.time()
-                    time.sleep(0.5)
-                    while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 25.0:
-                        time.sleep(0.5)
-                    
-                    if self.connected and self.security_token:
-                        logger.info("[%s] Auto-relogin succeeded! Retrying OpenDeal with fresh credentials...", self.account_id)
+                        self._last_deal_ts = time.time()
+                        logger.info("[%s] Fast HTTP retry OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
+                    except Exception:
+                        pass
+
+                # Step 2: In-memory HTTP token refresh if still rejected
+                if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
+                    logger.warning("[%s] iFOREX session terminated on OpenDeal (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
+                    refreshed_token = self.refresh_security_token_http()
+                    if refreshed_token:
+                        logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying OpenDeal immediately...", self.account_id, refreshed_token)
                         fresh_q = self.get_quote(symbol, allow_live=True)
                         if fresh_q and fresh_q[0] > 0:
                             fresh_rate = fresh_q[1] if dir_code == 1 else fresh_q[0]
                             fresh_other = fresh_q[0] if dir_code == 1 else fresh_q[1]
                             payload["MarketRate"] = fresh_rate
                             payload["OtherRateSeen"] = fresh_other
-                        payload["SecurityToken"] = self.security_token
+                        payload["SecurityToken"] = refreshed_token
                         try:
                             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                            self._last_deal_ts = time.time()
                             logger.info("[%s] Retried OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
                         except Exception as retry_e:
                             return {"status": "error", "message": f"Retry failed: {retry_e}"}
                     else:
-                        return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
+                        self.connected = False
+                        logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
+                        self._trigger_auto_relogin()
+                        
+                        # Wait for auto-relogin to complete (max 15s)
+                        wait_st = time.time()
+                        time.sleep(0.5)
+                        while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 15.0:
+                            time.sleep(0.5)
+                        
+                        if self.connected and self.security_token:
+                            logger.info("[%s] Auto-relogin succeeded! Retrying OpenDeal with fresh credentials...", self.account_id)
+                            fresh_q = self.get_quote(symbol, allow_live=True)
+                            if fresh_q and fresh_q[0] > 0:
+                                fresh_rate = fresh_q[1] if dir_code == 1 else fresh_q[0]
+                                fresh_other = fresh_q[0] if dir_code == 1 else fresh_q[1]
+                                payload["MarketRate"] = fresh_rate
+                                payload["OtherRateSeen"] = fresh_other
+                            payload["SecurityToken"] = self.security_token
+                            try:
+                                resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                                self._last_deal_ts = time.time()
+                                logger.info("[%s] Retried OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
+                            except Exception as retry_e:
+                                return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                        else:
+                            return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
+            if resp.status_code == 200:
+                self._relogin_in_progress = False
             try:
                 res_json = resp.json()
                 is_ok = (resp.status_code == 200 and
@@ -570,12 +597,17 @@ class IForexAccount:
         position_number: Deal position ticket ID
         spot_rate: Current closing market rate
         """
-        # If auto-relogin is currently running, wait briefly for it to finish first
+        # If auto-relogin is currently running, wait briefly (max 5s) for it to finish
         if getattr(self, "_relogin_in_progress", False):
             wait_st = time.time()
-            logger.info("[%s] Auto-relogin in progress — waiting before CloseDeals...", self.account_id)
-            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 20.0:
+            logger.info("[%s] Auto-relogin in progress — waiting briefly before CloseDeals...", self.account_id)
+            while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 5.0:
                 time.sleep(0.5)
+
+        # Pacing guard: ensure minimum 250ms between deals to prevent iFOREX WAF rate-limiting
+        deal_elapsed = time.time() - getattr(self, "_last_deal_ts", 0.0)
+        if deal_elapsed < 0.25:
+            time.sleep(0.25 - deal_elapsed)
 
         url = f"{self.base_url}/Deals/CloseDeals"
         positions_str = f"{position_number}#{spot_rate}#{fw_pips}"
@@ -587,38 +619,57 @@ class IForexAccount:
         logger.info("[%s] Submitting CloseDeals: %s", self.account_id, payload)
         try:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+            self._last_deal_ts = time.time()
             logger.info("[%s] CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
             if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
-                logger.warning("[%s] iFOREX session terminated on CloseDeals (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
-                refreshed_token = self.refresh_security_token_http()
-                if refreshed_token:
-                    logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying CloseDeals immediately...", self.account_id, refreshed_token)
-                    payload["SecurityToken"] = refreshed_token
+                # Step 1: Fast HTTP backoff retry (1.0s) for transient WAF rate-limit bursts
+                if resp.status_code in (403, 503):
+                    logger.warning("[%s] iFOREX CloseDeals burst limit (%d) — pausing 1.0s before fast HTTP retry...", self.account_id, resp.status_code)
+                    time.sleep(1.0)
                     try:
                         resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
-                        logger.info("[%s] Retried CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
-                    except Exception as retry_e:
-                        return {"status": "error", "message": f"Retry failed: {retry_e}"}
-                else:
-                    self.connected = False
-                    logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
-                    self._trigger_auto_relogin()
-                    
-                    wait_st = time.time()
-                    time.sleep(0.5)
-                    while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 25.0:
-                        time.sleep(0.5)
-                    
-                    if self.connected and self.security_token:
-                        logger.info("[%s] Auto-relogin succeeded! Retrying CloseDeals with fresh credentials...", self.account_id)
-                        payload["SecurityToken"] = self.security_token
+                        self._last_deal_ts = time.time()
+                        logger.info("[%s] Fast HTTP retry CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
+                    except Exception:
+                        pass
+
+                # Step 2: In-memory HTTP token refresh if still rejected
+                if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
+                    logger.warning("[%s] iFOREX session terminated on CloseDeals (%d) — attempting fast HTTP token refresh...", self.account_id, resp.status_code)
+                    refreshed_token = self.refresh_security_token_http()
+                    if refreshed_token:
+                        logger.info("[%s] Fast HTTP token refresh succeeded (token=%s)! Retrying CloseDeals immediately...", self.account_id, refreshed_token)
+                        payload["SecurityToken"] = refreshed_token
                         try:
                             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                            self._last_deal_ts = time.time()
                             logger.info("[%s] Retried CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
                         except Exception as retry_e:
                             return {"status": "error", "message": f"Retry failed: {retry_e}"}
                     else:
-                        return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
+                        self.connected = False
+                        logger.warning("[%s] Fast HTTP token refresh failed — initiating headless auto-login fallback...", self.account_id)
+                        self._trigger_auto_relogin()
+                        
+                        # Wait for auto-relogin to complete (max 15s)
+                        wait_st = time.time()
+                        time.sleep(0.5)
+                        while getattr(self, "_relogin_in_progress", False) and time.time() - wait_st < 15.0:
+                            time.sleep(0.5)
+                        
+                        if self.connected and self.security_token:
+                            logger.info("[%s] Auto-relogin succeeded! Retrying CloseDeals with fresh credentials...", self.account_id)
+                            payload["SecurityToken"] = self.security_token
+                            try:
+                                resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
+                                self._last_deal_ts = time.time()
+                                logger.info("[%s] Retried CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
+                            except Exception as retry_e:
+                                return {"status": "error", "message": f"Retry failed: {retry_e}"}
+                        else:
+                            return {"status": "error", "message": "iFOREX session terminated — auto-relogin failed", "raw": resp.text}
+            if resp.status_code == 200:
+                self._relogin_in_progress = False
             try:
                 res_json = resp.json()
                 iforex_ok = resp.status_code == 200
