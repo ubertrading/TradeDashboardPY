@@ -420,7 +420,21 @@ class IForexAccount:
             logger.info("[%s] CloseDeals response (%d): %s", self.account_id, resp.status_code, resp.text)
             try:
                 res_json = resp.json()
-                return {"status": "ok" if resp.status_code == 200 else "error", "data": res_json, "raw": resp.text}
+                # iFOREX returns HTTP 200 even for business-logic errors (e.g.
+                # OrderError8 = "position already closed").  Check the response
+                # body for status:0 / OrderError* to avoid treating duplicate
+                # close attempts as successful closes.
+                iforex_ok = resp.status_code == 200
+                if iforex_ok and isinstance(res_json, list) and len(res_json) > 0:
+                    item = res_json[0] if isinstance(res_json[0], dict) else {}
+                    item_status = item.get("status")
+                    item_result = str(item.get("result", ""))
+                    if item_status == 0 or item_result.startswith("OrderError"):
+                        logger.warning("[%s] CloseDeals returned iFOREX error: status=%s result=%s (ticket=%s)",
+                                       self.account_id, item_status, item_result, position_number)
+                        return {"status": "error", "data": res_json, "raw": resp.text,
+                                "iforex_error": item_result}
+                return {"status": "ok" if iforex_ok else "error", "data": res_json, "raw": resp.text}
             except Exception:
                 return {"status": "ok" if resp.status_code == 200 else "error", "raw": resp.text}
         except Exception as e:

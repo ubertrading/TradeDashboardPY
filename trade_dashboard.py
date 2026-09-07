@@ -6717,7 +6717,10 @@ def _get_net_open(session, account, ea_info=None):
             ls = 0.01
         return int(round(net_lots / ls))
     else:
-        return session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0)
+        # Clamp to 0: a corrupted closed counter (e.g. duplicate close events)
+        # must never produce a negative net_open, which would bypass cross-account
+        # hedge sync and allow excess opens.
+        return max(0, session.get("filled", {}).get(account, 0) - session.get("closed", {}).get(account, 0))
 
 
 def _should_issue_command(session, account):
@@ -10054,6 +10057,17 @@ def trade_result():
 
             elif status == "rollback_closed":
                 if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
+                    # ── Duplicate close guard: skip if this ticket was already recorded ──
+                    if ticket:
+                        already_closed = any(
+                            cf.get("account") == account and str(cf.get("ticket")) == str(ticket)
+                            for cf in session.get("close_fills", [])
+                        )
+                        if already_closed:
+                            _log_event(session_id, account, "duplicate_close_skipped",
+                                       f"ticket={ticket} (rollback) already in close_fills — NOT incrementing closed counter")
+                            in_flight_commands.pop((session_id, account), None)
+                            return
                     # Normal rollback/rebalance close
                     rb = session.get("rollback_needed", {})
                     rb[account] = max(0, rb.get(account, 0) - 1)
@@ -10113,6 +10127,17 @@ def trade_result():
 
             elif status == "closed":
                 if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
+                    # ── Duplicate close guard: skip if this ticket was already recorded ──
+                    if ticket:
+                        already_closed = any(
+                            cf.get("account") == account and str(cf.get("ticket")) == str(ticket)
+                            for cf in session.get("close_fills", [])
+                        )
+                        if already_closed:
+                            _log_event(session_id, account, "duplicate_close_skipped",
+                                       f"ticket={ticket} already in close_fills — NOT incrementing closed counter")
+                            in_flight_commands.pop((session_id, account), None)
+                            return
                     # Not a cycle close — handle as normal close
                     action = session.get("action", "open")
                     # Normal close
@@ -23700,6 +23725,17 @@ if __name__ == '__main__':
 
                 elif status in ("rollback_closed", "closed"):
                     if not _cycle_handle_close(session, account, data, session_id, cmd_sent_ts):
+                        # ── Duplicate close guard: skip if this ticket was already recorded ──
+                        if ticket:
+                            already_closed = any(
+                                cf.get("account") == account and str(cf.get("ticket")) == str(ticket)
+                                for cf in session.get("close_fills", [])
+                            )
+                            if already_closed:
+                                _log_event(session_id, account, "duplicate_close_skipped",
+                                           f"[MT-DIRECT] ticket={ticket} already in close_fills — NOT incrementing closed counter")
+                                in_flight_commands.pop((session_id, account), None)
+                                return
                         # Normal rollback/close
                         if status == "rollback_closed":
                             rb = session.get("rollback_needed", {})
