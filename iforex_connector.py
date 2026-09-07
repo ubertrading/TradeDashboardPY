@@ -153,7 +153,7 @@ class IForexAccount:
         self._running = False
         self._poll_thread = None
         self._pos_sync_thread = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Position persistence file
         self.positions_file = os.path.join(
@@ -193,12 +193,22 @@ class IForexAccount:
             logger.warning("[%s] Could not save open positions: %s", self.account_id, ex)
 
     def start(self):
-        """Start the background polling loop (pure HTTP mode, no continuous browser scraper)."""
+        """Start background polling and fast HTTP position reconciliation."""
         self._running = True
         self.connected = True
+        # Immediate fast reconciliation before starting worker loops
+        try:
+            self._sync_closed_positions_http()
+            self._sync_account_balance_http()
+            self._update_ea_account_info()
+        except Exception as e:
+            logger.debug("[%s] Initial position reconciliation error: %s", self.account_id, e)
+
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name=f"iforex_poll_{self.account_id}")
         self._poll_thread.start()
-        logger.info("[%s] iFOREX Direct polling thread started (pure HTTP mode)", self.account_id)
+        self._pos_sync_thread = threading.Thread(target=self._position_sync_loop, daemon=True, name=f"iforex_pos_sync_{self.account_id}")
+        self._pos_sync_thread.start()
+        logger.info("[%s] iFOREX Direct polling & HTTP position sync threads started", self.account_id)
 
     def stop(self):
         """Stop background polling."""
@@ -712,6 +722,175 @@ class IForexAccount:
             logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
         return positions
 
+    def _sync_closed_positions_http(self) -> bool:
+        """
+        Pure HTTP sync of closed positions:
+        Queries /webpl4/api/closeddeals/LoadOrderedClosedDealSummary (< 200ms).
+        If any currently tracked open ticket appears in the broker's closed deals list,
+        it means it was closed on broker (via iFOREX UI, mobile app, TP/SL, or margin stop).
+        We remove it from _open_orders and persist immediately.
+        Returns True if any position was removed, False otherwise.
+        """
+        if not self.connected and (time.time() - self._last_401_ts) < 15:
+            return False
+        try:
+            url = f"{self.base_url}/api/closeddeals/LoadOrderedClosedDealSummary"
+            resp = self.session.get(url, params={"page": 1, "pageSize": 50}, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "Success":
+                    closed_summary = data.get("closedDealSummary", [])
+                    closed_tickets = set()
+                    for row in closed_summary:
+                        if len(row) > 1 and row[1]:
+                            closed_tickets.add(str(row[1]))
+                    
+                    with self._lock:
+                        if not self._open_orders:
+                            return False
+                        prev_tickets = {str(o.get("Ticket") or o.get("ticket")) for o in self._open_orders if o.get("Ticket") or o.get("ticket")}
+                        closed_found = prev_tickets.intersection(closed_tickets)
+                        if closed_found:
+                            logger.info("[%s] Pure HTTP Sync: Detected %d position(s) closed externally on iFOREX: %s",
+                                        self.account_id, len(closed_found), closed_found)
+                            self._open_orders = [
+                                o for o in self._open_orders 
+                                if str(o.get("Ticket") or o.get("ticket")) not in closed_found
+                            ]
+                            self._save_open_orders()
+                            return True
+            elif resp.status_code in (401, 403, 503):
+                self.refresh_security_token_http()
+        except Exception as e:
+            logger.debug("[%s] HTTP closed deals sync error: %s", self.account_id, e)
+        return False
+
+    def _sync_account_balance_http(self):
+        """Query latest balance from /webpl4/api/accountingactions/GetData."""
+        if not self.connected and (time.time() - self._last_401_ts) < 15:
+            return
+        try:
+            url = f"{self.base_url}/api/accountingactions/GetData"
+            resp = self.session.get(url, params={"page": 1, "pageSize": 1}, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                actions = data.get("actions", [])
+                if actions and len(actions[0]) >= 10:
+                    bal_str = str(actions[0][9]).replace(",", "")
+                    bal = float(bal_str)
+                    if bal > 0:
+                        self._account_summary["balance"] = bal
+        except Exception:
+            pass
+
+    def _update_ea_account_info(self, active_pairs: Optional[set] = None):
+        """Update ea_account_info with current positions, balance, equity, and quotes."""
+        if "ea_account_info" not in self.dd:
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        is_weekend = (now_utc.weekday() == 4 and now_utc.hour >= 20) or (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 21)
+        if is_weekend:
+            self.is_market_closed = True
+            self._market_closed_by_weekend = True
+        elif getattr(self, '_market_closed_by_weekend', False):
+            self.is_market_closed = False
+            self._market_closed_by_weekend = False
+
+        info = self.dd["ea_account_info"].setdefault(self.account_id, {})
+        info["conn_type"] = "iforex_direct"
+        info["account_number"] = self.account_number
+        info["connected"] = self.connected
+        info["market_closed"] = self.is_market_closed
+
+        # Margin & Balance
+        summ = getattr(self, "_account_summary", {})
+        bal = summ.get("balance", 0.0)
+        if bal <= 0:
+            bal = float(self.config.get("balance", 0.0))
+        info["balance"] = bal
+
+        # Positions tracking
+        orders = self._get_open_orders()
+        tickets = [o.get("Ticket") or o.get("ticket") for o in orders if o.get("Ticket") or o.get("ticket")]
+        info["open_tickets"] = tickets
+        info["positions"] = len(tickets)
+        info["pos_details"] = orders
+        info["position_details"] = [
+            {
+                "ticket": str(o.get("Ticket") or o.get("ticket")),
+                "symbol": o.get("Symbol") or o.get("symbol") or "EURUSD",
+                "type": str(o.get("Type") or o.get("direction") or "buy"),
+                "lots": float(o.get("Lots") or o.get("lots") or 0.01),
+                "open_price": float(o.get("OpenPrice") or o.get("open_price") or 0.0),
+                "profit": float(o.get("Profit") or o.get("profit") or 0.0)
+            }
+            for o in orders if o.get("Ticket") or o.get("ticket")
+        ]
+
+        # Calculate lots & floating P/L
+        _lbi = {}
+        tot_lots = 0.0
+        tot_open_pl = 0.0
+        for o in orders:
+            sym = o.get("Symbol") or o.get("symbol") or "Unknown"
+            lots = o.get("Lots") or o.get("lots")
+            if lots is None or lots == 0.0:
+                amt = float(o.get("Amount") or o.get("amount") or 0.0)
+                lots = notional_to_lots(sym, amt)
+            if sym not in _lbi:
+                _lbi[sym] = {"buy": 0.0, "sell": 0.0}
+            direction = str(o.get("Type") or o.get("direction") or "").lower()
+            if direction in ("buy", "0", "op_buy"):
+                _lbi[sym]["buy"] = round(_lbi[sym]["buy"] + lots, 2)
+                tot_lots += lots
+            else:
+                _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
+                tot_lots -= lots
+            
+            # Estimate open profit from cached quote
+            q = self.get_quote(sym, allow_live=False)
+            if q and (o.get("OpenPrice") or o.get("open_price")):
+                op = float(o.get("OpenPrice") or o.get("open_price"))
+                cur_p = q[0] if direction in ("buy", "0", "op_buy") else q[1]
+                amt_units = lot_to_notional(sym, lots)
+                if direction in ("buy", "0", "op_buy"):
+                    pnl = (cur_p - op) * amt_units
+                else:
+                    pnl = (op - cur_p) * amt_units
+                o["Profit"] = round(pnl, 2)
+                tot_open_pl += pnl
+
+        info["lots_by_instrument"] = _lbi
+        info["total_lots"] = round(tot_lots, 2)
+        info["profit"] = round(tot_open_pl, 2)
+        info["equity"] = round(bal + tot_open_pl, 2)
+        info.setdefault("leverage", int(self.config.get("leverage", 400)))
+        info.setdefault("margin", float(self.config.get("margin", 0.0)))
+        info.setdefault("free_margin", round(info["equity"] - info.get("margin", 0.0), 2))
+
+        # Update spread / bid / ask in info if active_pairs provided
+        if active_pairs:
+            syms_dict = info.setdefault("symbols", {})
+            for pair in active_pairs:
+                q = self.get_quote(pair, allow_live=False)
+                if q:
+                    pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
+                    spread_pts = round((q[1] - q[0]) * pip_mult, 1)
+                    sym_clean = pair.upper().replace("/", "").replace(" ", "")
+                    syms_dict[pair] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
+                    syms_dict[sym_clean] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
+                    if "symbol" not in info or info.get("symbol") == pair or not info.get("bid"):
+                        info["bid"] = q[0]
+                        info["ask"] = q[1]
+                        info["spread"] = spread_pts
+                        info["symbol"] = pair
+
+        now_ts = time.time()
+        info["last_update"] = now_ts
+        if "ea_heartbeats" in self.dd:
+            self.dd["ea_heartbeats"][self.account_id] = now_ts
+
     def _poll_loop(self):
         """Periodic background poll for account data & heartbeats."""
         while self._running:
@@ -723,7 +902,11 @@ class IForexAccount:
                 # 2. Query EUR/USD margin to check connection & maintain session keep-alive
                 self.get_deal_margin_details(3631)
 
-                # 3. Poll active symbols from sessions for live quotes (non-blocking for dashboard lock)
+                # 3. Synchronize closed positions and balance via pure HTTP
+                self._sync_closed_positions_http()
+                self._sync_account_balance_http()
+
+                # 4. Poll active symbols from sessions for live quotes (non-blocking for dashboard lock)
                 sessions = self.dd.get("sessions", {})
                 active_pairs = set()
                 for sess in sessions.values():
@@ -739,117 +922,30 @@ class IForexAccount:
                 for pair in active_pairs:
                     self.fetch_quote_live(pair)
 
-                # 4. Update ea_account_info dictionary
-                if "ea_account_info" in self.dd:
-                    info = self.dd["ea_account_info"].setdefault(self.account_id, {})
-                    info["conn_type"] = "iforex_direct"
-                    info["account_number"] = self.account_number
-                    info["connected"] = self.connected
-                    
-                    # Check weekend market hours (Friday >= 20:00 UTC through Sunday < 21:00 UTC)
-                    now_utc = datetime.now(timezone.utc)
-                    is_weekend = (now_utc.weekday() == 4 and now_utc.hour >= 20) or (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 21)
-                    if is_weekend:
-                        self.is_market_closed = True
-                        self._market_closed_by_weekend = True
-                    elif getattr(self, '_market_closed_by_weekend', False):
-                        self.is_market_closed = False
-                        self._market_closed_by_weekend = False
-                    info["market_closed"] = self.is_market_closed
-                    
-                    # Margin & Balance
-                    summ = getattr(self, "_account_summary", {})
-                    if summ.get("balance", 0.0) > 0:
-                        info["balance"] = summ["balance"]
-                    else:
-                        info.setdefault("balance", float(self.config.get("balance", 0.0)))
-
-                    if summ.get("equity", 0.0) > 0:
-                        info["equity"] = summ["equity"]
-                    else:
-                        info.setdefault("equity", float(self.config.get("equity", 0.0)))
-
-                    if "margin" in summ and summ["margin"] is not None:
-                        info["margin"] = summ["margin"]
-                    else:
-                        info.setdefault("margin", float(self.config.get("margin", 0.0)))
-
-                    if "free_margin" in summ and summ["free_margin"] is not None:
-                        info["free_margin"] = summ["free_margin"]
-                    else:
-                        info.setdefault("free_margin", float(self.config.get("free_margin", 0.0)))
-
-                    info.setdefault("leverage", int(self.config.get("leverage", 400)))
-
-                    # Update spread / bid / ask in info
-                    syms_dict = info.setdefault("symbols", {})
-                    for pair in active_pairs:
-                        q = self.get_quote(pair, allow_live=False)
-                        if q:
-                            pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
-                            spread_pts = round((q[1] - q[0]) * pip_mult, 1)
-                            sym_clean = pair.upper().replace("/", "").replace(" ", "")
-                            syms_dict[pair] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
-                            syms_dict[sym_clean] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
-                            if "symbol" not in info or info.get("symbol") == pair or not info.get("bid"):
-                                info["bid"] = q[0]
-                                info["ask"] = q[1]
-                                info["spread"] = spread_pts
-                                info["symbol"] = pair
-                    
-                    # Position tracking for hedge balancing
-                    orders = self._get_open_orders()
-                    tickets = [o.get("Ticket") for o in orders if o.get("Ticket")]
-                    info["open_tickets"] = tickets
-                    info["positions"] = len(tickets)
-                    info["pos_details"] = orders
-                    info["position_details"] = [
-                        {
-                            "ticket": str(o.get("Ticket")),
-                            "symbol": o.get("Symbol", "EURUSD"),
-                            "type": str(o.get("Type", "buy")),
-                            "lots": float(o.get("Lots", 0.01)),
-                            "open_price": float(o.get("OpenPrice", 0.0)),
-                            "profit": float(o.get("Profit", 0.0))
-                        }
-                        for o in orders if o.get("Ticket")
-                    ]
-
-                    # Lots calculation
-                    _lbi = {}
-                    tot_lots = 0.0
-                    for o in orders:
-                        sym = o.get("Symbol", "Unknown")
-                        lots = o.get("Lots")
-                        if lots is None or lots == 0.0:
-                            amt = float(o.get("Amount") or o.get("amount") or 0.0)
-                            lots = notional_to_lots(sym, amt)
-                        if sym not in _lbi:
-                            _lbi[sym] = {"buy": 0.0, "sell": 0.0}
-                        if str(o.get("Type", "")).lower() in ("buy", "0", "op_buy"):
-                            _lbi[sym]["buy"] = round(_lbi[sym]["buy"] + lots, 2)
-                            tot_lots += lots
-                        else:
-                            _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
-                            tot_lots -= lots
-                    info["lots_by_instrument"] = _lbi
-                    info["total_lots"] = round(tot_lots, 2)
-                    now_ts = time.time()
-                    info["last_update"] = now_ts
-                    if "ea_heartbeats" in self.dd:
-                        self.dd["ea_heartbeats"][self.account_id] = now_ts
+                # 5. Update ea_account_info dictionary
+                self._update_ea_account_info(active_pairs)
 
             except Exception as e:
                 logger.debug("[%s] Poll loop error: %s", self.account_id, e)
-            time.sleep(3.0)
+            time.sleep(2.0)
 
     def _position_sync_loop(self):
         """
-        Dormant in pure HTTP mode. Positions are maintained with 100% determinism via
-        HTTP OpenDeal / CloseDeals and saved to configs/iforex_positions_{account_id}.json.
+        Fast Pure HTTP position reconciliation loop (runs every 1.5s).
+        Continuously reconciles local open positions with broker closed deals
+        via GET /webpl4/api/closeddeals/LoadOrderedClosedDealSummary (<150ms, zero browser).
+        If any open position is closed externally (broker UI, mobile app, SL/TP, liquidation),
+        it is immediately detected, pruned from _open_orders, and pushed to ea_account_info.
         """
         while self._running:
-            time.sleep(10.0)
+            try:
+                changed = self._sync_closed_positions_http()
+                if changed:
+                    self._update_ea_account_info()
+            except Exception as e:
+                logger.debug("[%s] Fast HTTP position sync loop error: %s", self.account_id, e)
+            time.sleep(1.5)
+
 
 
 # ─── Account Manager ────────────────────────────────────────────────────────
