@@ -12,12 +12,14 @@ import json
 import time
 import logging
 import re
+import threading
 from typing import Dict, Any, Optional, Tuple, List
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger("iforex_auto_login")
 
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_edge_profile")
+_browser_profile_lock = threading.Lock()
 
 def refresh_iforex_session(account_id: str = "12141021",
                            config_dir: str = "configs",
@@ -57,7 +59,7 @@ def refresh_iforex_session(account_id: str = "12141021",
     logger.info("Starting iFOREX session refresh for account %s (user=%s, headless=%s)...",
                 account_id, username or "None", headless)
     
-    with sync_playwright() as p:
+    with _browser_profile_lock, sync_playwright() as p:
         try:
             args = ["--start-maximized", "--disable-blink-features=AutomationControlled"] if not headless else ["--disable-blink-features=AutomationControlled"]
             context = p.chromium.launch_persistent_context(
@@ -219,7 +221,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
     iFOREX WebPL4 interface (React DOM).
     Returns: (deals_list, summary_dict)
     """
-    with sync_playwright() as p:
+    with _browser_profile_lock, sync_playwright() as p:
         try:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=PROFILE_DIR,

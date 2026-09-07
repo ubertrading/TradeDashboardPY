@@ -381,6 +381,14 @@ class IForexAccount:
         try:
             resp = self.session.post(url, data=payload, headers=headers, timeout=5.0)
             logger.info("[%s] OpenDeal response (%d): %s", self.account_id, resp.status_code, resp.text)
+            if resp.status_code in (401, 403, 503) or "session has been terminated" in resp.text.lower():
+                self.connected = False
+                now_ts = time.time()
+                if now_ts - getattr(self, "_last_401_ts", 0) > 30:
+                    self._last_401_ts = now_ts
+                    logger.warning("[%s] iFOREX session terminated on OpenDeal (%d) — triggering auto-relogin...", self.account_id, resp.status_code)
+                    self._trigger_auto_relogin()
+                return {"status": "error", "message": "iFOREX session terminated — auto-relogin triggered", "raw": resp.text}
             try:
                 res_json = resp.json()
                 is_ok = (resp.status_code == 200 and
