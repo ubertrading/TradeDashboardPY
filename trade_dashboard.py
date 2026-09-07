@@ -12091,6 +12091,7 @@ def import_positions(strategy_id):
         for acct_id in req["accounts"]:
             direct_acct = mt_direct_manager.accounts.get(acct_id) if mt_direct_manager else None
             fix_acct = fix_manager.accounts.get(acct_id) if fix_manager else None
+            iforex_acct = iforex_manager.accounts.get(acct_id) if ('iforex_manager' in globals() and iforex_manager) else None
             if direct_acct and direct_acct.connected and hasattr(direct_acct, 'get_positions_for_import'):
                 try:
                     positions = direct_acct.get_positions_for_import(pair_filter, comment_filter)
@@ -12109,17 +12110,26 @@ def import_positions(strategy_id):
                 except Exception as e:
                     app.logger.error("[IMPORT] FIX Auto-fetch failed for %s: %s", acct_id, e)
                     waiting_for.append(acct_id)
+            elif iforex_acct and iforex_acct.connected and hasattr(iforex_acct, 'get_positions_for_import'):
+                try:
+                    positions = iforex_acct.get_positions_for_import(pair_filter, comment_filter)
+                    req["received"][acct_id] = positions
+                    app.logger.info("[IMPORT] Auto-fetched %d positions from iFOREX %s",
+                                    len(positions), acct_id)
+                except Exception as e:
+                    app.logger.error("[IMPORT] iFOREX Auto-fetch failed for %s: %s", acct_id, e)
+                    waiting_for.append(acct_id)
             else:
                 waiting_for.append(acct_id)
 
-        # If all accounts responded (all Direct), process immediately
+        # If all accounts responded (MT Direct, FIX, or iFOREX), process immediately
         if all(a in req["received"] for a in req["accounts"]):
             result = _process_position_import(req)
             result["_ts"] = time.time()
             import_results[req_id] = result
             del pending_position_reports[req_id]
             return jsonify({"ok": True, "request_id": req_id, "immediate": True,
-                            "message": "Positions imported from MT Direct accounts.",
+                            "message": "Positions imported successfully.",
                             "result": result})
 
         return jsonify({"ok": True, "request_id": req_id,
@@ -12272,9 +12282,16 @@ def _process_position_import(req):
                         acct2, pre2, len(pos2_raw), ticket_from_2, ticket_to_2)
 
     # Filter by pair if specified
+    def _sym_match(s1, s2):
+        c1 = str(s1 or "").upper().replace("/", "").replace(".", "").replace(" ", "").replace("-", "")
+        c2 = str(s2 or "").upper().replace("/", "").replace(".", "").replace(" ", "").replace("-", "")
+        if not c1 or not c2:
+            return False
+        return c1.startswith(c2) or c2.startswith(c1)
+
     if pair_filter:
-        pos1_raw = [p for p in pos1_raw if p.get("symbol", "").upper().startswith(pair_filter) or pair_filter.startswith(p.get("symbol", "").upper())]
-        pos2_raw = [p for p in pos2_raw if p.get("symbol", "").upper().startswith(pair_filter) or pair_filter.startswith(p.get("symbol", "").upper())]
+        pos1_raw = [p for p in pos1_raw if _sym_match(p.get("symbol", ""), pair_filter)]
+        pos2_raw = [p for p in pos2_raw if _sym_match(p.get("symbol", ""), pair_filter)]
 
     # Filter by comment if specified (supports comma-separated list)
     if comment_filter:
@@ -12284,10 +12301,13 @@ def _process_position_import(req):
         
         is_fix_1 = (fix_manager and acct1 in fix_manager.accounts)
         is_fix_2 = (fix_manager and acct2 in fix_manager.accounts)
+        is_ifx_1 = ('iforex_manager' in globals() and iforex_manager and acct1 in iforex_manager.accounts)
+        is_ifx_2 = ('iforex_manager' in globals() and iforex_manager and acct2 in iforex_manager.accounts)
         
-        if not is_fix_1:
+        # iFOREX and FIX accounts have no order comments — do not filter them out by comment
+        if not is_fix_1 and not is_ifx_1:
             pos1_raw = [p for p in pos1_raw if (match_blank and not p.get("comment", "").strip()) or any(cp in p.get("comment", "") for cp in comment_parts)]
-        if not is_fix_2:
+        if not is_fix_2 and not is_ifx_2:
             pos2_raw = [p for p in pos2_raw if (match_blank and not p.get("comment", "").strip()) or any(cp in p.get("comment", "") for cp in comment_parts)]
 
     # Sort both sides by open time DESCENDING (newest first).
@@ -12410,6 +12430,8 @@ def _process_position_import(req):
     def _short_name(acc):
         if mt_direct_manager and acc in mt_direct_manager.accounts:
             return str(mt_direct_manager.accounts[acc].config.get('login', acc))
+        if 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
+            return str(iforex_manager.accounts[acc].account_number or acc)
         # For EA Poll/Manual: extract trailing account number
         import re
         m = re.search(r'(\d+)$', acc)

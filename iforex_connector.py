@@ -432,6 +432,62 @@ class IForexAccount:
         with self._lock:
             return list(self._open_orders)
 
+    def get_positions_for_import(self, pair_filter: str = "", comment_filter: str = "") -> List[Dict[str, Any]]:
+        """
+        Get open positions in import-compatible format for TradeDashboardPY.
+        Matches MTDirectManager and FixAccountManager interface.
+        iFOREX positions have no comments, so comment_filter is not enforced unless blank matching.
+        """
+        positions = []
+        try:
+            orders = self._get_open_orders()
+            if not orders:
+                try:
+                    from iforex_auto_login import fetch_active_deals_and_summary
+                    deals, summary = fetch_active_deals_and_summary(timeout_sec=20)
+                    if deals is not None:
+                        with self._lock:
+                            self._open_orders = deals
+                            if summary:
+                                self._account_summary = summary
+                        orders = deals
+                except Exception as fe:
+                    logger.warning("[%s] On-demand position fetch in get_positions_for_import: %s", self.account_id, fe)
+
+            def _clean(s):
+                return str(s or "").upper().replace("/", "").replace(".", "").replace(" ", "").replace("-", "")
+
+            clean_pair = _clean(pair_filter)
+
+            for o in orders:
+                sym = str(o.get("Symbol") or o.get("symbol") or "").upper()
+                clean_sym = _clean(sym)
+                if clean_pair and not (clean_sym.startswith(clean_pair) or clean_pair.startswith(clean_sym)):
+                    continue
+
+                t = str(o.get("Ticket") or o.get("ticket") or "")
+                direction = str(o.get("Type") or o.get("direction") or "buy").lower()
+                side = "buy" if direction in ("buy", "1", "op_buy") else "sell"
+                lots = float(o.get("Lots") or o.get("lots") or 0.01)
+                open_price = float(o.get("OpenPrice") or o.get("open_price") or 0.0)
+                open_time = str(o.get("OpenTime") or o.get("open_time") or "")
+                open_epoch = o.get("open_epoch")
+
+                positions.append({
+                    "ticket": t,
+                    "symbol": sym,
+                    "lots": lots,
+                    "side": side,
+                    "comment": "",
+                    "open_price": open_price,
+                    "open_time": open_time,
+                    "open_epoch": open_epoch,
+                })
+            logger.info("[%s] Import: found %d positions (pair=%s)", self.account_id, len(positions), pair_filter)
+        except Exception as e:
+            logger.error("[%s] get_positions_for_import error: %s", self.account_id, e)
+        return positions
+
     def _poll_loop(self):
         """Periodic background poll for account data & heartbeats."""
         while self._running:
@@ -748,6 +804,13 @@ class IForexAccountManager:
             self.save_config()
             return True
         return False
+
+    def get_positions_for_import(self, account_id: str, pair_filter: str = "", comment_filter: str = "") -> List[Dict[str, Any]]:
+        """Get open positions for a specific account in import format."""
+        acct = self.accounts.get(account_id)
+        if acct:
+            return acct.get_positions_for_import(pair_filter, comment_filter)
+        return []
 
     def start(self):
         """Start all account poll threads and the command loop."""
