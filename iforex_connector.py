@@ -145,6 +145,7 @@ class IForexAccount:
         self._quotes_cache: Dict[str, Dict[str, float]] = {}
         self._margin_cache: Dict[int, float] = {}
         self._open_orders: List[Dict[str, Any]] = []
+        self._seen_ticket_ids: set = set()
         self._account_summary: Dict[str, float] = {}
         self.is_market_closed: bool = False
         self._last_401_ts = 0.0
@@ -661,8 +662,8 @@ class IForexAccount:
         which immediately triggers ea_account_info update and hedge monitor rebalancing!
         """
         time.sleep(5)  # Initial wait for platform settlement
-        _consecutive_empty = 0  # Debounce: require multiple empty reads before accepting 0 positions
-        _EMPTY_THRESHOLD = 3    # Number of consecutive empty reads needed to trust deals=[]
+        _consecutive_empty = 0  # Debounce: require confirmation only for ambiguous empty reads
+        _EMPTY_THRESHOLD = 2    # Only for ambiguous reads without clear summary margin
         while self._running:
             try:
                 from iforex_auto_login import fetch_active_deals_and_summary
@@ -691,33 +692,45 @@ class IForexAccount:
                         logger.warning("[%s] deals=[] but margin=%.2f open_pl=%.2f — skipping update (likely render lag)",
                                        self.account_id, _margin, _open_pl)
                     elif len(deals) == 0 and self._open_orders:
-                        # Empty read with no margin evidence — require N consecutive reads before wiping
-                        _consecutive_empty += 1
-                        if _consecutive_empty < _EMPTY_THRESHOLD:
-                            logger.warning("[%s] deals=[] (empty read %d/%d) — deferring position wipe",
-                                           self.account_id, _consecutive_empty, _EMPTY_THRESHOLD)
-                            deals = None  # Treat as None to skip update this cycle
-                        else:
-                            logger.info("[%s] deals=[] confirmed after %d consecutive reads — accepting closure",
-                                        self.account_id, _consecutive_empty)
+                        # If summary margin and open_pl are zero, broker account confirms 0 positions — accept IMMEDIATELY!
+                        if abs(_margin) <= 0.01 and abs(_open_pl) <= 0.01:
+                            logger.info("[%s] deals=[] confirmed by margin=%.2f open_pl=%.2f — accepting closure immediately",
+                                        self.account_id, _margin, _open_pl)
                             _consecutive_empty = 0
+                        else:
+                            _consecutive_empty += 1
+                            if _consecutive_empty < _EMPTY_THRESHOLD:
+                                logger.warning("[%s] deals=[] (empty read %d/%d) — deferring position wipe",
+                                               self.account_id, _consecutive_empty, _EMPTY_THRESHOLD)
+                                deals = None  # Treat as None to skip update this cycle
+                            else:
+                                logger.info("[%s] deals=[] confirmed after %d consecutive reads — accepting closure",
+                                            self.account_id, _consecutive_empty)
+                                _consecutive_empty = 0
                     else:
                         _consecutive_empty = 0  # Non-empty result — reset counter
 
                 if deals is not None:
                     with self._lock:
-                        # Preserve fresh orders opened locally within last 60s that might not yet have appeared in deals
                         now_epoch = time.time()
                         deal_tickets = set(str(d.get("Ticket")) for d in deals if d.get("Ticket"))
+                        # Track all tickets seen in broker deals
+                        self._seen_ticket_ids.update(deal_tickets)
+
+                        # Only preserve unrendered fresh orders that have NEVER appeared in broker deals yet,
+                        # to allow brief DOM rendering lag right after OpenDeal returns (max 8s).
+                        # Once an order has appeared in broker deals at least once, it is NEVER preserved if missing!
                         for fo in list(self._open_orders):
                             fo_t = str(fo.get("Ticket"))
                             fo_time = fo.get("open_epoch") or fo.get("OpenTime") or 0
                             if not isinstance(fo_time, (int, float)):
                                 fo_time = 0
-                            if fo_t and fo_t not in deal_tickets and (now_epoch - fo_time) < 60.0:
+                            if (fo_t and fo_t not in deal_tickets and 
+                                fo_t not in self._seen_ticket_ids and 
+                                (now_epoch - fo_time) < 8.0):
                                 deals.append(fo)
                                 deal_tickets.add(fo_t)
-                                logger.info("[%s] Preserving fresh local order ticket=%s in position sync (age=%.1fs < 60s)",
+                                logger.info("[%s] Preserving unrendered fresh local order ticket=%s in position sync (age=%.1fs < 8s)",
                                             self.account_id, fo_t, now_epoch - fo_time)
 
                         prev_tickets = set(str(o.get("Ticket")) for o in self._open_orders if o.get("Ticket"))
@@ -786,8 +799,8 @@ class IForexAccount:
             except Exception as e:
                 logger.warning("[%s] Position sync error: %s", self.account_id, e)
 
-            # Sleep between position synchronization passes (1.0s for prompt detection)
-            time.sleep(1.0)
+            # Sleep between position synchronization passes (0.5s for prompt detection)
+            time.sleep(0.5)
 
 
 # ─── Account Manager ────────────────────────────────────────────────────────

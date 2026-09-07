@@ -234,7 +234,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 page.wait_for_selector("#accSummaryAccountBalance", timeout=12000)
             except Exception:
                 pass  # Best-effort wait; proceed anyway
-            time.sleep(1.0)  # Allow deal rows to render after summary appears
+            time.sleep(0.3)  # Brief settle for deal rows to render after summary appears
 
             raw_data = page.evaluate("""
                 (async () => {
