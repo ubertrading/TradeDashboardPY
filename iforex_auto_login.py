@@ -225,6 +225,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 user_data_dir=PROFILE_DIR,
                 headless=True,
                 channel="msedge",
+                viewport={"width": 1920, "height": 3000},
                 args=["--disable-blink-features=AutomationControlled"]
             )
             page = context.pages[0] if context.pages else context.new_page()
@@ -236,33 +237,139 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
             time.sleep(1.0)  # Allow deal rows to render after summary appears
 
             raw_data = page.evaluate("""
-                (() => {
-                    const rows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
-                    const deals = [];
-                    for (let el of rows) {
+                (async () => {
+                    const dealsMap = new Map();
+
+                    // Helper to harvest deals from currently mounted DOM rows
+                    const harvestDomRows = () => {
+                        const rows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
+                        for (let el of rows) {
+                            const reactKey = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                            if (reactKey && el[reactKey]) {
+                                let fiber = el[reactKey];
+                                let depth = 0;
+                                while (fiber && depth < 20) {
+                                    if (fiber.memoizedProps && fiber.memoizedProps.deal) {
+                                        const d = fiber.memoizedProps.deal;
+                                        const ticket = String(d.positionNumber || d.orderID || '');
+                                        if (ticket && !dealsMap.has(ticket)) {
+                                            dealsMap.set(ticket, {
+                                                ticket: ticket,
+                                                exeTime: d.exeTime,
+                                                instrumentID: d.instrumentID,
+                                                orderDir: d.orderDir,
+                                                dealAmount: d.dealAmount,
+                                                orderRate: d.orderRateNumeric || d.orderRate,
+                                                plNumeric: d.plNumeric
+                                            });
+                                        }
+                                        break;
+                                    }
+                                    fiber = fiber.return;
+                                    depth++;
+                                }
+                            }
+                        }
+                    };
+
+                    // 1. Check if ancestor React components hold the full deals collection
+                    let fullDeals = null;
+                    const initialRows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
+                    for (let el of initialRows) {
                         const reactKey = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
                         if (reactKey && el[reactKey]) {
                             let fiber = el[reactKey];
                             let depth = 0;
-                            while (fiber && depth < 20) {
-                                if (fiber.memoizedProps && fiber.memoizedProps.deal) {
-                                    const d = fiber.memoizedProps.deal;
-                                    deals.push({
-                                        ticket: String(d.positionNumber || d.orderID || ''),
-                                        exeTime: d.exeTime,
-                                        instrumentID: d.instrumentID,
-                                        orderDir: d.orderDir,
-                                        dealAmount: d.dealAmount,
-                                        orderRate: d.orderRateNumeric || d.orderRate,
-                                        plNumeric: d.plNumeric
-                                    });
-                                    break;
+                            while (fiber && depth < 50) {
+                                if (fiber.memoizedProps) {
+                                    for (let k of Object.keys(fiber.memoizedProps)) {
+                                        let v = fiber.memoizedProps[k];
+                                        if (Array.isArray(v) && v.length > 0 && v[0] && typeof v[0] === 'object') {
+                                            if (v[0].positionNumber || v[0].orderID || (v[0].dealAmount && v[0].instrumentID)) {
+                                                if (!fullDeals || v.length > fullDeals.length) {
+                                                    fullDeals = v;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (fiber.memoizedState) {
+                                    let s = fiber.memoizedState;
+                                    while (s) {
+                                        let v = s.memoizedState;
+                                        if (Array.isArray(v) && v.length > 0 && v[0] && typeof v[0] === 'object') {
+                                            if (v[0].positionNumber || v[0].orderID || (v[0].dealAmount && v[0].instrumentID)) {
+                                                if (!fullDeals || v.length > fullDeals.length) {
+                                                    fullDeals = v;
+                                                }
+                                            }
+                                        }
+                                        s = s.next;
+                                    }
                                 }
                                 fiber = fiber.return;
                                 depth++;
                             }
                         }
+                        if (fullDeals && fullDeals.length > 10) break;
                     }
+
+                    if (fullDeals && fullDeals.length > 0) {
+                        for (let d of fullDeals) {
+                            const ticket = String(d.positionNumber || d.orderID || '');
+                            if (ticket && !dealsMap.has(ticket)) {
+                                dealsMap.set(ticket, {
+                                    ticket: ticket,
+                                    exeTime: d.exeTime,
+                                    instrumentID: d.instrumentID,
+                                    orderDir: d.orderDir,
+                                    dealAmount: d.dealAmount,
+                                    orderRate: d.orderRateNumeric || d.orderRate,
+                                    plNumeric: d.plNumeric
+                                });
+                            }
+                        }
+                    }
+
+                    // 2. Harvest visible DOM rows
+                    harvestDomRows();
+
+                    // 3. Progressive scroll loop to harvest all virtualized rows
+                    const findScrollParent = (node) => {
+                        if (!node) return null;
+                        let parent = node.parentElement;
+                        while (parent && parent !== document.body) {
+                            const style = window.getComputedStyle(parent);
+                            if (/(auto|scroll)/.test(style.overflow + style.overflowY)) {
+                                return parent;
+                            }
+                            parent = parent.parentElement;
+                        }
+                        return null;
+                    };
+
+                    if (initialRows.length > 0) {
+                        const scrollContainer = findScrollParent(initialRows[0]);
+                        if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight) {
+                            let lastScrollTop = -1;
+                            let noNewCount = 0;
+                            while (scrollContainer.scrollTop !== lastScrollTop && noNewCount < 6) {
+                                lastScrollTop = scrollContainer.scrollTop;
+                                scrollContainer.scrollTop += 300;
+                                await new Promise(r => setTimeout(r, 120));
+                                const prevSize = dealsMap.size;
+                                harvestDomRows();
+                                if (dealsMap.size === prevSize) {
+                                    noNewCount++;
+                                } else {
+                                    noNewCount = 0;
+                                }
+                            }
+                            scrollContainer.scrollTop = 0;
+                        }
+                    }
+
+                    const deals = Array.from(dealsMap.values());
 
                     const summary = {};
                     const elBalance = document.getElementById('accSummaryAccountBalance');
