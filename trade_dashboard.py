@@ -12310,15 +12310,8 @@ def _process_position_import(req):
         if not is_fix_2 and not is_ifx_2:
             pos2_raw = [p for p in pos2_raw if (match_blank and not p.get("comment", "").strip()) or any(cp in p.get("comment", "") for cp in comment_parts)]
 
-    # Sort both sides by open time DESCENDING (newest first).
-    # This ensures that newest tickets (likely true hedge pairs) match at the
-    # same fill index, while unpaired excess on the larger side ends up at the
-    # END of the list — so imbalance rebalance closes the oldest unpaired
-    # tickets that have NO counterpart, preventing cascade paired-closes.
-    pos1 = sorted(pos1_raw, key=lambda p: p.get("open_epoch") or 0, reverse=True)
-    pos2 = sorted(pos2_raw, key=lambda p: p.get("open_epoch") or 0, reverse=True)
-
-    if not pos1 and not pos2:
+    # Check if any positions remain
+    if not pos1_raw and not pos2_raw:
         msg = "No matching positions found on either account"
         if comment_filter:
             msg += f" (comment filter: '{comment_filter}')"
@@ -12328,29 +12321,35 @@ def _process_position_import(req):
         return {"error": msg, "acct1_total": len(req["received"].get(acct1, [])),
                 "acct2_total": len(req["received"].get(acct2, []))}
 
-    # Determine pair from positions
-    pair = pair_filter
-    if not pair:
-        if pos1:
-            pair = pos1[0].get("symbol", "UNKNOWN")
-        elif pos2:
-            pair = pos2[0].get("symbol", "UNKNOWN")
+    def _clean_sym(s):
+        return str(s or "").upper().replace("/", "").replace(".", "").replace(" ", "").replace("-", "")
 
-    # Determine lot size (use the first position's lot size as reference)
-    lot_size = 0.01
-    if pos1:
-        lot_size = pos1[0].get("lots", 0.01)
-    elif pos2:
-        lot_size = pos2[0].get("lots", 0.01)
+    # Group positions by distinct currency pairs so different symbols never mix into one session
+    if pair_filter:
+        pairs_to_process = [pair_filter]
+    else:
+        seen = {}
+        for p in pos1_raw + pos2_raw:
+            raw_s = p.get("symbol", "").strip()
+            c = _clean_sym(raw_s)
+            if c and c not in seen:
+                seen[c] = raw_s
+        pairs_to_process = list(seen.values())
+        if not pairs_to_process:
+            pairs_to_process = ["UNKNOWN"]
 
-    # Determine sides (buy/sell) from actual positions
-    side1_action = pos1[0].get("side", "buy") if pos1 else "buy"
-    side2_action = pos2[0].get("side", "sell") if pos2 else "sell"
+    # Use short login numbers for comments (long account IDs get truncated by MT4/MT5)
+    def _short_name(acc):
+        if mt_direct_manager and acc in mt_direct_manager.accounts:
+            return str(mt_direct_manager.accounts[acc].config.get('login', acc))
+        if 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
+            return str(iforex_manager.accounts[acc].account_number or acc)
+        import re
+        m = re.search(r'(\d+)$', acc)
+        return m.group(1) if m else acc
 
-    # Determine match mode — auto-upgrade to 'lots' for netting-mode accounts.
-    # Netting brokers (e.g. Dukascopy) expose ONE aggregate position per symbol
-    # regardless of how many incremental orders were placed. Per-ticket matching
-    # is meaningless; lot-volume comparison is the only valid reconciliation method.
+    comment = comment_filter if comment_filter else f"{_short_name(acct1)}-{_short_name(acct2)}"
+
     match_mode = req.get("match_mode", "ticket")  # "ticket" or "lots"
     _acct1_netting = ea_account_info.get(acct1, {}).get("netting_mode", False)
     _acct2_netting = ea_account_info.get(acct2, {}).get("netting_mode", False)
@@ -12358,20 +12357,15 @@ def _process_position_import(req):
         match_mode = "lots"
         app.logger.info("[IMPORT] Netting-mode account detected — forcing match_mode=lots")
 
-    # For netting accounts with an aggregate position, split it into virtual fills
-    # of lot_size each so the hedge monitor's virtual-ticket ledger is populated.
-    # Example: Dukascopy shows 1 SELL position of 0.10 lots → 10 virtual fills of 0.01.
-    # This lets the cascade close individual increments (each sends a 0.01-lot opposing order).
     def _split_netting_position(positions, lot_size_ref, other_count):
         """If positions is a single aggregate, split into virtual fills matching other_count."""
         if len(positions) != 1:
-            return positions  # Already individual positions or empty — no split needed
+            return positions
         agg = positions[0]
         agg_lots = round(agg.get("lots", 0), 4)
-        # Determine increment size: use lot_size_ref, fall back to agg_lots / other_count
         inc = round(lot_size_ref, 4) if lot_size_ref > 0 else round(agg_lots / max(other_count, 1), 4)
         if inc <= 0:
-            return positions  # Can't split
+            return positions
         n = round(agg_lots / inc)
         if n <= 1:
             return positions
@@ -12380,7 +12374,7 @@ def _process_position_import(req):
         virtual = []
         for vi in range(n):
             virtual.append({
-                "ticket": f"{agg.get('ticket', 0)}_v{vi}",  # virtual ticket ID
+                "ticket": f"{agg.get('ticket', 0)}_v{vi}",
                 "symbol": agg.get("symbol", ""),
                 "lots": inc,
                 "side": agg.get("side", "sell"),
@@ -12391,165 +12385,191 @@ def _process_position_import(req):
             })
         return virtual
 
-    # Calculate total lots per side (needed for lot-mode, useful for display either way)
-    total_lots_1 = round(sum(p.get("lots", 0) for p in pos1), 4)
-    total_lots_2 = round(sum(p.get("lots", 0) for p in pos2), 4)
-
-    # Determine lot_size before splitting so we can use it as the increment
-    lot_size = 0.01
-    if pos1 and not _acct1_netting:
-        lot_size = pos1[0].get("lots", 0.01)
-    elif pos2 and not _acct2_netting:
-        lot_size = pos2[0].get("lots", 0.01)
-    # Do not fallback to pos1/pos2 if they are netting, as they represent aggregate
-    # positions. We keep the default lot_size (0.01) so the aggregate is split into
-    # the smallest safe increments.
-    app.logger.info("[IMPORT] Raw lots: pos1[0]=%s pos2[0]=%s → lot_size=%.4f",
-                    pos1[0].get('lots') if pos1 else 'N/A',
-                    pos2[0].get('lots') if pos2 else 'N/A',
-                    lot_size)
-
-    # Split netting aggregate positions into virtual fills
-    if _acct1_netting:
-        pos1 = _split_netting_position(pos1, lot_size, len(pos2))
-    if _acct2_netting:
-        pos2 = _split_netting_position(pos2, lot_size, len(pos1))
-
-    # Match positions — logic depends on match mode
-    if match_mode == "lots":
-        # Lot-based matching: balanced when total lots match
-        is_balanced = abs(total_lots_1 - total_lots_2) < 0.001
-        matched = round(min(total_lots_1, total_lots_2), 4)  # matched lots
-    else:
-        # Ticket-by-ticket: balanced when position counts match
-        matched = min(len(pos1), len(pos2))
-        is_balanced = len(pos1) == len(pos2)
-    total_positions = max(len(pos1), len(pos2))  # Use max — allow one-sided imports
-
-    # Use short login numbers for comments (long account IDs get truncated by MT4/MT5)
-    def _short_name(acc):
-        if mt_direct_manager and acc in mt_direct_manager.accounts:
-            return str(mt_direct_manager.accounts[acc].config.get('login', acc))
-        if 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
-            return str(iforex_manager.accounts[acc].account_number or acc)
-        # For EA Poll/Manual: extract trailing account number
-        import re
-        m = re.search(r'(\d+)$', acc)
-        return m.group(1) if m else acc
-    comment = comment_filter if comment_filter else f"{_short_name(acct1)}-{_short_name(acct2)}"
-    sid = str(uuid.uuid4())
+    created_sessions = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Use actual symbol names from positions for per-side pairs (e.g., USDCHF.b vs USDCHF)
-    pair1 = pos1[0].get("symbol", pair) if pos1 else pair
-    pair2 = pos2[0].get("symbol", pair) if pos2 else pair
-    sides = {
-        acct1: {"action": side1_action, "pair": pair1, "lot_size": lot_size, "comment": comment, "side_number": 1, "max_spread": 0},
-        acct2: {"action": side2_action, "pair": pair2, "lot_size": lot_size, "comment": comment, "side_number": 2, "max_spread": 0},
-    }
+    for curr_pair in pairs_to_process:
+        pos1_pair = [p for p in pos1_raw if _sym_match(p.get("symbol", ""), curr_pair)]
+        pos2_pair = [p for p in pos2_raw if _sym_match(p.get("symbol", ""), curr_pair)]
 
-    session = {
-        "id": sid,
-        "strategy_id": strategy_id,
-        "pair": pair,
-        "lot_size": lot_size,
-        "total_positions": total_positions,
-        "max_spread_points": 0,
-        "max_errors": 1,
-        "trade_pause": 0.0,
-        "diff_to_open": None,
-        "diff_to_close": 0,
-        "max_accum_lots": 0.0,
-        "max_accum_deals": 0,
-        "comment": comment,
-        "execution_order": "simultaneous",
-        "sides": sides,
-        "status": "paused",
-        "filled": {acct1: len(pos1), acct2: len(pos2)},
-        "closed": {acct1: 0, acct2: 0},
-        "close_count": None,
-        "action": "monitor",
-        "created_at": now,
-        "updated_at": now,
-        "errors": {acct1: [], acct2: []},
-        "spread_rejects": {acct1: 0, acct2: 0},
-        "rollback_needed": {},
-        "last_trade_ts": {},
-        "max_ticks_per_5s": 0,
-        "max_price_jump": 0,
-        "require_diff_skew_open": "",
-        "require_diff_skew_close": "",
-        "avoid_news": False,
-        "fills": [],
-        "close_fills": [],
-        "imported": True,  # Flag to indicate imported session
-        "match_mode": match_mode,  # "ticket" or "lots"
-    }
+        if not pos1_pair and not pos2_pair:
+            continue
 
-    # Lot-mode: track total lots and closed lots per side
-    if match_mode == "lots":
-        session["filled_lots"] = {acct1: total_lots_1, acct2: total_lots_2}
-        session["closed_lots"] = {acct1: 0.0, acct2: 0.0}
+        # Sort both sides by open time DESCENDING (newest first).
+        pos1 = sorted(pos1_pair, key=lambda p: p.get("open_epoch") or 0, reverse=True)
+        pos2 = sorted(pos2_pair, key=lambda p: p.get("open_epoch") or 0, reverse=True)
 
-    # Add fills in chronological order, interleaving accounts.
-    # pair_index ties each acct1 fill to its acct2 counterpart so the
-    # hedge monitor can find the correct paired ticket even after
-    # imbalance rebalance shifts per-account indices.
-    for i in range(total_positions):
-        if i < len(pos1):
-            p = pos1[i]
-            session["fills"].append({
-                "account": acct1,
-                "ticket": _normalize_ticket(p.get("ticket", 0)),
-                "price": p.get("open_price", p.get("price")),
-                "quote_price": p.get("open_price", p.get("price")),
-                "spread": None,
-                "ts": p.get("open_time", now),
-                "ts_epoch": p.get("open_epoch", time.time()),
-                "lots": float(p.get("lots") or lot_size),
-                "cmd_ts": None,
-                "imported": True,
-                "pair_index": i,
-            })
-        if i < len(pos2):
-            p = pos2[i]
-            session["fills"].append({
-                "account": acct2,
-                "ticket": _normalize_ticket(p.get("ticket", 0)),
-                "price": p.get("open_price", p.get("price")),
-                "quote_price": p.get("open_price", p.get("price")),
-                "spread": None,
-                "ts": p.get("open_time", now),
-                "ts_epoch": p.get("open_epoch", time.time()),
-                "lots": float(p.get("lots") or lot_size),
-                "cmd_ts": None,
-                "imported": True,
-                "pair_index": i,
-            })
+        pair = curr_pair
+        if not pair or pair == "UNKNOWN":
+            if pos1:
+                pair = pos1[0].get("symbol", "UNKNOWN")
+            elif pos2:
+                pair = pos2[0].get("symbol", "UNKNOWN")
 
-    sessions[sid] = session
+        pair_clean = _clean_sym(pair)
+
+        # Determine lot size
+        lot_size = 0.01
+        if pos1 and not _acct1_netting:
+            lot_size = pos1[0].get("lots", 0.01)
+        elif pos2 and not _acct2_netting:
+            lot_size = pos2[0].get("lots", 0.01)
+
+        side1_action = pos1[0].get("side", "buy") if pos1 else "buy"
+        side2_action = pos2[0].get("side", "sell") if pos2 else "sell"
+
+        total_lots_1 = round(sum(p.get("lots", 0) for p in pos1), 4)
+        total_lots_2 = round(sum(p.get("lots", 0) for p in pos2), 4)
+
+        if _acct1_netting:
+            pos1 = _split_netting_position(pos1, lot_size, len(pos2))
+        if _acct2_netting:
+            pos2 = _split_netting_position(pos2, lot_size, len(pos1))
+
+        if match_mode == "lots":
+            is_balanced = abs(total_lots_1 - total_lots_2) < 0.001
+            matched = round(min(total_lots_1, total_lots_2), 4)
+        else:
+            matched = min(len(pos1), len(pos2))
+            is_balanced = len(pos1) == len(pos2)
+        total_positions = max(len(pos1), len(pos2))
+
+        sid = str(uuid.uuid4())
+        pair1 = pos1[0].get("symbol", pair) if pos1 else pair
+        pair2 = pos2[0].get("symbol", pair) if pos2 else pair
+        sides = {
+            acct1: {"action": side1_action, "pair": pair1, "lot_size": lot_size, "comment": comment, "side_number": 1, "max_spread": 0},
+            acct2: {"action": side2_action, "pair": pair2, "lot_size": lot_size, "comment": comment, "side_number": 2, "max_spread": 0},
+        }
+
+        session = {
+            "id": sid,
+            "strategy_id": strategy_id,
+            "pair": pair_clean,
+            "lot_size": lot_size,
+            "total_positions": total_positions,
+            "max_spread_points": 0,
+            "max_errors": 1,
+            "trade_pause": 0.0,
+            "diff_to_open": None,
+            "diff_to_close": 0,
+            "max_accum_lots": 0.0,
+            "max_accum_deals": 0,
+            "comment": comment,
+            "execution_order": "simultaneous",
+            "sides": sides,
+            "status": "paused",
+            "filled": {acct1: len(pos1), acct2: len(pos2)},
+            "closed": {acct1: 0, acct2: 0},
+            "close_count": None,
+            "action": "monitor",
+            "created_at": now,
+            "updated_at": now,
+            "errors": {acct1: [], acct2: []},
+            "spread_rejects": {acct1: 0, acct2: 0},
+            "rollback_needed": {},
+            "last_trade_ts": {},
+            "max_ticks_per_5s": 0,
+            "max_price_jump": 0,
+            "require_diff_skew_open": "",
+            "require_diff_skew_close": "",
+            "avoid_news": False,
+            "fills": [],
+            "close_fills": [],
+            "imported": True,
+            "match_mode": match_mode,
+        }
+
+        if match_mode == "lots":
+            session["filled_lots"] = {acct1: total_lots_1, acct2: total_lots_2}
+            session["closed_lots"] = {acct1: 0.0, acct2: 0.0}
+
+        for i in range(total_positions):
+            if i < len(pos1):
+                p = pos1[i]
+                session["fills"].append({
+                    "account": acct1,
+                    "ticket": _normalize_ticket(p.get("ticket", 0)),
+                    "price": p.get("open_price", p.get("price")),
+                    "quote_price": p.get("open_price", p.get("price")),
+                    "spread": None,
+                    "ts": p.get("open_time", now),
+                    "ts_epoch": p.get("open_epoch", time.time()),
+                    "lots": float(p.get("lots") or lot_size),
+                    "cmd_ts": None,
+                    "imported": True,
+                    "pair_index": i,
+                })
+            if i < len(pos2):
+                p = pos2[i]
+                session["fills"].append({
+                    "account": acct2,
+                    "ticket": _normalize_ticket(p.get("ticket", 0)),
+                    "price": p.get("open_price", p.get("price")),
+                    "quote_price": p.get("open_price", p.get("price")),
+                    "spread": None,
+                    "ts": p.get("open_time", now),
+                    "ts_epoch": p.get("open_epoch", time.time()),
+                    "lots": float(p.get("lots") or lot_size),
+                    "cmd_ts": None,
+                    "imported": True,
+                    "pair_index": i,
+                })
+
+        sessions[sid] = session
+        created_sessions.append({
+            "session_id": sid,
+            "pair": pair_clean,
+            "acct1_positions": len(pos1),
+            "acct1_side": side1_action,
+            "acct2_positions": len(pos2),
+            "acct2_side": side2_action,
+            "matched_pairs": matched,
+            "total_positions": total_positions,
+            "balanced": is_balanced,
+            "comment": comment,
+        })
+
+        status = "balanced" if is_balanced else "UNBALANCED"
+        _log_event(sid, "", "import_complete",
+                   f"{pair_clean} {status}: {acct1}={len(pos1)} {side1_action} / {acct2}={len(pos2)} {side2_action} "
+                   f"({matched} matched pairs) comment='{comment}'")
+
+    if not created_sessions:
+        msg = "No matching positions found on either account"
+        if comment_filter:
+            msg += f" (comment filter: '{comment_filter}')"
+        if pair_filter:
+            msg += f" (pair filter: '{pair_filter}')"
+        _log_event(None, "", "import_empty", msg)
+        return {"error": msg, "acct1_total": len(req["received"].get(acct1, [])),
+                "acct2_total": len(req["received"].get(acct2, []))}
+
     _save_sessions()
+
+    primary = created_sessions[0]
+    total_pos = sum(s["total_positions"] for s in created_sessions)
+    total_matched = sum(s["matched_pairs"] for s in created_sessions)
+    all_balanced = all(s["balanced"] for s in created_sessions)
+    pair_names = ", ".join(s["pair"] for s in created_sessions)
 
     result = {
         "ok": True,
-        "session_id": sid,
-        "pair": pair,
+        "session_id": primary["session_id"],
+        "session_ids": [s["session_id"] for s in created_sessions],
+        "pair": pair_names,
         "acct1": acct1,
-        "acct1_positions": len(pos1),
-        "acct1_side": side1_action,
+        "acct1_positions": sum(s["acct1_positions"] for s in created_sessions),
+        "acct1_side": primary["acct1_side"],
         "acct2": acct2,
-        "acct2_positions": len(pos2),
-        "acct2_side": side2_action,
-        "matched_pairs": matched,
-        "total_positions": total_positions,
-        "balanced": is_balanced,
-        "comment": comment,
+        "acct2_positions": sum(s["acct2_positions"] for s in created_sessions),
+        "acct2_side": primary["acct2_side"],
+        "matched_pairs": total_matched,
+        "total_positions": total_pos,
+        "balanced": all_balanced,
+        "comment": primary["comment"],
+        "sessions_created": len(created_sessions),
     }
-
-    status = "balanced" if is_balanced else "UNBALANCED"
-    _log_event(sid, "", "import_complete",
-               f"{pair} {status}: {acct1}={len(pos1)} {side1_action} / {acct2}={len(pos2)} {side2_action} "
-               f"({matched} matched pairs) comment='{comment}'")
     print(f"[IMPORT] Completed: {result}")
     return result
 
