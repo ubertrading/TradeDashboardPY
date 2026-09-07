@@ -323,6 +323,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                     amt = float(amt_str)
                 except ValueError:
                     amt = 1000.0
+                lots = notional_to_lots(sym, amt)
                 # parse open time
                 raw_time = str(d.get("exeTime") or "").strip()
                 open_time_str = raw_time
@@ -330,7 +331,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 if raw_time:
                     for fmt in ("%d/%m/%y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%y %H:%M:%S"):
                         try:
-                            from datetime import timezone
+                            from datetime import datetime, timezone
                             dt = datetime.strptime(raw_time, fmt)
                             open_epoch = dt.replace(tzinfo=timezone.utc).timestamp()
                             open_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")

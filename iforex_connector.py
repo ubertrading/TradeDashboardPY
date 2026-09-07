@@ -440,7 +440,15 @@ class IForexAccount:
         """
         positions = []
         try:
+            # 1. Check cached orders or wait briefly if background sync is actively populating
             orders = self._get_open_orders()
+            if not orders:
+                for _ in range(12):
+                    time.sleep(0.5)
+                    orders = self._get_open_orders()
+                    if orders:
+                        break
+            # 2. If still empty, attempt direct fetch
             if not orders:
                 try:
                     from iforex_auto_login import fetch_active_deals_and_summary
@@ -732,9 +740,11 @@ class IForexAccount:
                             info["last_update"] = now_t
                             if "ea_heartbeats" in self.dd:
                                 self.dd["ea_heartbeats"][self.account_id] = now_t
+                        logger.info("[%s] Position sync: updated %d open positions (tickets: %s)",
+                                    self.account_id, len(deals), [d.get("Ticket") for d in deals])
 
             except Exception as e:
-                logger.debug("[%s] Position sync error: %s", self.account_id, e)
+                logger.warning("[%s] Position sync error: %s", self.account_id, e)
 
             # Sleep between position synchronization passes
             time.sleep(5.0)
