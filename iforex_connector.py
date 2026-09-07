@@ -437,6 +437,10 @@ class IForexAccount:
                     item = res_json[0] if isinstance(res_json[0], dict) else {}
                     item_status = item.get("status")
                     item_result = str(item.get("result", ""))
+                    if item_result == "OrderError8":
+                        logger.info("[%s] CloseDeals ticket %s was already closed on broker (OrderError8) — treating as closed",
+                                    self.account_id, position_number)
+                        return {"status": "ok", "already_closed": True, "data": res_json, "raw": resp.text}
                     if item_status == 0 or item_result.startswith("OrderError"):
                         logger.warning("[%s] CloseDeals returned iFOREX error: status=%s result=%s (ticket=%s)",
                                         self.account_id, item_status, item_result, position_number)

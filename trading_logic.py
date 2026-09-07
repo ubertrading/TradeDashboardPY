@@ -463,8 +463,8 @@ def _should_issue_command(session, account):
         except (ValueError, TypeError):
             print(f"[CYCLE-DBG] acct={account}: cycle_days invalid (value={repr(cycle_days)})")
             return False
-        if cycle_days <= 0:
-            print(f"[CYCLE-DBG] acct={account}: cycle_days <= 0 (value={cycle_days})")
+        if cycle_days < 0:
+            print(f"[CYCLE-DBG] acct={account}: cycle_days < 0 (value={cycle_days})")
             return False
 
         # BUG FIX: Always search from index 0 to avoid skipping positions.

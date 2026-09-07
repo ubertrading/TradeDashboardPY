@@ -7986,6 +7986,18 @@ def _should_issue_command(session, account):
                     except Exception:
                         pass
             if not (bid > 0 and ask > 0):
+                # Fallback: try iFOREX connector
+                if 'iforex_manager' in globals() and iforex_manager and account in iforex_manager.accounts and instrument:
+                    try:
+                        if_acct = iforex_manager.accounts.get(account)
+                        if if_acct:
+                            q = if_acct.get_quote(instrument)
+                            if q and q[0] > 0 and q[1] > 0:
+                                bid, ask = q[0], q[1]
+                                stored_spread = round((ask - bid) * (1000 if "JPY" in instrument else 100000), 1)
+                    except Exception:
+                        pass
+            if not (bid > 0 and ask > 0):
                 # Last fallback: ea_account_info (may be wrong instrument)
                 bid = ea_info.get("bid", 0)
                 ask = ea_info.get("ask", 0)
