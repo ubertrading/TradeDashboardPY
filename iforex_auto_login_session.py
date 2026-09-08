@@ -27,9 +27,10 @@ def main():
     print("Opening Microsoft Edge window...")
     
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
+        from iforex_auto_login import launch_browser_context
+        context = launch_browser_context(
+            p,
             user_data_dir=PROFILE_DIR,
-            channel="msedge",
             headless=False,
             viewport=None,
             args=["--start-maximized"]

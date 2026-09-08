@@ -992,7 +992,8 @@ class MT4DirectAccount:
                     "symbol": o.get('Symbol', ''),
                     "comment": o.get('Comment', ''),
                     "open_epoch": oe,
-                    "open_price": float(o.get('OpenPrice', 0.0)),
+                    "lots": float(o.get('Lots', 0.0) or 0.0),
+                    "open_price": float(o.get('OpenPrice', 0.0) or 0.0),
                 })
             info["position_details"] = pos_details
             info["last_update"] = time.time()
@@ -2649,7 +2650,8 @@ class MT5DirectAccount:
                     "symbol": o.get('Symbol', ''),
                     "comment": o.get('Comment', ''),
                     "open_epoch": oe,
-                    "open_price": float(o.get('OpenPrice', 0.0)),
+                    "lots": float(o.get('Lots', 0.0) or 0.0),
+                    "open_price": float(o.get('OpenPrice', 0.0) or 0.0),
                 })
             info["position_details"] = pos_details
             info["last_update"] = time.time()

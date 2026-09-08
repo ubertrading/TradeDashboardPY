@@ -2002,20 +2002,81 @@ def _load_sessions():
 
                 # Auto-repair corrupted session filled counts & mark completed sessions
                 _repaired_any = False
+
+                # 1. Detect and purge cross-session stolen tickets (tickets duplicated across sessions)
+                ticket_map = {}
+                for sid, s in sessions.items():
+                    created_at = s.get('created_at', '')
+                    sess_lots = float(s.get('lot_size') or 0.0)
+                    for idx, f in enumerate(s.get('fills', [])):
+                        acc = f.get('account')
+                        raw_t = f.get('ticket')
+                        if not acc or not raw_t:
+                            continue
+                        tk = str(raw_t).strip().rstrip('.0')
+                        f_lots = float(f.get('lots') or 0.0)
+                        lots_match = abs(f_lots - sess_lots) < 0.0001 if sess_lots > 0 and f_lots > 0 else True
+                        is_ah = f.get('auto_healed', False)
+                        ticket_map.setdefault((acc, tk), []).append({
+                            'sid': sid,
+                            'idx': idx,
+                            'is_auto_healed': is_ah,
+                            'created_at': created_at,
+                            'lots_match': lots_match,
+                            'f': f
+                        })
+
+                purged_per_session = {}
+                for (acc, tk), entries in ticket_map.items():
+                    if len(entries) > 1:
+                        def _score(e):
+                            return (
+                                0 if not e['is_auto_healed'] else 1,
+                                0 if e['lots_match'] else 1,
+                                e['created_at']
+                            )
+                        sorted_entries = sorted(entries, key=_score)
+                        winner = sorted_entries[0]
+                        for loser in sorted_entries[1:]:
+                            purged_per_session.setdefault(loser['sid'], set()).add(loser['idx'])
+                            app.logger.warning(
+                                "Auto-repair: purging duplicate ticket %s on %s from session %s (rightful owner: %s)",
+                                tk, acc, loser['sid'][:8], winner['sid'][:8]
+                            )
+
+                for sid, remove_indices in purged_per_session.items():
+                    s = sessions[sid]
+                    new_fills = [f for idx, f in enumerate(s.get('fills', [])) if idx not in remove_indices]
+                    s['fills'] = new_fills
+                    _repaired_any = True
+
+                # 2. Resync filled counts with valid fills across all sessions
                 for sid, s in sessions.items():
                     sides = s.get("sides", {})
-                    if s.get("imported") and sides:
+                    if sides and s.get("fills"):
                         for acc in sides:
                             acct_fills = [f for f in s.get("fills", []) if f.get("account") == acc]
                             actual_cnt = len(acct_fills)
                             cur_filled = s.get("filled", {}).get(acc, 0)
-                            if actual_cnt > 0 and cur_filled != actual_cnt:
+                            if cur_filled != actual_cnt:
                                 app.logger.warning(
-                                    "Auto-repaired corrupted filled count for imported session %s account %s: %d -> %d",
+                                    "Auto-repaired corrupted filled count for session %s account %s: %d -> %d",
                                     sid[:8], acc, cur_filled, actual_cnt
                                 )
                                 s.setdefault("filled", {})[acc] = actual_cnt
                                 _repaired_any = True
+
+                    # 3. Clean up false rollback if filled counts are now balanced
+                    if s.get("rollback_needed"):
+                        f_counts = [s.get("filled", {}).get(a, 0) for a in sides]
+                        if len(f_counts) > 1 and len(set(f_counts)) <= 1:
+                            app.logger.warning(
+                                "Auto-repair: cleared false pending rollback for session %s as fills are balanced (%s)",
+                                sid[:8], f_counts
+                            )
+                            s["rollback_needed"] = {}
+                            s["rollback_tickets"] = {}
+                            _repaired_any = True
                     
                     # Auto-complete sessions where all filled positions are closed
                     # SAFETY GUARD: do not complete if closed count relies on unverified external closes
@@ -6048,9 +6109,25 @@ def _run_hedge_monitor_all():
                 expected_open = set(acct_fill_tickets) - acct_close_tickets - pending_rb_tickets
 
                 # ── AUTO-HEAL UNTRACKED TICKETS ──────────────────────────────
+                # Exclude tickets that are already tracked by ANY OTHER session on this account
+                other_claimed_tickets = set()
+                for other_sid, other_sess in sessions.items():
+                    if other_sid == sid:
+                        continue
+                    other_closed = set(
+                        _normalize_ticket(cf.get("ticket"))
+                        for cf in other_sess.get("close_fills", [])
+                        if cf.get("account") == account and cf.get("ticket") is not None
+                    )
+                    for f in other_sess.get("fills", []):
+                        if f.get("account") == account and f.get("ticket") is not None:
+                            norm_t = _normalize_ticket(f.get("ticket"))
+                            if norm_t not in other_closed:
+                                other_claimed_tickets.add(norm_t)
+
                 # If the broker has tickets that belong to this session but are NOT in expected_open,
                 # auto-import them to recover from missed trade_result callbacks or manual intervention.
-                untracked = ea_open_tickets - expected_open
+                untracked = (ea_open_tickets - expected_open) - other_claimed_tickets
                 if untracked and "position_details" in info:
                     for t in list(untracked):
                         for pos in info["position_details"]:
@@ -6086,12 +6163,29 @@ def _run_hedge_monitor_all():
                                 )
                                 
                                 if pair_matches and (is_waiting_limit or (sess_id_short in comment) or (sess_comment and (sess_comment in comment or (len(comment) >= 10 and comment in sess_comment)))):
-                                    print(f"[AUTO-HEAL] Found untracked ticket {t} ({symbol}) for session {sess_id_short} on {account} (is_waiting_limit={is_waiting_limit})")
-                                    
                                     # Fallback to session lot size if not provided
                                     heal_lots = session.get("sides", {}).get(account, {}).get("lot_size")
                                     if not heal_lots:
                                         heal_lots = session.get("lot_size", 0.01)
+                                    try:
+                                        heal_lots = float(heal_lots)
+                                    except (ValueError, TypeError):
+                                        heal_lots = 0.01
+
+                                    # Lot size guard: if pos has lots information, reject if it does not match this session's lot size
+                                    pos_lots = float(pos.get("lots", 0.0) or 0.0)
+                                    if pos_lots > 0 and heal_lots > 0 and abs(pos_lots - heal_lots) > 0.0001:
+                                        continue
+
+                                    # Over-fill guard: do not auto-heal into a session if it has already reached total_positions
+                                    # (unless in active cycle_limit phase where an open was explicitly dispatched)
+                                    sess_total_pos = session.get("total_positions")
+                                    if sess_total_pos is not None and sess_total_pos > 0 and not is_waiting_limit:
+                                        cur_open_pos = len(expected_open)
+                                        if cur_open_pos >= sess_total_pos:
+                                            continue
+
+                                    print(f"[AUTO-HEAL] Found untracked ticket {t} ({symbol}) for session {sess_id_short} on {account} (is_waiting_limit={is_waiting_limit})")
                                     heal_price = float(pos.get("open_price", 0.0) or 0.0)
                                         
                                     # Check if this is the pending limit fill we're waiting for.
@@ -17693,26 +17787,19 @@ function renderStrategies(strats, sessions) {
       if (s.filled) {
         const a1 = st.account1 || Object.keys(s.filled)[0];
         const a2 = st.account2 || Object.keys(s.filled)[1];
+        const maxPos = s.total_positions || Infinity;
         if (a1) {
           const f1 = s.filled[a1] || 0;
           const c1 = (s.closed && s.closed[a1]) || 0;
-          side1Pos += Math.max(0, f1 - c1);
+          side1Pos += Math.min(Math.max(0, f1 - c1), maxPos);
         }
         if (a2) {
           const f2 = s.filled[a2] || 0;
           const c2 = (s.closed && s.closed[a2]) || 0;
-          side2Pos += Math.max(0, f2 - c2);
+          side2Pos += Math.min(Math.max(0, f2 - c2), maxPos);
         }
       }
     });
-    const info1 = (window._latestEaInfo && window._latestEaInfo[st.account1]) || {};
-    const info2 = (window._latestEaInfo && window._latestEaInfo[st.account2]) || {};
-    if (Array.isArray(info1.open_tickets)) {
-      side1Pos = Math.min(side1Pos, info1.open_tickets.length);
-    }
-    if (Array.isArray(info2.open_tickets)) {
-      side2Pos = Math.min(side2Pos, info2.open_tickets.length);
-    }
     const posDisplay = side1Pos + ' / ' + side2Pos;
     // Enabled checkbox
     const enabledChecked = st.enabled ? 'checked' : '';
