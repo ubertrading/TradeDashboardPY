@@ -610,6 +610,8 @@ class MtBridgeAccount:
                 "symbol": symbol,
                 "comment": p.get("comment", ""),
                 "open_epoch": open_epoch,
+                "lots": float(lots or 0.0),
+                "open_price": float(p.get("open_price", p.get("openPrice", 0)) or 0.0),
             })
 
             # Per-instrument lots breakdown
@@ -693,19 +695,45 @@ class MtBridgeAccount:
             if sess_action in ("open", "close", "close_limit") or sess_action.startswith("cycle_"):
                 continue
 
-            # Count only positions that match this session's pair — NOT all positions on
-            # the account. Accounts can hold multiple instruments simultaneously and using
-            # len(pos_dict) would inflate the GBPCHF session's filled count with USDCHF
-            # positions (and vice versa).
-            sess_pair = (_sess.get("sides", {}).get(aid, {}).get("pair") or _sess.get("pair", "")).upper().strip()
-            if sess_pair:
-                ea_pos = sum(
-                    1 for p in pos_dict.values()
-                    if (p.get("symbol", "") or "").upper().strip().startswith(sess_pair)
-                    or sess_pair.startswith((p.get("symbol", "") or "").upper().strip())
+            # Exclude tickets that are already claimed by OTHER sessions for this account
+            other_claimed_tickets = set()
+            for other_sid, other_sess in sessions_dict.items():
+                if other_sid == _sid:
+                    continue
+                other_closed = set(
+                    str(cf.get("ticket")) for cf in other_sess.get("close_fills", [])
+                    if cf.get("account") == aid and cf.get("ticket") is not None
                 )
-            else:
-                ea_pos = len(pos_dict)
+                for f in other_sess.get("fills", []):
+                    if f.get("account") == aid and f.get("ticket") is not None:
+                        norm_t = str(f.get("ticket"))
+                        if norm_t not in other_closed:
+                            other_claimed_tickets.add(norm_t)
+
+            # Count only positions that match this session's pair, match expected lot size,
+            # and are NOT already claimed by another session on this account.
+            sess_pair = (_sess.get("sides", {}).get(aid, {}).get("pair") or _sess.get("pair", "")).upper().strip()
+            sess_lot_size = float(_sess.get("sides", {}).get(aid, {}).get("lot_size") or _sess.get("lot_size") or 0.0)
+
+            matching_positions = []
+            for tk, p in pos_dict.items():
+                if str(tk) in other_claimed_tickets:
+                    continue
+                sym = (p.get("symbol", "") or "").upper().strip()
+                if sess_pair:
+                    if not (sym.startswith(sess_pair) or sess_pair.startswith(sym)):
+                        continue
+                if sess_lot_size > 0:
+                    p_lots = float(p.get("lots", 0.0) or 0.0)
+                    if p_lots > 0 and abs(p_lots - sess_lot_size) > 0.0001:
+                        continue
+                matching_positions.append(tk)
+
+            ea_pos = len(matching_positions)
+            # Never let auto-sync exceed total_positions for imported sessions
+            sess_total = _sess.get("total_positions")
+            if sess_total is not None and sess_total > 0:
+                ea_pos = min(ea_pos, int(sess_total))
 
             old_filled = _sess.get("filled", {}).get(aid, 0)
             if ea_pos == old_filled:
