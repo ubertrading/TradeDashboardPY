@@ -21,6 +21,34 @@ logger = logging.getLogger("iforex_auto_login")
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_edge_profile")
 _browser_profile_lock = threading.Lock()
 
+def launch_browser_context(p, user_data_dir: str, headless: bool = True, **kwargs):
+    """
+    Launch a persistent Chromium context with automatic fallback:
+    1. 'msedge' (Microsoft Edge)
+    2. 'chrome' (Google Chrome)
+    3. None (Playwright bundled Chromium)
+    """
+    channels = ["msedge", "chrome", None]
+    last_err = None
+    for ch in channels:
+        try:
+            launch_args = dict(kwargs)
+            launch_args["user_data_dir"] = user_data_dir
+            launch_args["headless"] = headless
+            if ch:
+                launch_args["channel"] = ch
+            ctx = p.chromium.launch_persistent_context(**launch_args)
+            logger.debug("Successfully launched browser context using channel '%s'", ch or "bundled chromium")
+            return ctx
+        except Exception as e:
+            last_err = e
+            ch_name = ch or "bundled chromium"
+            logger.warning("Failed launching browser with channel '%s': %s. Trying fallback...", ch_name, e)
+    raise RuntimeError(
+        f"Failed to launch any browser context (tried Edge, Chrome, bundled Chromium). "
+        f"Please install Edge, Chrome, or run 'playwright install chromium'. Error: {last_err}"
+    ) from last_err
+
 def refresh_iforex_session(account_id: str = "12141021",
                            config_dir: str = "configs",
                            username: Optional[str] = None,
@@ -62,16 +90,16 @@ def refresh_iforex_session(account_id: str = "12141021",
     with _browser_profile_lock, sync_playwright() as p:
         try:
             args = ["--start-maximized", "--disable-blink-features=AutomationControlled"] if not headless else ["--disable-blink-features=AutomationControlled"]
-            context = p.chromium.launch_persistent_context(
+            context = launch_browser_context(
+                p,
                 user_data_dir=PROFILE_DIR,
-                channel="msedge",
                 headless=headless,
                 viewport=None,
                 args=args
             )
         except Exception as e:
-            logger.error("Failed to launch Edge persistent context: %s", e)
-            return {"status": "error", "message": f"Failed to launch Edge: {e}"}
+            logger.error("Failed to launch browser persistent context: %s", e)
+            return {"status": "error", "message": f"Failed to launch browser: {e}"}
 
         try:
             page = context.pages[0] if context.pages else context.new_page()
@@ -230,10 +258,10 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
     """
     with _browser_profile_lock, sync_playwright() as p:
         try:
-            context = p.chromium.launch_persistent_context(
+            context = launch_browser_context(
+                p,
                 user_data_dir=PROFILE_DIR,
                 headless=True,
-                channel="msedge",
                 viewport={"width": 1920, "height": 3000},
                 args=["--disable-blink-features=AutomationControlled"]
             )
