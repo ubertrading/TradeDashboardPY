@@ -15945,7 +15945,7 @@ body {
       </div>
       <div class="form-group">
         <label>Password <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
-        <input type="password" id="eifxPassword" placeholder="iFOREX password">
+        <div style="display:flex;align-items:center;gap:4px;"><input type="password" id="eifxPassword" placeholder="iFOREX password" style="flex:1;min-width:0;"><button type="button" onclick="togglePwdVis('eifxPassword',this)" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:1rem;padding:2px 4px;flex-shrink:0;" title="Show/hide password">&#128065;</button></div>
       </div>
       <div class="form-group">
         <label>Leverage</label>
