@@ -805,6 +805,15 @@ class MtBridgeAccount:
 
     def get_symbol_info(self, symbol):
         """Get bid/ask/spread for a symbol."""
+        if not getattr(self, '_connected', False):
+            return None
+        now = time.time()
+        if not hasattr(self, '_quote_cache'):
+            self._quote_cache = {}
+        cached = self._quote_cache.get(symbol)
+        if cached and (now - cached.get("ts", 0)) < 1.0:
+            return cached.get("data")
+
         encoded = urllib.parse.quote(symbol, safe='')
         result = _get(f"/api/accounts/{self.account_id}/quote/{encoded}", timeout=2)
         if result and "error" in result:
@@ -812,9 +821,12 @@ class MtBridgeAccount:
             # Suppress high-severity error logs for expected transient states during quote polling (404, timeouts, or disconnected bridge)
             if not any(k in err_str.lower() for k in ("404", "timed out", "unreachable", "not connected")):
                 logger.warning(f"[{self.account_id}] Bridge quote error for {symbol}: {err_str}")
+            self._quote_cache[symbol] = {"data": None, "ts": now}
             return None
         if result:
+            self._quote_cache[symbol] = {"data": result, "ts": now}
             return result
+        self._quote_cache[symbol] = {"data": None, "ts": now}
         return None
 
     def get_quote_direct(self, symbol):

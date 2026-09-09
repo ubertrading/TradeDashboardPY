@@ -8731,8 +8731,15 @@ def _calc_curr_diff(session, direction):
         elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
             iforex_acct = iforex_manager.accounts.get(acc)
 
+        # Check direct quote cache first if fresh (< 2.0s) to avoid redundant broker calls
+        cached = _direct_quote_cache.get((acc, pair_i))
+        if cached and (time.time() - cached.get("ts", 0)) < 2.0:
+            q_bid, q_ask = cached["bid"], cached["ask"]
+            got_quote = True
+            quote_src = "direct_cache_fresh"
+
         # 0. iFOREX Direct quote lookup
-        if iforex_acct and pair_i:
+        if not got_quote and iforex_acct and pair_i:
             q = iforex_acct.get_quote(pair_i, allow_live=False)
             if q:
                 q_bid, q_ask = q[0], q[1]
@@ -10910,7 +10917,15 @@ def api_status():
                 elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
                     direct_acct = iforex_manager.accounts.get(acc)
                 got_direct = False
-                if direct_acct and side_pair:
+                cached = _direct_quote_cache.get((acc, side_pair))
+                if cached and (time.time() - cached.get("ts", 0)) < 5.0:
+                    q_bid, q_ask = cached["bid"], cached["ask"]
+                    sc[f"curr_bid_{sn}"] = q_bid
+                    sc[f"curr_ask_{sn}"] = q_ask
+                    mult = 100 if "JPY" in side_pair.upper() else 10000
+                    sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
+                    got_direct = True
+                if not got_direct and direct_acct and side_pair:
                     if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
                         try:
                             # Non-blocking quote lookup for status polling
