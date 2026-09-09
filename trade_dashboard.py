@@ -11862,6 +11862,37 @@ def add_iforex_account():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/iforex_accounts/auto_extract', methods=['POST'])
+def auto_extract_iforex():
+    """Trigger automated browser session extraction given username & password before or during account setup."""
+    try:
+        data = request.get_json(force=True) or {}
+        username = str(data.get("username", "")).strip() or None
+        password = str(data.get("password", "")).strip() or None
+        account_id = str(data.get("account_id", "")).strip() or "12141021"
+        from iforex_auto_login import refresh_iforex_session
+        res = refresh_iforex_session(
+            account_id=account_id,
+            config_dir=TRADE_CONFIG_DIR,
+            username=username,
+            password=password,
+            timeout_sec=180,
+            headless=False
+        )
+        if res.get("status") == "ok":
+            return jsonify({
+                "ok": True,
+                "message": res.get("message", "Session extracted successfully!"),
+                "account_number": res.get("account_number"),
+                "security_token": res.get("security_token"),
+                "cookie": res.get("cookie")
+            })
+        else:
+            return jsonify({"error": res.get("message", "Extraction failed")}), 400
+    except Exception as e:
+        app.logger.error("Error in auto_extract_iforex: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/iforex_accounts/<account_id>', methods=['DELETE'])
 def remove_iforex_account(account_id):
     """Remove an iFOREX account."""
@@ -15628,7 +15659,7 @@ body {
       </div>
       <div class="form-group">
         <label>Account Number</label>
-        <input type="text" id="ifxAcctNumber" placeholder="e.g. 12279333">
+        <input type="text" id="ifxAcctNumber" placeholder="e.g. 12279333 (or filled by auto-login)">
       </div>
       <div class="form-group">
         <label>Display / Group Label</label>
@@ -15638,13 +15669,24 @@ body {
         <label>Leverage</label>
         <input type="number" id="ifxLeverage" value="400" placeholder="e.g. 400">
       </div>
-      <div class="form-group" style="grid-column: 1 / -1;">
-        <label>Security Token <span style="font-size:0.7rem;color:var(--text2);">(from browser console: <code>window.systemInfo.securityToken</code>)</span></label>
-        <input type="text" id="ifxSecurityToken" placeholder="e.g. 1054717647">
+      <div class="form-group">
+        <label>Username / Email <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
+        <input type="text" id="ifxUsername" placeholder="e.g. 12330940 or email">
+      </div>
+      <div class="form-group">
+        <label>Password <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
+        <input type="password" id="ifxPassword" placeholder="iFOREX password">
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
-        <label>Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(from browser F12 Network tab &rarr; Request Headers &rarr; Cookie)</span></label>
-        <textarea id="ifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;" placeholder="FXnetWeb_identity=...; .AspNetCore.Session=...; TS01d34e12=..."></textarea>
+        <label>Security Token <span style="font-size:0.7rem;color:var(--text2);">(optional &mdash; auto-extracted on login, or from console)</span></label>
+        <input type="text" id="ifxSecurityToken" placeholder="Auto-populated on login, or enter manually: e.g. 1054717647">
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <label style="margin-bottom:0;">Cookie Header <span style="font-size:0.7rem;color:var(--text2);">(optional &mdash; or click Auto-Extract)</span></label>
+          <button type="button" id="btn-auto-extract-add-modal" class="btn btn-primary" style="padding:2px 8px;font-size:0.72rem;" onclick="autoExtractIForexAddModal()">&#x1f511; Auto-Extract from Browser</button>
+        </div>
+        <textarea id="ifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;" placeholder="Leave blank to auto-login using username/password, or paste manually: FXnetWeb_identity=..."></textarea>
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
         <label>Base URL</label>
@@ -22827,6 +22869,8 @@ function showAddIForexModal() {
   document.getElementById('ifxAcctId').value = '';
   document.getElementById('ifxAcctNumber').value = '';
   document.getElementById('ifxLabel').value = '';
+  if (document.getElementById('ifxUsername')) document.getElementById('ifxUsername').value = '';
+  if (document.getElementById('ifxPassword')) document.getElementById('ifxPassword').value = '';
   document.getElementById('ifxLeverage').value = '400';
   document.getElementById('ifxSecurityToken').value = '';
   document.getElementById('ifxCookie').value = '';
@@ -22839,18 +22883,72 @@ function closeAddIForexModal() {
   document.getElementById('addIForexModal').classList.remove('active');
 }
 
+async function autoExtractIForexAddModal() {
+  const username = document.getElementById('ifxUsername') ? document.getElementById('ifxUsername').value.trim() : '';
+  const password = document.getElementById('ifxPassword') ? document.getElementById('ifxPassword').value.trim() : '';
+  const acctId = document.getElementById('ifxAcctId') ? document.getElementById('ifxAcctId').value.trim() : '';
+  const acctNum = document.getElementById('ifxAcctNumber') ? document.getElementById('ifxAcctNumber').value.trim() : '';
+
+  const btn = document.getElementById('btn-auto-extract-add-modal');
+  const origText = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Logging in...';
+  }
+  try {
+    const res = await fetch('/api/iforex_accounts/auto_extract', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        username: username,
+        password: password,
+        account_id: acctId || acctNum || '12141021'
+      })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.cookie) document.getElementById('ifxCookie').value = data.cookie;
+      if (data.security_token) document.getElementById('ifxSecurityToken').value = data.security_token;
+      if (data.account_number && !document.getElementById('ifxAcctNumber').value) {
+        document.getElementById('ifxAcctNumber').value = data.account_number;
+      }
+      if (!document.getElementById('ifxAcctId').value) {
+        document.getElementById('ifxAcctId').value = data.account_number || 'IFOREX_01';
+      }
+      alert('Session extracted successfully! Click "Add Account" to save.');
+    } else {
+      alert('Extraction failed: ' + (data.error || 'Unknown error'));
+    }
+  } catch(e) {
+    alert('Extraction request failed: ' + e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origText;
+    }
+  }
+}
+
 async function addIForexAccount() {
   const id = document.getElementById('ifxAcctId').value.trim();
   if (!id) { alert('Account ID is required'); return; }
-  const cookie = document.getElementById('ifxCookie').value.trim();
-  if (!cookie) { alert('Cookie header is required'); return; }
-  const token = parseInt(document.getElementById('ifxSecurityToken').value.trim()) || 0;
+  const username = document.getElementById('ifxUsername') ? document.getElementById('ifxUsername').value.trim() : '';
+  const password = document.getElementById('ifxPassword') ? document.getElementById('ifxPassword').value.trim() : '';
+  let cookie = document.getElementById('ifxCookie').value.trim();
+  let token = parseInt(document.getElementById('ifxSecurityToken').value.trim()) || 0;
+
+  if (!cookie && (!username || !password)) {
+    alert('Please enter either a Cookie Header OR Username & Password for automatic login.');
+    return;
+  }
 
   const payload = {
     account_id: id,
     account_number: document.getElementById('ifxAcctNumber').value.trim() || id,
     label: document.getElementById('ifxLabel').value.trim() || id,
     group_label: document.getElementById('ifxLabel').value.trim() || id,
+    username: username,
+    password: password,
     cookie: cookie,
     security_token: token,
     base_url: document.getElementById('ifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
@@ -22869,6 +22967,13 @@ async function addIForexAccount() {
     if (data.error) { alert('Error: ' + data.error); return; }
     closeAddIForexModal();
     refreshData();
+
+    // If cookie was empty but credentials were provided, trigger auto-login immediately in background
+    if (!cookie && username && password) {
+      fetch('/api/iforex_accounts/' + encodeURIComponent(id) + '/auto_login', { method: 'POST' })
+        .then(() => refreshData())
+        .catch(() => {});
+    }
   } catch(e) { alert('Failed to add iFOREX account: ' + e); }
 }
 
