@@ -14,7 +14,24 @@ import logging
 import re
 import threading
 from typing import Dict, Any, Optional, Tuple, List
-from playwright.sync_api import sync_playwright
+
+def get_sync_playwright():
+    """Import and return sync_playwright with clear diagnostics if greenlet DLL fails."""
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except Exception as e:
+        msg = str(e)
+        if "_greenlet" in msg or "greenlet" in msg:
+            raise RuntimeError(
+                "Playwright's greenlet module failed to load (_greenlet DLL missing or corrupt). "
+                "Fix by running in terminal: python -m pip install --upgrade --force-reinstall greenlet "
+                "and ensure Microsoft Visual C++ 2015-2022 Redistributable (x64) is installed (https://aka.ms/vs/17/release/vc_redist.x64.exe)."
+            ) from e
+        raise RuntimeError(
+            f"Playwright failed to load: {e}. "
+            "Please run: python -m pip install playwright && playwright install chromium"
+        ) from e
 
 logger = logging.getLogger("iforex_auto_login")
 
@@ -87,7 +104,8 @@ def refresh_iforex_session(account_id: str = "12141021",
     logger.info("Starting iFOREX session refresh for account %s (user=%s, headless=%s)...",
                 account_id, username or "None", headless)
     
-    with _browser_profile_lock, sync_playwright() as p:
+    sync_pw = get_sync_playwright()
+    with _browser_profile_lock, sync_pw() as p:
         try:
             args = ["--start-maximized", "--disable-blink-features=AutomationControlled"] if not headless else ["--disable-blink-features=AutomationControlled"]
             context = launch_browser_context(
@@ -278,7 +296,8 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
     iFOREX WebPL4 interface (React DOM).
     Returns: (deals_list, summary_dict)
     """
-    with _browser_profile_lock, sync_playwright() as p:
+    sync_pw = get_sync_playwright()
+    with _browser_profile_lock, sync_pw() as p:
         try:
             context = launch_browser_context(
                 p,

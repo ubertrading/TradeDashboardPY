@@ -13,7 +13,7 @@ import os
 import json
 import time
 import logging
-from playwright.sync_api import sync_playwright
+from iforex_auto_login import launch_browser_context, get_sync_playwright
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("iforex_auto_session")
@@ -26,8 +26,8 @@ def main():
     print("=" * 60)
     print("Opening Microsoft Edge window...")
     
-    with sync_playwright() as p:
-        from iforex_auto_login import launch_browser_context
+    sync_pw = get_sync_playwright()
+    with sync_pw() as p:
         context = launch_browser_context(
             p,
             user_data_dir=PROFILE_DIR,
