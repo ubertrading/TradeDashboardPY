@@ -1851,6 +1851,16 @@ except Exception as e:
     _iforex_dashboard_data = {}
     app.logger.warning("iforex_connector not available — iFOREX accounts disabled: %s", e)
 
+# Background Playwright / greenlet health check and auto-repair
+def _bg_check_playwright():
+    try:
+        from iforex_auto_login import ensure_playwright_dependencies
+        ensure_playwright_dependencies(auto_repair=True)
+    except Exception:
+        pass
+
+threading.Thread(target=_bg_check_playwright, daemon=True, name="PlaywrightDepCheck").start()
+
 
 # ─── Ticket normalization (MQL4 32-bit overflow fix) ────────────────────────
 def _normalize_ticket(t):

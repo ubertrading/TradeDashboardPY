@@ -15,25 +15,63 @@ import re
 import threading
 from typing import Dict, Any, Optional, Tuple, List
 
+logger = logging.getLogger("iforex_auto_login")
+
+def ensure_playwright_dependencies(auto_repair: bool = True) -> bool:
+    """Check if greenlet and playwright can be imported. If not, auto-install/repair."""
+    try:
+        import greenlet
+        from playwright.sync_api import sync_playwright
+        return True
+    except Exception as e:
+        logger.warning("Playwright/greenlet dependency check failed: %s", e)
+        if not auto_repair:
+            return False
+        try:
+            import subprocess, sys
+            logger.info("Attempting auto-repair of greenlet via pip (%s)...", sys.executable)
+            res = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "greenlet"],
+                capture_output=True, text=True, timeout=120
+            )
+            if res.returncode == 0:
+                logger.info("greenlet reinstalled successfully. Refreshing module cache...")
+                for mod in list(sys.modules.keys()):
+                    if "greenlet" in mod or "playwright" in mod:
+                        sys.modules.pop(mod, None)
+                import greenlet
+                from playwright.sync_api import sync_playwright
+                logger.info("Playwright sync_api verified successfully after auto-repair!")
+                return True
+            else:
+                logger.error("pip install greenlet returned code %d: %s", res.returncode, res.stderr)
+        except Exception as ex:
+            logger.error("Auto-repair error: %s", ex)
+        return False
+
 def get_sync_playwright():
-    """Import and return sync_playwright with clear diagnostics if greenlet DLL fails."""
+    """Import and return sync_playwright, attempting auto-repair if greenlet DLL fails."""
     try:
         from playwright.sync_api import sync_playwright
         return sync_playwright
     except Exception as e:
+        logger.warning("Initial import of playwright.sync_api failed: %s. Trying auto-repair...", e)
+        if ensure_playwright_dependencies(auto_repair=True):
+            try:
+                from playwright.sync_api import sync_playwright
+                return sync_playwright
+            except Exception:
+                pass
         msg = str(e)
         if "_greenlet" in msg or "greenlet" in msg:
             raise RuntimeError(
                 "Playwright's greenlet module failed to load (_greenlet DLL missing or corrupt). "
-                "Fix by running in terminal: python -m pip install --upgrade --force-reinstall greenlet "
-                "and ensure Microsoft Visual C++ 2015-2022 Redistributable (x64) is installed (https://aka.ms/vs/17/release/vc_redist.x64.exe)."
+                "Auto-repair was attempted. If this persists, please install Microsoft Visual C++ 2015-2022 Redistributable (x64) from https://aka.ms/vs/17/release/vc_redist.x64.exe and restart."
             ) from e
         raise RuntimeError(
             f"Playwright failed to load: {e}. "
             "Please run: python -m pip install playwright && playwright install chromium"
         ) from e
-
-logger = logging.getLogger("iforex_auto_login")
 
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_edge_profile")
 _browser_profile_lock = threading.Lock()
