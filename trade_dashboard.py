@@ -7514,7 +7514,7 @@ def _should_issue_command(session, account):
 
             has_live_quotes = bid > 0 and ask > 0
             if has_live_quotes:
-                pip_mult = 100 if "JPY" in instrument else 10000
+                pip_mult = 1000 if "JPY" in (instrument or "").upper() else 100000
                 cur_spread = round((ask - bid) * pip_mult, 1)
             else:
                 cur_spread = stored_spread
@@ -10922,7 +10922,7 @@ def api_status():
                     q_bid, q_ask = cached["bid"], cached["ask"]
                     sc[f"curr_bid_{sn}"] = q_bid
                     sc[f"curr_ask_{sn}"] = q_ask
-                    mult = 100 if "JPY" in side_pair.upper() else 10000
+                    mult = 1000 if "JPY" in side_pair.upper() else 100000
                     sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
                     got_direct = True
                 if not got_direct and direct_acct and side_pair:
@@ -10937,7 +10937,7 @@ def api_status():
                                 q_bid, q_ask = q[0], q[1]
                                 sc[f"curr_bid_{sn}"] = q_bid
                                 sc[f"curr_ask_{sn}"] = q_ask
-                                mult = 100 if "JPY" in side_pair.upper() else 10000
+                                mult = 1000 if "JPY" in side_pair.upper() else 100000
                                 sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
                                 got_direct = True
                         except Exception:

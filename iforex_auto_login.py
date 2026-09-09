@@ -327,6 +327,37 @@ def _parse_currency(val_str: Any):
     return None
 
 
+def _extract_currency_code(val_str: Any) -> Optional[str]:
+    """Detect currency code from strings like '$ 8,997.83', 'Fr. 8,997.83', '€ 500', '1000 USD'."""
+    if not val_str:
+        return None
+    s = str(val_str).replace(chr(160), " ").strip()
+    s_upper = s.upper()
+    if "$" in s:
+        if "CA$" in s_upper or "CAD" in s_upper:
+            return "CAD"
+        if "A$" in s_upper or "AUD" in s_upper:
+            return "AUD"
+        if "NZ$" in s_upper or "NZD" in s_upper:
+            return "NZD"
+        if "HK$" in s_upper or "HKD" in s_upper:
+            return "HKD"
+        if "S$" in s_upper or "SGD" in s_upper:
+            return "SGD"
+        return "USD"
+    if "€" in s or "EUR" in s_upper:
+        return "EUR"
+    if "£" in s or "GBP" in s_upper:
+        return "GBP"
+    if "FR" in s_upper or "CHF" in s_upper:
+        return "CHF"
+    if "¥" in s or "JPY" in s_upper:
+        return "JPY"
+    if "USD" in s_upper:
+        return "USD"
+    return None
+
+
 def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """
     Launch headless Edge with persistent profile to read active positions AND live
@@ -526,6 +557,13 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
             raw_deals = raw_data.get("deals", []) if isinstance(raw_data, dict) else []
             raw_summary = raw_data.get("summary", {}) if isinstance(raw_data, dict) else {}
 
+            detected_cur = (
+                _extract_currency_code(raw_summary.get("balance")) or
+                _extract_currency_code(raw_summary.get("equity")) or
+                _extract_currency_code(raw_summary.get("margin")) or
+                _extract_currency_code(raw_summary.get("free_margin"))
+            )
+
             parsed_summary = {
                 "balance": _parse_currency(raw_summary.get("balance")),
                 "equity": _parse_currency(raw_summary.get("equity")),
@@ -533,6 +571,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 "free_margin": _parse_currency(raw_summary.get("free_margin")),
                 "open_pl": _parse_currency(raw_summary.get("open_pl")),
                 "market_closed": bool(raw_summary.get("market_closed", False)),
+                "account_currency": detected_cur,
             }
 
             bal = parsed_summary.get("balance")

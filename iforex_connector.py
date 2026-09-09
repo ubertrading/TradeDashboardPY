@@ -735,6 +735,8 @@ class IForexAccount:
                             self._open_orders = deals
                             if summary:
                                 self._account_summary = summary
+                                if summary.get("account_currency"):
+                                    self.config.setdefault("account_currency", summary["account_currency"])
                         orders = deals
                 except Exception as fe:
                     logger.warning("[%s] On-demand position fetch in get_positions_for_import: %s", self.account_id, fe)
@@ -853,6 +855,9 @@ class IForexAccount:
         info["account_number"] = self.account_number
         info["connected"] = self.connected
         info["market_closed"] = self.is_market_closed
+        acct_cur = self.config.get("account_currency") or getattr(self, "_account_summary", {}).get("account_currency")
+        if acct_cur:
+            info["account_currency"] = acct_cur
 
         # Margin & Balance
         summ = getattr(self, "_account_summary", {})
@@ -926,7 +931,7 @@ class IForexAccount:
             for pair in active_pairs:
                 q = self.get_quote(pair, allow_live=False)
                 if q:
-                    pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
+                    pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
                     spread_pts = round((q[1] - q[0]) * pip_mult, 1)
                     sym_clean = pair.upper().replace("/", "").replace(" ", "")
                     syms_dict[pair] = {"bid": q[0], "ask": q[1], "spread": spread_pts}
@@ -1138,7 +1143,7 @@ class IForexAccountManager:
                                 _gate_last[_gate_key] = time.time()
                                 self._gate_log_ts = _gate_last
                             continue
-                        pip_mult = 100.0 if "JPY" in pair.upper() else 10000.0
+                        pip_mult = 1000.0 if "JPY" in pair.upper() else 100000.0
                         cur_sp = round((q[1] - q[0]) * pip_mult, 1)
                         if cur_sp > max_spread:
                             _gate_key = ("iforex_gate_highspread", account_id, session_id)
@@ -1359,7 +1364,7 @@ class IForexAccountManager:
                                             info["last_update"] = now_fill_epoch
                                     acct_._save_open_orders()
 
-                                    pip_mult = 100.0 if "JPY" in pair_.upper() else 10000.0
+                                    pip_mult = 1000.0 if "JPY" in pair_.upper() else 100000.0
                                     spread = round((q2[1] - q2[0]) * pip_mult, 1) if (q2 and len(q2) >= 2) else 0
 
                                     if report:
@@ -1414,8 +1419,8 @@ class IForexAccountManager:
                 "alert_telegram": acct.config.get("alert_telegram"),
                 "auto_connect_start": acct.config.get("auto_connect_start", True),
                 "market_closed": bool(acct.is_market_closed),
-                # account_currency: manual config override, then API-detected, then default to EUR
-                "account_currency": acct.config.get("account_currency") or info.get("account_currency") or "EUR",
+                # account_currency: manual config override, then API-detected, then fallback to denomination detection (defaults to USD)
+                "account_currency": acct.config.get("account_currency") or info.get("account_currency") or getattr(acct, "_account_summary", {}).get("account_currency"),
             }
         return result
 
