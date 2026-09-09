@@ -1293,8 +1293,7 @@ def _detect_denomination(account_id, info):
     return "USD", "default"
 
 
-def _is_account_swapfree(account_id):
-
+def _is_account_swapfree(account_id, snap_manual=None, snap_ea_info=None):
     """Return True if account is marked as swapfree, False otherwise."""
     if not account_id:
         return False
@@ -1346,28 +1345,36 @@ def _is_account_swapfree(account_id):
 
         ids_to_check = {x for x in ids_to_check if x}
 
-        with lock:
-            # 3. Check manual_accounts
-            for i in ids_to_check:
-                if i in manual_accounts:
-                    m = manual_accounts[i]
-                    if m.get("swapfree") or m.get("swap_free") or m.get("is_swapfree"):
-                        return True
-            for man_k, man_v in manual_accounts.items():
-                if man_k in ids_to_check or man_v.get("group_label") in ids_to_check or man_v.get("label") in ids_to_check:
-                    if man_v.get("swapfree") or man_v.get("swap_free") or man_v.get("is_swapfree"):
-                        return True
+        # 3. Check manual_accounts
+        man_dict = snap_manual if snap_manual is not None else None
+        ea_dict = snap_ea_info if snap_ea_info is not None else None
+        if man_dict is None or ea_dict is None:
+            with lock:
+                if man_dict is None:
+                    man_dict = dict(manual_accounts)
+                if ea_dict is None:
+                    ea_dict = dict(ea_account_info)
 
-            # 4. Check ea_account_info
-            for i in ids_to_check:
-                if i in ea_account_info:
-                    info = ea_account_info[i]
-                    if info.get("swapfree") or info.get("swap_free") or info.get("is_swapfree"):
-                        return True
-            for ea_k, ea_v in ea_account_info.items():
-                if (ea_k in ids_to_check or ea_v.get("label") in ids_to_check or ea_v.get("group_label") in ids_to_check or str(ea_v.get("login") or "") in ids_to_check):
-                    if ea_v.get("swapfree") or ea_v.get("swap_free") or ea_v.get("is_swapfree"):
-                        return True
+        for i in ids_to_check:
+            if i in man_dict:
+                m = man_dict[i]
+                if m.get("swapfree") or m.get("swap_free") or m.get("is_swapfree"):
+                    return True
+        for man_k, man_v in man_dict.items():
+            if man_k in ids_to_check or man_v.get("group_label") in ids_to_check or man_v.get("label") in ids_to_check:
+                if man_v.get("swapfree") or man_v.get("swap_free") or man_v.get("is_swapfree"):
+                    return True
+
+        # 4. Check ea_account_info
+        for i in ids_to_check:
+            if i in ea_dict:
+                info = ea_dict[i]
+                if info.get("swapfree") or info.get("swap_free") or info.get("is_swapfree"):
+                    return True
+        for ea_k, ea_v in ea_dict.items():
+            if (ea_k in ids_to_check or ea_v.get("label") in ids_to_check or ea_v.get("group_label") in ids_to_check or str(ea_v.get("login") or "") in ids_to_check):
+                if ea_v.get("swapfree") or ea_v.get("swap_free") or ea_v.get("is_swapfree"):
+                    return True
 
     except Exception as e:
         logger.error("[SWAPFREE-CHECK] Error checking swapfree for %s: %s", account_id, e)
@@ -10859,7 +10866,7 @@ def api_status():
             "ask": info.get("ask"),
             "spread": info.get("spread"),
             "symbol": info.get("symbol", ""),
-            "swapfree": _is_account_swapfree(acc),
+            "swapfree": _is_account_swapfree(acc, snap_manual=_snap_manual_accounts, snap_ea_info=_snap_ea_account_info),
             "stats_log": acc in _snap_settings.get("stats_log_accounts", []),
             "account_currency": info.get("account_currency"),
         }
@@ -10962,6 +10969,12 @@ def api_status():
                                 got_direct = True
                         except Exception:
                             pass
+                if got_direct and sc.get(f"curr_bid_{sn}") is not None and sc.get(f"curr_ask_{sn}") is not None:
+                    _direct_quote_cache[(acc, side_pair)] = {
+                        "bid": sc[f"curr_bid_{sn}"],
+                        "ask": sc[f"curr_ask_{sn}"],
+                        "ts": time.time()
+                    }
                 if not got_direct:
                     sym_dict = ai.get("symbols", {}).get(side_pair) or ai.get("symbols", {}).get(side_pair.replace("/", ""))
                     if sym_dict:
@@ -10981,17 +10994,30 @@ def api_status():
                 sc[f"ea_symbol_{sn}"] = side_pair
             else:
                 got_quote = False
-                fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
-                if fix_acct and hasattr(fix_acct, 'get_symbol_info') and side_pair:
-                    try:
-                        sq = fix_acct.get_symbol_info(side_pair)
-                        if sq and sq.get("bid") and sq.get("ask"):
-                            sc[f"curr_spread_{sn}"] = sq.get("spread")
-                            sc[f"curr_bid_{sn}"] = sq.get("bid")
-                            sc[f"curr_ask_{sn}"] = sq.get("ask")
-                            got_quote = True
-                    except Exception:
-                        pass
+                cached_fix = _direct_quote_cache.get((acc, side_pair))
+                if cached_fix and (time.time() - cached_fix.get("ts", 0)) < 5.0:
+                    sc[f"curr_bid_{sn}"] = cached_fix["bid"]
+                    sc[f"curr_ask_{sn}"] = cached_fix["ask"]
+                    mult = 1000 if "JPY" in side_pair.upper() else 100000
+                    sc[f"curr_spread_{sn}"] = round((cached_fix["ask"] - cached_fix["bid"]) * mult, 1)
+                    got_quote = True
+                if not got_quote:
+                    fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
+                    if fix_acct and hasattr(fix_acct, 'get_symbol_info') and side_pair:
+                        try:
+                            sq = fix_acct.get_symbol_info(side_pair)
+                            if sq and sq.get("bid") and sq.get("ask"):
+                                sc[f"curr_spread_{sn}"] = sq.get("spread")
+                                sc[f"curr_bid_{sn}"] = sq.get("bid")
+                                sc[f"curr_ask_{sn}"] = sq.get("ask")
+                                _direct_quote_cache[(acc, side_pair)] = {
+                                    "bid": sq.get("bid"),
+                                    "ask": sq.get("ask"),
+                                    "ts": time.time()
+                                }
+                                got_quote = True
+                        except Exception:
+                            pass
                 if not got_quote:
                     ea_sym = (ai.get("symbol") or "").upper()
                     sym_match = not ea_sym or not side_pair or ea_sym.replace("/", "") == side_pair.replace("/", "")
@@ -11033,7 +11059,7 @@ def api_status():
             return
         try:
             for acct_id, entry in accts.items():
-                entry["swapfree"] = _is_account_swapfree(acct_id)
+                entry["swapfree"] = _is_account_swapfree(acct_id, snap_manual=_snap_manual_accounts, snap_ea_info=_snap_ea_account_info)
                 acct = manager.accounts.get(acct_id)
                 if not acct or not hasattr(acct, 'config'):
                     continue
@@ -11137,6 +11163,7 @@ def api_status():
                     ainfo["pips_to_mc"] = None
         _enrich_pips_to_mc(fix_accts)
         _enrich_pips_to_mc(mt_accts)
+        _enrich_pips_to_mc(iforex_accts)
         _enrich_pips_to_mc(ea_status)
     except Exception:
         pass
@@ -20727,14 +20754,20 @@ async function updateThreshold(account, value) {
   } catch(e) { console.error('Threshold update failed:', e); }
 }
 
+let _refreshInProgress = false;
 async function refreshData() {
+  if (_refreshInProgress) return;
+  _refreshInProgress = true;
   const bar = document.getElementById('refreshBar');
-  bar.style.width = '30%';
+  if (bar) bar.style.width = '30%';
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), 8000);
   try {
     const needFills = !positionsPaneCollapsed && currentStrategyId;
-    const res = await fetch('/api/status?_t=' + Date.now() + (needFills ? '&include_fills=1' : ''));
+    const res = await fetch('/api/status?_t=' + Date.now() + (needFills ? '&include_fills=1' : ''), { signal: abortCtrl.signal });
+    clearTimeout(abortTimer);
     const data = await res.json();
-    bar.style.width = '80%';
+    if (bar) bar.style.width = '80%';
 
     // Always process notifications (even when tab is hidden — sounds/speech still work)
     checkSoundNotifications(data.sessions || []);
@@ -20771,8 +20804,10 @@ async function refreshData() {
     // Skip ALL DOM rendering when browser tab is hidden/minimized
     // (saves 100% of DOM work when user switches to another tab)
     if (document.hidden) {
-      bar.style.width = '100%';
-      setTimeout(() => { bar.style.width = '0'; }, 100);
+      if (bar) {
+        bar.style.width = '100%';
+        setTimeout(() => { bar.style.width = '0'; }, 100);
+      }
       return;
     }
 
@@ -20814,12 +20849,20 @@ async function refreshData() {
         renderStrategyLog(data.event_log || []);
       }
     }
-    document.getElementById('serverTime').textContent = new Date().toLocaleTimeString();
+    const stEl = document.getElementById('serverTime');
+    if (stEl) stEl.textContent = new Date().toLocaleTimeString();
   } catch(e) {
-    console.error('Refresh failed:', e);
+    clearTimeout(abortTimer);
+    if (e.name !== 'AbortError') {
+      console.error('Refresh failed:', e);
+    }
+  } finally {
+    _refreshInProgress = false;
+    if (bar) {
+      bar.style.width = '100%';
+      setTimeout(() => { bar.style.width = '0'; }, 300);
+    }
   }
-  bar.style.width = '100%';
-  setTimeout(() => { bar.style.width = '0'; }, 300);
 }
 
 const _dismissedReminders = new Set();

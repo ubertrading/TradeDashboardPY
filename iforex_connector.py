@@ -322,10 +322,12 @@ class IForexAccount:
         return None
 
     def _trigger_auto_relogin(self):
-        """Trigger background Playwright auto-login if credentials or profile exist with 60s cooldown."""
+        """Trigger background Playwright auto-login if credentials or profile exist with backoff."""
+        fail_count = getattr(self, "_auto_relogin_fails", 0)
+        cooldown = 60.0 if fail_count == 0 else (300.0 if fail_count == 1 else 900.0)
         now = time.time()
-        if now - getattr(self, "_last_relogin_attempt_ts", 0.0) < 60.0:
-            logger.warning("[%s] Auto-relogin debounced (cooldown 60s)", self.account_id)
+        if now - getattr(self, "_last_relogin_attempt_ts", 0.0) < cooldown:
+            logger.warning("[%s] Auto-relogin debounced (cooldown %.0fs, fails=%d)", self.account_id, cooldown, fail_count)
             return
         if getattr(self, "_relogin_in_progress", False):
             return
@@ -344,6 +346,7 @@ class IForexAccount:
                     headless=True
                 )
                 if res.get("status") == "ok":
+                    self._auto_relogin_fails = 0
                     self.cookie = res["cookie"]
                     self.session.headers["Cookie"] = res["cookie"]
                     self.security_token = res["security_token"]
@@ -355,9 +358,11 @@ class IForexAccount:
                         self.dd["ea_account_info"].setdefault(self.account_id, {})["connected"] = True
                     logger.info("[%s] Automatic session recovery succeeded! Reconnected to iFOREX.", self.account_id)
                 else:
-                    logger.warning("[%s] Headless auto-recovery did not complete: %s (click 'Re-Auth' in UI)",
-                                   self.account_id, res.get("message"))
+                    self._auto_relogin_fails = fail_count + 1
+                    logger.warning("[%s] Headless auto-recovery did not complete (fails=%d): %s (click 'Re-Auth' in UI)",
+                                   self.account_id, self._auto_relogin_fails, res.get("message"))
             except Exception as e:
+                self._auto_relogin_fails = fail_count + 1
                 logger.error("[%s] Background auto-login error: %s", self.account_id, e)
             finally:
                 self._relogin_in_progress = False
@@ -922,8 +927,19 @@ class IForexAccount:
         info["profit"] = round(tot_open_pl, 2)
         info["equity"] = round(bal + tot_open_pl, 2)
         info.setdefault("leverage", int(self.config.get("leverage", 400)))
-        info.setdefault("margin", float(self.config.get("margin", 0.0)))
-        info.setdefault("free_margin", round(info["equity"] - info.get("margin", 0.0), 2))
+
+        # Margin: prefer live value from browser-scraped account summary (accSummaryUsedMargin),
+        # then fall back to a leverage-based estimate from total notional exposure.
+        summ_margin = summ.get("margin")
+        if summ_margin is not None and float(summ_margin) > 0:
+            info["margin"] = round(float(summ_margin), 2)
+        elif info.get("margin", 0.0) == 0.0 and abs(tot_lots) > 0:
+            # Estimate: (abs_lots × 100,000) / leverage  (assumes forex; conservative for non-forex)
+            leverage = info.get("leverage") or int(self.config.get("leverage", 400))
+            if leverage > 0:
+                estimated_margin = (abs(tot_lots) * 100000.0) / leverage
+                info["margin"] = round(estimated_margin, 2)
+        info["free_margin"] = round(info["equity"] - info.get("margin", 0.0), 2)
 
         # Update spread / bid / ask in info if active_pairs provided
         if active_pairs:
