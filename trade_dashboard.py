@@ -9663,6 +9663,34 @@ def close_all_deals(session_id):
                    "Queued close for all open deal pairs")
     return jsonify(s)
 
+@app.route('/api/sessions/<session_id>/remove_deal', methods=['POST'])
+def remove_deal(session_id):
+    """Remove a specific deal pair from session tracking without closing broker positions."""
+    data = request.get_json(force=True) or {}
+    tickets = data.get("tickets", {})  # {account: ticket}
+    with lock:
+        s = sessions.get(session_id)
+        if not s:
+            return jsonify({"error": "Session not found"}), 404
+        dismissed = s.setdefault("dismissed_tickets", [])
+        removed_info = []
+        for acc, ticket in tickets.items():
+            if ticket is not None and ticket != "":
+                if ticket not in dismissed and str(ticket) not in [str(x) for x in dismissed]:
+                    dismissed.append(ticket)
+                    removed_info.append(f"{acc}:{ticket}")
+                # Clear any pending rollbacks on this ticket
+                rb_tickets_map = s.get("rollback_tickets", {})
+                if acc in rb_tickets_map and ticket in rb_tickets_map[acc]:
+                    rb_tickets_map[acc] = [t for t in rb_tickets_map[acc] if t != ticket]
+                    if acc in s.get("rollback_needed", {}) and s["rollback_needed"][acc] > 0:
+                        s["rollback_needed"][acc] = max(0, s["rollback_needed"][acc] - 1)
+        s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _save_sessions()
+        _log_event(session_id, None, "remove_deal",
+                   f"Removed deal pair from monitor without closing: {', '.join(removed_info)}")
+    return jsonify(s)
+
 # ─── EA Polling Endpoint ────────────────────────────────────────────────────
 
 @app.route('/api/poll_command', methods=['GET'])
@@ -12300,9 +12328,12 @@ def update_iforex_account(account_id):
         data = request.get_json(force=True)
         for key in ['label', 'group_label', 'account_number', 'username', 'password', 'cookie', 'security_token',
                      'base_url', 'leverage', 'swapfree', 'stop_out_level',
-                     'alert_email', 'alert_telegram', 'account_currency']:
+                     'cycle_reminder', 'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
+                     'day_schedule_template', 'alert_email', 'alert_telegram', 'account_currency']:
             if key in data:
                 acct.config[key] = data[key]
+        if 'day_schedule' in data:
+            acct.config['day_schedule'] = _normalize_day_schedule(data['day_schedule'])
         if "label" in data:
             acct.label = data["label"]
         if "cookie" in data and data["cookie"]:
@@ -15980,6 +16011,59 @@ body {
     <div style="margin-top:8px;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ifxSwapFree"> Swap Free</label>
     </div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ifxCycleReminder"> Cycle Reminder</label>
+      <label style="font-size:0.78rem;color:var(--text2);">Remind <input type="number" id="ifxCycleRemindDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
+      <label style="font-size:0.78rem;color:var(--text2);">Max Days <input type="number" id="ifxCycleMaxDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="ifxAutoCycle"> Auto Cycle (close+reopen at max days)</label>
+    </div>
+    <div style="margin-top:10px; padding:10px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <span style="font-size:0.8rem; font-weight:600; color:var(--text);">Swap / Session Day Schedule</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <select id="ifxDaySchedTemplate" onchange="onDaySchedTemplateChange('ifx')" style="font-size:0.75rem; padding:2px 6px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+            <option value="Orbex (Sessions: Mon-Fri=1, Sat-Sun=0)">Orbex (Sessions: Mon-Fri=1, Sat-Sun=0)</option>
+            <option value="IC Markets (Swap+Weekend: Wed=3, Sat-Sun=1)">IC Markets (Swap+Weekend: Wed=3, Sat-Sun=1)</option>
+            <option value="Standard 3x Wednesday (Wed=3, Sat-Sun=0)">Standard 3x Wednesday (Wed=3, Sat-Sun=0)</option>
+            <option value="7 Days (Mon-Sun=1)">7 Days (Mon-Sun=1)</option>
+            <option value="custom">Custom Schedule</option>
+          </select>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="saveCustomDaySchedTemplate('ifx')" style="font-size:0.7rem; padding:2px 6px;" title="Save current inputs as a reusable template">💾 Save Preset</button>
+        </div>
+      </div>
+      <div style="display:grid; grid-template-columns: repeat(7, 1fr); gap:4px; text-align:center;">
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">MON</label>
+          <input type="number" id="ifxDayMON" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">TUE</label>
+          <input type="number" id="ifxDayTUE" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">WED</label>
+          <input type="number" id="ifxDayWED" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">THU</label>
+          <input type="number" id="ifxDayTHU" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">FRI</label>
+          <input type="number" id="ifxDayFRI" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">SAT</label>
+          <input type="number" id="ifxDaySAT" value="0" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">SUN</label>
+          <input type="number" id="ifxDaySUN" value="0" step="0.5" min="0" max="10" oninput="onDaySchedInput('ifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+      </div>
+    </div>
     <div class="btn-group" style="margin-top:16px;">
       <button class="btn btn-primary" onclick="addIForexAccount()">Add Account</button>
       <button class="btn btn-danger" onclick="closeAddIForexModal()">Cancel</button>
@@ -16039,6 +16123,59 @@ body {
     </div>
     <div style="margin-top:8px;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="eifxSwapFree"> Swap Free</label>
+    </div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="eifxCycleReminder"> Cycle Reminder</label>
+      <label style="font-size:0.78rem;color:var(--text2);">Remind <input type="number" id="eifxCycleRemindDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
+      <label style="font-size:0.78rem;color:var(--text2);">Max Days <input type="number" id="eifxCycleMaxDays" value="" min="0" max="30" style="width:50px;margin-left:4px;"></label>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="eifxAutoCycle"> Auto Cycle (close+reopen at max days)</label>
+    </div>
+    <div style="margin-top:10px; padding:10px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <span style="font-size:0.8rem; font-weight:600; color:var(--text);">Swap / Session Day Schedule</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <select id="eifxDaySchedTemplate" onchange="onDaySchedTemplateChange('eifx')" style="font-size:0.75rem; padding:2px 6px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+            <option value="Orbex (Sessions: Mon-Fri=1, Sat-Sun=0)">Orbex (Sessions: Mon-Fri=1, Sat-Sun=0)</option>
+            <option value="IC Markets (Swap+Weekend: Wed=3, Sat-Sun=1)">IC Markets (Swap+Weekend: Wed=3, Sat-Sun=1)</option>
+            <option value="Standard 3x Wednesday (Wed=3, Sat-Sun=0)">Standard 3x Wednesday (Wed=3, Sat-Sun=0)</option>
+            <option value="7 Days (Mon-Sun=1)">7 Days (Mon-Sun=1)</option>
+            <option value="custom">Custom Schedule</option>
+          </select>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="saveCustomDaySchedTemplate('eifx')" style="font-size:0.7rem; padding:2px 6px;" title="Save current inputs as a reusable template">💾 Save Preset</button>
+        </div>
+      </div>
+      <div style="display:grid; grid-template-columns: repeat(7, 1fr); gap:4px; text-align:center;">
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">MON</label>
+          <input type="number" id="eifxDayMON" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">TUE</label>
+          <input type="number" id="eifxDayTUE" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">WED</label>
+          <input type="number" id="eifxDayWED" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">THU</label>
+          <input type="number" id="eifxDayTHU" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">FRI</label>
+          <input type="number" id="eifxDayFRI" value="1" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">SAT</label>
+          <input type="number" id="eifxDaySAT" value="0" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+        <div>
+          <label style="font-size:0.7rem; color:var(--text2); display:block; margin-bottom:2px;">SUN</label>
+          <input type="number" id="eifxDaySUN" value="0" step="0.5" min="0" max="10" oninput="onDaySchedInput('eifx')" style="width:100%; text-align:center; padding:2px 0; font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+        </div>
+      </div>
     </div>
     <div class="btn-group" style="margin-top:16px;">
       <button class="btn btn-primary" onclick="saveIForexEdit()">Save Changes</button>
@@ -17519,9 +17656,11 @@ function renderOpenedDeals() {
     const pair2 = side2.pair || s.pair;
     // Build set of closed ticket IDs (as strings for comparison)
     const closedTickets = new Set(closeFills.map(cf => String(cf.ticket)));
-    // Separate fills by account, filtering out closed tickets
-    const fills1 = fills.filter(f => f.account === accs[0] && !closedTickets.has(String(f.ticket)));
-    const fills2 = fills.filter(f => f.account === accs[1] && !closedTickets.has(String(f.ticket)));
+    // Also exclude tickets manually dismissed from monitor (without closing)
+    const dismissedTickets = new Set((s.dismissed_tickets || []).map(t => String(t)));
+    // Separate fills by account, filtering out closed and dismissed tickets
+    const fills1 = fills.filter(f => f.account === accs[0] && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
+    const fills2 = fills.filter(f => f.account === accs[1] && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
     const totalPairs = Math.max(fills1.length, fills2.length);
     if (totalPairs <= 0) return;
     // If we have filled counts but fewer fill detail records, pad with empty placeholders
@@ -17631,8 +17770,8 @@ function renderOpenedDeals() {
         lots2: (f2 && f2.lots != null) ? f2.lots : ((side2 && side2.lot_size != null) ? side2.lot_size : s.lot_size),
         time1: f1 ? f1.ts : (s.updated_at || '-'),
         time2: f2 ? f2.ts : (s.updated_at || '-'),
-        ticket1: f1 ? f1.ticket : '-',
-        ticket2: f2 ? f2.ticket : '-',
+        ticketDisplay1: f1 ? f1.ticket : '-',
+        ticketDisplay2: f2 ? f2.ticket : '-',
         price1: p1 != null ? p1.toFixed(5) : '-',
         price2: p2 != null ? p2.toFixed(5) : '-',
         openDiff: openDiff,
@@ -17694,20 +17833,20 @@ function renderOpenedDeals() {
       <td>${d.side1Action}</td>
       <td>${d.lots1}</td>
       <td style="font-size:0.7rem;">${d.time1}</td>
-      <td>${d.ticket1}</td>
+      <td>${d.ticketDisplay1}</td>
       <td>${d.price1}</td>
       <td rowspan="2" style="vertical-align:middle;font-weight:600;">${d.openDiff}</td>
       <td>${d.openMs1}</td>
       <td>${d.openSlip1}</td>
       <td rowspan="2" class="${profitClass}" style="vertical-align:middle;">${profitVal}</td>
-      <td rowspan="2" style="vertical-align:middle;"><button class="btn btn-danger btn-sm" onclick="closeDeal('${d.sessionId}', '${d.acc1}', ${d.ticket1 || 'null'}, '${d.acc2}', ${d.ticket2 || 'null'})" title="Close this deal pair" style="font-size:0.65rem;padding:2px 6px;">✕</button></td>
+      <td rowspan="2" style="vertical-align:middle;"><button class="btn btn-danger btn-sm" onclick="closeDeal('${d.sessionId}', '${d.acc1}', ${d.ticket1 || 'null'}, '${d.acc2}', ${d.ticket2 || 'null'})" title="Close this deal pair" style="font-size:0.65rem;padding:2px 6px;">✕</button><br><button class="btn btn-sm" onclick="removeDealPair('${d.sessionId}', '${d.acc1}', ${d.ticket1 || 'null'}, '${d.acc2}', ${d.ticket2 || 'null'})" title="Remove from monitor (does NOT close position)" style="font-size:0.6rem;padding:2px 5px;margin-top:3px;background:var(--orange,#f59e0b);color:#fff;border:none;border-radius:4px;cursor:pointer;">👁 Remove</button></td>
     </tr>
     <tr class="deal-row-bottom">
       <td style="font-size:0.7rem;">${d.session2}</td>
       <td>${d.side2Action}</td>
       <td>${d.lots2}</td>
       <td style="font-size:0.7rem;">${d.time2}</td>
-      <td>${d.ticket2}</td>
+      <td>${d.ticketDisplay2}</td>
       <td>${d.price2}</td>
       <td>${d.openMs2}</td>
       <td>${d.openSlip2}</td>
@@ -18158,12 +18297,14 @@ function renderStrategies(strats, sessions) {
         if (a1) {
           const f1 = s.filled[a1] || 0;
           const c1 = (s.closed && s.closed[a1]) || 0;
-          side1Pos += Math.min(Math.max(0, f1 - c1), maxPos);
+          const d1 = (s.dismissed_tickets || []).filter(t => (s.fills || []).some(f => f.account === a1 && String(f.ticket) === String(t))).length;
+          side1Pos += Math.min(Math.max(0, f1 - c1 - d1), maxPos);
         }
         if (a2) {
           const f2 = s.filled[a2] || 0;
           const c2 = (s.closed && s.closed[a2]) || 0;
-          side2Pos += Math.min(Math.max(0, f2 - c2), maxPos);
+          const d2 = (s.dismissed_tickets || []).filter(t => (s.fills || []).some(f => f.account === a2 && String(f.ticket) === String(t))).length;
+          side2Pos += Math.min(Math.max(0, f2 - c2 - d2), maxPos);
         }
       }
     });
@@ -19316,6 +19457,24 @@ async function closeDeal(sessionId, acc1, ticket1, acc2, ticket2) {
       renderOpenedDeals();
     } catch(e) { alert('Close deal failed: ' + e); }
   }, 'OK');
+}
+
+async function removeDealPair(sessionId, acc1, ticket1, acc2, ticket2) {
+  showConfirmModal('Remove this pair from the monitor? The positions will remain open at the broker \u2014 only the match tracking will be removed.', async () => {
+    try {
+      const tickets = {};
+      if (ticket1 != null) tickets[acc1] = ticket1;
+      if (ticket2 != null) tickets[acc2] = ticket2;
+      await fetch('/api/sessions/' + sessionId + '/remove_deal', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ tickets: tickets })
+      });
+      await refreshData();
+      renderInstrumentsTable();
+      renderOpenedDeals();
+    } catch(e) { alert('Remove from monitor failed: ' + e); }
+  }, 'Remove');
 }
 
 async function closeAllDeals(sessionId) {
@@ -23265,6 +23424,11 @@ function showAddIForexModal() {
   document.getElementById('ifxCookie').value = '';
   document.getElementById('ifxBaseUrl').value = 'https://trader.iforex.com/webpl4';
   if (document.getElementById('ifxSwapFree')) document.getElementById('ifxSwapFree').checked = false;
+  if (document.getElementById('ifxCycleReminder')) document.getElementById('ifxCycleReminder').checked = false;
+  if (document.getElementById('ifxCycleRemindDays')) document.getElementById('ifxCycleRemindDays').value = '';
+  if (document.getElementById('ifxCycleMaxDays')) document.getElementById('ifxCycleMaxDays').value = '';
+  if (document.getElementById('ifxAutoCycle')) document.getElementById('ifxAutoCycle').checked = false;
+  setDayScheduleInputs('ifx', DEFAULT_DAY_SCHEDULE);
   document.getElementById('addIForexModal').classList.add('active');
 }
 
@@ -23344,6 +23508,12 @@ async function addIForexAccount() {
     base_url: document.getElementById('ifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
     leverage: parseInt(document.getElementById('ifxLeverage').value) || 400,
     swapfree: document.getElementById('ifxSwapFree') ? document.getElementById('ifxSwapFree').checked : false,
+    cycle_reminder: document.getElementById('ifxCycleReminder') ? document.getElementById('ifxCycleReminder').checked : false,
+    cycle_reminder_days: document.getElementById('ifxCycleRemindDays') && document.getElementById('ifxCycleRemindDays').value.trim() !== '' ? parseInt(document.getElementById('ifxCycleRemindDays').value) : null,
+    cycle_max_days: document.getElementById('ifxCycleMaxDays') && document.getElementById('ifxCycleMaxDays').value.trim() !== '' ? parseInt(document.getElementById('ifxCycleMaxDays').value) : null,
+    auto_cycle_enabled: document.getElementById('ifxAutoCycle') ? document.getElementById('ifxAutoCycle').checked : false,
+    day_schedule: getDayScheduleInputs('ifx'),
+    day_schedule_template: document.getElementById('ifxDaySchedTemplate')?.value || 'custom',
     enabled: true
   };
 
@@ -23390,6 +23560,20 @@ async function editIForexAccount(id) {
     if (document.getElementById('eifxSwapFree')) {
       document.getElementById('eifxSwapFree').checked = !!cfg.swapfree;
     }
+    if (document.getElementById('eifxCycleReminder')) document.getElementById('eifxCycleReminder').checked = !!cfg.cycle_reminder;
+    if (document.getElementById('eifxCycleRemindDays')) document.getElementById('eifxCycleRemindDays').value = cfg.cycle_reminder_days != null ? cfg.cycle_reminder_days : '';
+    if (document.getElementById('eifxCycleMaxDays')) document.getElementById('eifxCycleMaxDays').value = cfg.cycle_max_days != null ? cfg.cycle_max_days : '';
+    if (document.getElementById('eifxAutoCycle')) document.getElementById('eifxAutoCycle').checked = !!cfg.auto_cycle_enabled;
+    if (cfg.day_schedule_template && cfg.day_schedule_template !== 'custom' && cachedDayScheduleTemplates[cfg.day_schedule_template]) {
+      setDayScheduleInputs('eifx', cachedDayScheduleTemplates[cfg.day_schedule_template]);
+      const sel = document.getElementById('eifxDaySchedTemplate');
+      if (sel) sel.value = cfg.day_schedule_template;
+    } else if (cfg.day_schedule) {
+      setDayScheduleInputs('eifx', cfg.day_schedule);
+      onDaySchedInput('eifx');
+    } else {
+      setDayScheduleInputs('eifx', DEFAULT_DAY_SCHEDULE);
+    }
     document.getElementById('editIForexModal').classList.add('active');
   } catch(e) { alert('Failed to load iFOREX config: ' + e); }
 }
@@ -23414,7 +23598,13 @@ async function saveIForexEdit() {
     security_token: token,
     cookie: document.getElementById('eifxCookie').value.trim(),
     base_url: document.getElementById('eifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
-    swapfree: document.getElementById('eifxSwapFree') ? document.getElementById('eifxSwapFree').checked : false
+    swapfree: document.getElementById('eifxSwapFree') ? document.getElementById('eifxSwapFree').checked : false,
+    cycle_reminder: document.getElementById('eifxCycleReminder') ? document.getElementById('eifxCycleReminder').checked : false,
+    cycle_reminder_days: document.getElementById('eifxCycleRemindDays') && document.getElementById('eifxCycleRemindDays').value.trim() !== '' ? parseInt(document.getElementById('eifxCycleRemindDays').value) : null,
+    cycle_max_days: document.getElementById('eifxCycleMaxDays') && document.getElementById('eifxCycleMaxDays').value.trim() !== '' ? parseInt(document.getElementById('eifxCycleMaxDays').value) : null,
+    auto_cycle_enabled: document.getElementById('eifxAutoCycle') ? document.getElementById('eifxAutoCycle').checked : false,
+    day_schedule: getDayScheduleInputs('eifx'),
+    day_schedule_template: document.getElementById('eifxDaySchedTemplate')?.value || 'custom'
   };
   try {
     const res = await fetch('/api/iforex_accounts/' + encodeURIComponent(id), {
