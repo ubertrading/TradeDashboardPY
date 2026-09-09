@@ -725,7 +725,8 @@ class MtBridgeAccount:
                         continue
                 if sess_lot_size > 0:
                     p_lots = float(p.get("lots", 0.0) or 0.0)
-                    if p_lots > 0 and abs(p_lots - sess_lot_size) > 0.0001:
+                    already_in_session = any(_normalize_ticket(f.get("ticket")) == _normalize_ticket(tk) for f in _sess.get("fills", []) if f.get("account") == aid)
+                    if not already_in_session and p_lots > 0 and abs(p_lots - sess_lot_size) > 0.0001:
                         continue
                 matching_positions.append(tk)
 
@@ -860,7 +861,7 @@ class MtBridgeAccount:
             logger.error("[%s] Bridge _get_open_orders error: %s", self.account_id, e)
             return []
 
-    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0):
+    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0, lots=0):
         """Report trade result back to dashboard."""
         try:
             report_fn = self.dd.get("report_trade_result")
@@ -874,6 +875,7 @@ class MtBridgeAccount:
                     "detail": detail,
                     "fill_price": fill_price,
                     "quote_price": quote_price,
+                    "lots": float(lots) if lots else 0,
                 })
         except Exception as e:
             logger.error("[%s] Bridge report result error: %s", self.account_id, e)
@@ -892,7 +894,7 @@ class MtBridgeAccount:
             ticket = result.get("ticket", 0)
             price = result.get("open_price", 0)
             quote_price = result.get("quote_price", 0)
-            self._report_result(session_id, "filled", ticket, fill_price=price, quote_price=quote_price)
+            self._report_result(session_id, "filled", ticket, fill_price=price, quote_price=quote_price, lots=lots)
             return (True, ticket, price)
         else:
             detail = result.get("error", "Unknown error") if result else "Connection failed"
@@ -923,7 +925,7 @@ class MtBridgeAccount:
                 if session and session.get("rollback_needed", {}).get(self.account_id, 0) > 0:
                     status = "rollback_closed"
             
-            self._report_result(session_id, status, close_ticket, fill_price=price, quote_price=quote_price)
+            self._report_result(session_id, status, close_ticket, fill_price=price, quote_price=quote_price, lots=lots)
             return (True, close_ticket, price)
         else:
             detail = result.get("error", "Unknown error") if result else "Connection failed"
@@ -972,7 +974,7 @@ class MtBridgeAccount:
             ticket = result.get("ticket", 0)
             open_price = result.get("open_price", 0)
             quote_price = result.get("quote_price", 0)
-            self._report_result(session_id, "limit_placed", ticket, fill_price=open_price, quote_price=quote_price)
+            self._report_result(session_id, "limit_placed", ticket, fill_price=open_price, quote_price=quote_price, lots=lots)
 
             # ── Background fill-watcher (Bridge Version) ─────────────────────
             _watch_symbol = symbol
@@ -1030,7 +1032,7 @@ class MtBridgeAccount:
                             logger.info("[%s] LIMIT-WATCH: FILLED! pending=%d -> position=%d @ %.5f",
                                         self.account_id, ticket, new_ticket, new_price)
                             self._report_result(session_id, "filled", new_ticket,
-                                                fill_price=new_price, quote_price=new_price)
+                                                fill_price=new_price, quote_price=new_price, lots=_watch_lots)
                             return
                             
                     except Exception as _e:
@@ -1403,6 +1405,22 @@ class MtBridgeManager:
                         had_cycle = True
                         continue
 
+                    # Determine exact closed lot size for cycle reopen
+                    op_lot_size = prog.get("last_closed_lots")
+                    if not op_lot_size:
+                        ct = prog.get("closed_ticket") or (prog.get("closed_tickets")[-1] if prog.get("closed_tickets") else None) or (prog.get("confirmed_closed_tickets")[-1] if prog.get("confirmed_closed_tickets") else None)
+                        if ct is not None:
+                            for cf in reversed(session.get("close_fills", [])):
+                                if cf.get("account") == account_id and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(ct):
+                                    op_lot_size = cf.get("lots")
+                                    break
+                    if not op_lot_size:
+                        op_lot_size = lot_size
+                    try:
+                        op_lot_size = float(op_lot_size)
+                    except (ValueError, TypeError):
+                        op_lot_size = float(lot_size)
+
                     # Fetch initial quote for sanity check before loop
                     quote = direct_acct.get_quote_direct(pair)
                     if not quote:
@@ -1418,10 +1436,10 @@ class MtBridgeManager:
                             threads = []
                             results = [False] * to_place
                             def _place_init_limit(i, lim_pr, b_pr):
-                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f (dist=%s pips, base=%.5f)",
-                                            account_id, already_placed + i + 1, batch_size, limit_type, lim_pr, limit_dist, b_pr)
+                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f (dist=%s pips, base=%.5f, lots=%.2f)",
+                                            account_id, already_placed + i + 1, batch_size, limit_type, lim_pr, limit_dist, b_pr, op_lot_size)
                                 order_result = direct_acct.send_limit_order(
-                                    pair, trade_side, lot_size, lim_pr, limit_type,
+                                    pair, trade_side, op_lot_size, lim_pr, limit_type,
                                     session_id=session_id, comment=comment
                                 )
                                 if isinstance(order_result, tuple) and not order_result[0]:
@@ -1448,10 +1466,10 @@ class MtBridgeManager:
                                 base_price = fresh_quote.get("ask", 0) if trade_side == "buy" else fresh_quote.get("bid", 0)
                                 limit_price = base_price - (limit_dist / pip_mult) if trade_side == "buy" else base_price + (limit_dist / pip_mult)
                                 limit_price = round(limit_price, 3 if is_jpy else 5)
-                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f (dist=%s pips, base=%.5f)",
-                                            account_id, already_placed + i + 1, batch_size, limit_type, limit_price, limit_dist, base_price)
+                                logger.info("[%s] cycle_limit_open [%d/%d]: placing %s at %.5f (dist=%s pips, base=%.5f, lots=%.2f)",
+                                            account_id, already_placed + i + 1, batch_size, limit_type, limit_price, limit_dist, base_price, op_lot_size)
                                 order_result = direct_acct.send_limit_order(
-                                    pair, trade_side, lot_size, limit_price, limit_type,
+                                    pair, trade_side, op_lot_size, limit_price, limit_type,
                                     session_id=session_id, comment=comment
                                 )
                                 if isinstance(order_result, tuple) and not order_result[0]:
@@ -1484,9 +1502,23 @@ class MtBridgeManager:
                     # Normal open OR cycle reopen phase OR open_limit
                     trade_side = side_info.get("action", "buy")
                     is_cycle_op = action.startswith("cycle_") or result == "cycle_limit_open"
-                    op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                    op_lot_size = None
+                    if is_cycle_op:
+                        op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots")
+                        if not op_lot_size:
+                            prog = session.get("cycle_progress", {})
+                            ct = prog.get("closed_ticket") or (prog.get("closed_tickets")[-1] if prog.get("closed_tickets") else None) or (prog.get("confirmed_closed_tickets")[-1] if prog.get("confirmed_closed_tickets") else None)
+                            if ct is not None:
+                                for cf in reversed(session.get("close_fills", [])):
+                                    if cf.get("account") == account_id and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(ct):
+                                        op_lot_size = cf.get("lots")
+                                        break
                     if not op_lot_size:
                         op_lot_size = lot_size
+                    try:
+                        op_lot_size = float(op_lot_size)
+                    except (ValueError, TypeError):
+                        op_lot_size = float(lot_size)
                     
                     target_side_num = 1 if "acc1" in action else (2 if "acc2" in action else 0)
                     my_side_num = side_info.get("side_number", 0)
@@ -1577,7 +1609,8 @@ class MtBridgeManager:
             original_side = side_info.get("action", "buy")
 
             # Look up actual position volume from broker — MT5 rejects mismatched lots
-            actual_lots = lot_size
+            matched_f = next((f for f in session.get("fills", []) if f.get("account") == account_id and str(f.get("ticket")) == str(ticket)), None)
+            actual_lots = (matched_f.get("lots") if matched_f else None) or lot_size
             try:
                 orders = direct_acct._get_open_orders()
                 for o in orders:
@@ -1655,7 +1688,7 @@ class MtBridgeManager:
                             ticket = fill.get("ticket")
 
                             # Look up actual position volume from broker
-                            actual_lots = lot_size
+                            actual_lots = fill.get("lots") or lot_size
                             try:
                                 orders = direct_acct._get_open_orders()
                                 for o in orders:
@@ -1743,7 +1776,7 @@ class MtBridgeManager:
                     else:
                         fill = acct_fills[idx]
                         ticket = fill.get("ticket")
-                        actual_lots = lot_size
+                        actual_lots = fill.get("lots") or lot_size
                         try:
                             orders = direct_acct._get_open_orders()
                             for o in orders:
@@ -1829,7 +1862,7 @@ class MtBridgeManager:
             original_side = side_info.get("action", "buy")
 
             # Look up actual position volume from broker — MT5 rejects mismatched lots
-            actual_lots = lot_size
+            actual_lots = fill.get("lots") or lot_size
             ticket_found = False
             try:
                 orders = direct_acct._get_open_orders()

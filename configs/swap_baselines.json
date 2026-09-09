@@ -127,10 +127,10 @@
   },
   "DEMO-MT5-52769010:AUDCHF": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 5.015,
-    "swap_short": -9.535,
+    "swap_long": 4.817,
+    "swap_short": -9.282,
     "symbol": "AUDCHF",
-    "ts": 1788556873.7039902
+    "ts": 1788916575.9367251
   },
   "DEMO-MT5-52769010:AUDJPY": {
     "account": "DEMO-MT5-52769010",

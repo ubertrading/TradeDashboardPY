@@ -753,6 +753,17 @@ class MT4DirectAccount:
                     info[prop] = int(val) if prop == "leverage" else float(val)
             except Exception:
                 pass
+        # AccountName on the MT4 API is documented as "Currency name of the current account"
+        # (i.e. the deposit/denomination currency, e.g. "USD"). Store it for denomination detection.
+        try:
+            acct_name = getattr(self._client, "AccountName", None)
+            if acct_name is not None:
+                s = str(acct_name).strip().upper()
+                # Only accept it if it looks like a 3-letter currency code
+                if len(s) == 3 and s.isalpha():
+                    info["account_currency"] = s
+        except Exception:
+            pass
 
         info["last_update"] = time.time()
 
@@ -1398,7 +1409,7 @@ class MT4DirectAccount:
 
                 # Report fill to dashboard
                 self._report_result(session_id, "filled", ticket,
-                                    fill_price=fill_price, quote_price=price)
+                                    fill_price=fill_price, quote_price=price, lots=lots)
                 return True, ticket, fill_price
             else:
                 logger.error("[%s] OrderSend returned no ticket", self.account_id)
@@ -1459,7 +1470,7 @@ class MT4DirectAccount:
                     pass  # Fallback to request price
                 logger.info("[%s] CLOSED: ticket=%d @ %.5f (quote=%.5f)", self.account_id, ticket, actual_close_price, price)
                 self._report_result(session_id, "rollback_closed" if session_id else "closed",
-                                    ticket, fill_price=actual_close_price, quote_price=price)
+                                    ticket, fill_price=actual_close_price, quote_price=price, lots=lots)
                 return True
             else:
                 logger.error("[%s] OrderClose failed for ticket=%d", self.account_id, ticket)
@@ -1710,7 +1721,7 @@ class MT4DirectAccount:
             self._report_result(session_id, "error", 0, detail=str(e))
             return False, 0, 0
 
-    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0):
+    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0, lots=0):
         """Report trade result back to dashboard (same as EA's trade_result)."""
         try:
             import requests
@@ -1727,6 +1738,7 @@ class MT4DirectAccount:
                     "detail": detail,
                     "fill_price": fill_price,
                     "quote_price": quote_price,
+                    "lots": float(lots) if lots else 0,
                 })
             else:
                 logger.warning("[%s] No report_trade_result function available", self.account_id)
@@ -2322,6 +2334,15 @@ class MT5DirectAccount:
                     info[prop] = int(val) if prop == "leverage" else float(val)
             except Exception:
                 pass
+        # MT5 API exposes AccountCurrency directly (e.g. "USD", "EUR")
+        try:
+            cur = getattr(self._client, "AccountCurrency", None)
+            if cur is not None:
+                s = str(cur).strip().upper()
+                if len(s) == 3 and s.isalpha():
+                    info["account_currency"] = s
+        except Exception:
+            pass
 
         # Account sub-object properties: Balance, Leverage (may be populated with a
         # delay after connect — only overwrite if we have a non-zero value so we
@@ -3465,7 +3486,7 @@ class MT5DirectAccount:
                             _bg_cancelled[0] = True  # prevent bg thread double-report
                             self._unsubscribe_open_events(_on_progress, _on_order_update)
                             self._report_result(session_id, "filled", ticket_val,
-                                                fill_price=fill_price, quote_price=price)
+                                                fill_price=fill_price, quote_price=price, lots=lots)
                             return True, ticket_val, fill_price
                     except Exception:
                         pass
@@ -3493,7 +3514,7 @@ class MT5DirectAccount:
                         _bg_cancelled[0] = True  # prevent bg thread double-report
                         self._unsubscribe_open_events(_on_progress, _on_order_update)
                         self._report_result(session_id, "filled", new_ticket,
-                                            fill_price=fill_price, quote_price=price)
+                                            fill_price=fill_price, quote_price=price, lots=lots)
                         return True, new_ticket, fill_price
                 except Exception:
                     pass
@@ -3516,7 +3537,7 @@ class MT5DirectAccount:
                                 self.account_id, new_ticket)
                     _bg_cancelled[0] = True  # prevent bg thread double-report
                     self._report_result(session_id, "filled", new_ticket,
-                                        fill_price=fill_price, quote_price=price)
+                                        fill_price=fill_price, quote_price=price, lots=lots)
                     return True, new_ticket, fill_price
             except Exception:
                 pass
@@ -3715,7 +3736,7 @@ class MT5DirectAccount:
                         self._report_result(
                             session_id,
                             "rollback_closed" if session_id else "closed",
-                            ticket, fill_price=close_price, quote_price=close_price)
+                            ticket, fill_price=close_price, quote_price=close_price, lots=lots)
                         try:
                             self._client.OnOrderProgress -= _on_progress
                         except Exception:
@@ -3742,7 +3763,7 @@ class MT5DirectAccount:
                     self._report_result(
                         session_id,
                         "rollback_closed" if session_id else "closed",
-                        ticket, fill_price=close_price, quote_price=close_price)
+                        ticket, fill_price=close_price, quote_price=close_price, lots=lots)
                     return True
             except Exception:
                 pass
@@ -3996,7 +4017,7 @@ class MT5DirectAccount:
             return False, 0, 0
 
 
-    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0):
+    def _report_result(self, session_id, status, ticket, detail="", fill_price=0, quote_price=0, lots=0):
         """Report trade result back to dashboard."""
         try:
             report_fn = self.dd.get("report_trade_result")
@@ -4010,6 +4031,7 @@ class MT5DirectAccount:
                     "detail": detail,
                     "fill_price": fill_price,
                     "quote_price": quote_price,
+                    "lots": float(lots) if lots else 0,
                 })
         except Exception as e:
             logger.error("[%s] MT5 Report result error: %s", self.account_id, e)
@@ -4325,6 +4347,8 @@ class MTDirectManager:
                 "stop_out_level": acct.config.get("stop_out_level"),
                 "alert_email": acct.config.get("alert_email"),
                 "alert_telegram": acct.config.get("alert_telegram"),
+                # account_currency: manual config override takes priority over API-detected value
+                "account_currency": acct.config.get("account_currency") or info.get("account_currency"),
             }
         return result
 
@@ -4713,9 +4737,23 @@ class MTDirectManager:
                     # Normal open OR cycle reopen phase OR open_limit OR cycle_limit open
                     trade_side = side_info.get("action", "buy")
                     is_cycle_op = action.startswith("cycle_") or result == "cycle_limit_open"
-                    op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots") if is_cycle_op else None
+                    op_lot_size = None
+                    if is_cycle_op:
+                        op_lot_size = session.get("cycle_progress", {}).get("last_closed_lots")
+                        if not op_lot_size:
+                            prog = session.get("cycle_progress", {})
+                            ct = prog.get("closed_ticket") or (prog.get("closed_tickets")[-1] if prog.get("closed_tickets") else None) or (prog.get("confirmed_closed_tickets")[-1] if prog.get("confirmed_closed_tickets") else None)
+                            if ct is not None:
+                                for cf in reversed(session.get("close_fills", [])):
+                                    if cf.get("account") == account_id and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(ct):
+                                        op_lot_size = cf.get("lots")
+                                        break
                     if not op_lot_size:
                         op_lot_size = lot_size
+                    try:
+                        op_lot_size = float(op_lot_size)
+                    except (ValueError, TypeError):
+                        op_lot_size = float(lot_size)
                     if result == "cycle_limit_open":
                         # Place batch_size limit orders for cycle reopen
                         limit_dist = session.get("cycle_limit_distance") or 10
@@ -4880,7 +4918,8 @@ class MTDirectManager:
             original_side = side_info.get("action", "buy")
 
             # Look up actual position volume from broker — MT5 rejects mismatched lots
-            actual_lots = lot_size
+            matched_f = next((f for f in session.get("fills", []) if f.get("account") == account_id and str(f.get("ticket")) == str(ticket)), None)
+            actual_lots = (matched_f.get("lots") if matched_f else None) or lot_size
             try:
                 orders = direct_acct._get_open_orders()
                 for o in orders:
@@ -4962,7 +5001,7 @@ class MTDirectManager:
                             ticket = fill.get("ticket")
 
                             # Look up actual position volume from broker
-                            actual_lots = lot_size
+                            actual_lots = fill.get("lots") or lot_size
                             try:
                                 orders = direct_acct._get_open_orders()
                                 for o in orders:
@@ -5057,7 +5096,7 @@ class MTDirectManager:
                     else:
                         fill = acct_fills[idx]
                         ticket = fill.get("ticket")
-                        actual_lots = lot_size
+                        actual_lots = fill.get("lots") or lot_size
                         try:
                             orders = direct_acct._get_open_orders()
                             for o in orders:
@@ -5130,7 +5169,7 @@ class MTDirectManager:
             original_side = side_info.get("action", "buy")
 
             # Look up actual position volume from broker — MT5 rejects mismatched lots
-            actual_lots = lot_size
+            actual_lots = fill.get("lots") or lot_size
             ticket_found = False
             orders = []
             try:

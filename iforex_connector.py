@@ -1414,6 +1414,8 @@ class IForexAccountManager:
                 "alert_telegram": acct.config.get("alert_telegram"),
                 "auto_connect_start": acct.config.get("auto_connect_start", True),
                 "market_closed": bool(acct.is_market_closed),
+                # account_currency: manual config override, then API-detected, then default to EUR
+                "account_currency": acct.config.get("account_currency") or info.get("account_currency") or "EUR",
             }
         return result
 

@@ -1245,7 +1245,56 @@ def _account_has_positions(aid):
     return False
 
 
+_KNOWN_CURRENCIES = {
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+    "SEK", "NOK", "DKK", "SGD", "HKD", "MXN", "ZAR", "TRY",
+    "PLN", "HUF", "CZK", "RUB", "CNH", "CNY",
+}
+
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥",
+    "CHF": "Fr", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$",
+    "SEK": "kr", "NOK": "kr", "DKK": "kr", "SGD": "S$",
+    "HKD": "HK$", "MXN": "MX$", "ZAR": "R", "TRY": "₺",
+    "PLN": "zł", "HUF": "Ft", "CZK": "Kč", "RUB": "₽",
+    "CNH": "¥", "CNY": "¥",
+}
+
+
+def _detect_denomination(account_id, info):
+    """Detect account denomination/currency. Returns (currency_code, source_description).
+
+    Priority order:
+    1. Explicit 'account_currency' already set on the info dict (from API or manual config)
+    2. Label / group_label heuristic  (e.g. "HUGUES-EUR-1234" → "EUR")
+    3. Account ID heuristic
+    4. Default to "USD"
+    """
+    # 1. Explicit from API or config (already merged onto info by get_status())
+    cur = info.get("account_currency")
+    if cur:
+        s = str(cur).strip().upper()
+        if s in _KNOWN_CURRENCIES:
+            return s, "api"
+
+    # 2. Group label / label heuristics
+    for field in ("group_label", "label"):
+        val = str(info.get(field, "") or "").upper()
+        for c in _KNOWN_CURRENCIES:
+            if f"-{c}-" in val or val.startswith(f"{c}-") or val.endswith(f"-{c}"):
+                return c, f"label"
+
+    # 3. Account ID heuristic
+    aid = str(account_id).upper()
+    for c in _KNOWN_CURRENCIES:
+        if f"-{c}-" in aid or aid.startswith(f"{c}-") or aid.endswith(f"-{c}"):
+            return c, "account_id"
+
+    return "USD", "default"
+
+
 def _is_account_swapfree(account_id):
+
     """Return True if account is marked as swapfree, False otherwise."""
     if not account_id:
         return False
@@ -1986,6 +2035,25 @@ def _load_sessions():
                                     if acct_k and ts_k and not f.get("cmd_ts") and (acct_k, ts_k) in cmd_ts_map:
                                         f["cmd_ts"] = cmd_ts_map[(acct_k, ts_k)]
                                         app.logger.info("Backfilled batch cmd_ts for fill ticket=%s in session %s", f.get("ticket"), sid_k[:8])
+                    # Migration: ensure every fill and close_fill has lots recorded
+                    for sid_k, session_dict in sessions.items():
+                        sess_lots = float(session_dict.get("lot_size") or 0.01)
+                        sides_dict = session_dict.get("sides", {})
+                        fills_m = session_dict.get("fills", [])
+                        cf_map = {str(cf.get("ticket")): float(cf.get("lots")) for cf in session_dict.get("close_fills", []) if cf.get("lots")}
+                        for f in fills_m:
+                            acc = f.get("account")
+                            mc = str(f.get("_matched_closed") or "")
+                            if mc and mc in cf_map:
+                                f["lots"] = cf_map[mc]
+                            elif f.get("lots") is None or f.get("lots") <= 0:
+                                f["lots"] = float(sides_dict.get(acc, {}).get("lot_size") or sess_lots)
+                        for cf in session_dict.get("close_fills", []):
+                            if cf.get("lots") is None or cf.get("lots") <= 0:
+                                acc = cf.get("account")
+                                t = cf.get("ticket")
+                                matched = next((f for f in fills_m if f.get("account") == acc and _normalize_ticket(f.get("ticket")) == _normalize_ticket(t)), None) if t else None
+                                cf["lots"] = float((matched.get("lots") if matched else 0) or sides_dict.get(acc, {}).get("lot_size") or sess_lots)
                     # Migration: normalize pair extensions to lowercase
                     # and use base pair (no extension) as global pair.
                     # e.g. global USDCHF.B -> USDCHF, side USDCHF.B -> USDCHF.b
@@ -4235,9 +4303,16 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
     closed_lots = data.get("lots") or data.get("volume")
     if not closed_lots and ticket is not None:
         for f in session.get("fills", []):
-            if f.get("account") == account and str(f.get("ticket")) == str(ticket):
+            if f.get("account") == account and _normalize_ticket(f.get("ticket")) == _normalize_ticket(ticket):
                 closed_lots = f.get("lots")
                 break
+    if not closed_lots and ticket is not None:
+        for cf in session.get("close_fills", []):
+            if cf.get("account") == account and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(ticket):
+                closed_lots = cf.get("lots")
+                break
+    if not closed_lots:
+        closed_lots = session.get("sides", {}).get(account, {}).get("lot_size") or session.get("lot_size", 0)
     if closed_lots:
         try:
             progress["last_closed_lots"] = float(closed_lots)
@@ -4246,11 +4321,14 @@ def _cycle_handle_close(session, account, data, session_id, cmd_sent_ts=None):
     progress["closed_ticket"] = ticket
     session["cycle_progress"] = progress
     session.setdefault("last_trade_ts", {})[account] = time.time()
+    orig_f = next((f for f in session.get("fills", []) if f.get("account") == account and _normalize_ticket(f.get("ticket")) == _normalize_ticket(ticket)), None)
+    c_lots = float(closed_lots or (orig_f.get("lots") if orig_f else 0) or session.get("sides", {}).get(account, {}).get("lot_size") or session.get("lot_size", 0))
     session.setdefault("close_fills", []).append({
         "account": account,
         "ticket": ticket,
         "price": float(close_price_val) if close_price_val is not None else None,
         "quote_price": float(quote_price_val) if quote_price_val is not None else None,
+        "lots": c_lots,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ts_epoch": time.time(),
         "cmd_ts": cmd_sent_ts,
@@ -4319,12 +4397,52 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                 batch_cmd_ts = bf.get("cmd_ts")
                 break
 
+    # Determine which closed ticket this reopen fill corresponds to
+    closed_tickets = list(progress.get("closed_tickets_this_reopen", [])) or list(progress.get("closed_tickets", []))
+    # Backwards-compat: handle old single closed_ticket field
+    if not closed_tickets:
+        old_ct = progress.get("closed_ticket")
+        if old_ct is not None:
+            closed_tickets = [old_ct]
+    if not closed_tickets and progress.get("confirmed_closed_tickets"):
+        closed_tickets = [progress.get("confirmed_closed_tickets")[-1]]
+
+    already_matched = [str(nf.get("_matched_closed")) for nf in open_batch_fills if nf.get("_matched_closed")]
+    unmatched_closed = [ct for ct in closed_tickets if str(ct) not in already_matched]
+    closed_ticket = unmatched_closed[0] if unmatched_closed else None
+
+    # Determine the exact lot size that was closed for this cycle step
+    target_closed_lots = None
+    if closed_ticket is not None:
+        for cf in reversed(session.get("close_fills", [])):
+            if cf.get("account") == account and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(closed_ticket):
+                if cf.get("lots"):
+                    target_closed_lots = float(cf["lots"])
+                    break
+        if not target_closed_lots:
+            for f in session.get("fills", []):
+                if f.get("account") == account and _normalize_ticket(f.get("ticket")) == _normalize_ticket(closed_ticket):
+                    if f.get("lots"):
+                        target_closed_lots = float(f["lots"])
+                        break
+
+    if not target_closed_lots and progress.get("last_closed_lots"):
+        try:
+            target_closed_lots = float(progress["last_closed_lots"])
+        except (ValueError, TypeError):
+            pass
+
+    # Resolution: connector/broker reported lots -> target closed lots -> side lot_size -> session lot_size
+    data_lots = float(data.get("lots", 0) or 0)
+    fill_lots = data_lots or target_closed_lots or float(session.get("sides", {}).get(account, {}).get("lot_size") or session.get("lot_size", 0.01))
+
     new_fill = {
         "account": account,
         "ticket": ticket,
         "price": float(fill_price) if fill_price is not None else None,
         "quote_price": float(quote_price) if quote_price is not None else None,
         "spread": int(spread) if spread else None,
+        "lots": fill_lots,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ts_epoch": time.time(),
         "cmd_ts": batch_cmd_ts,
@@ -4334,28 +4452,16 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     open_batch_fills.append(new_fill)
     progress["open_batch_fills"] = open_batch_fills
     fills_so_far = len(open_batch_fills)
-    print(f"[CYCLE] Batch fill {fills_so_far}/{batch_size} received on {account}: ticket={ticket}")
+    print(f"[CYCLE] Batch fill {fills_so_far}/{batch_size} received on {account}: ticket={ticket} (lots={fill_lots})")
 
-    # Replace closed fills with the new fills using the closed_tickets list (set by watchdog/TP handler)
-    closed_tickets = list(progress.get("closed_tickets_this_reopen", [])) or list(progress.get("closed_tickets", []))
-    # Backwards-compat: handle old single closed_ticket field
-    if not closed_tickets:
-        old_ct = progress.get("closed_ticket")
-        if old_ct is not None:
-            closed_tickets = [old_ct]
-
-    # Match this fill to the next unmatched closed ticket
-    already_matched = [str(nf.get("_matched_closed")) for nf in open_batch_fills[:-1] if nf.get("_matched_closed")]
-    unmatched_closed = [ct for ct in closed_tickets if str(ct) not in already_matched]
     replaced = False
-    if unmatched_closed:
-        closed_ticket = unmatched_closed[0]
+    if closed_ticket is not None:
         new_fill["_matched_closed"] = closed_ticket
         for i, f in enumerate(session.get("fills", [])):
-            if f.get("account") == account and str(f.get("ticket")) == str(closed_ticket):
+            if f.get("account") == account and _normalize_ticket(f.get("ticket")) == _normalize_ticket(closed_ticket):
                 session["fills"][i] = new_fill
                 replaced = True
-                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} at fills[{i}] (fresh ts)")
+                print(f"[CYCLE] Replaced fill ticket={closed_ticket} with new ticket={ticket} (lots={fill_lots}) at fills[{i}] (fresh ts)")
                 break
 
     if not replaced:
@@ -4373,9 +4479,10 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                     break
         if replaced_idx is not None:
             old_f = session["fills"][replaced_idx]
+            old_t = old_f.get("ticket")
             session["fills"][replaced_idx] = new_fill
             replaced = True
-            print(f"[CYCLE] Replaced stale fill ticket={old_t} with new ticket={ticket} at fills[{replaced_idx}]")
+            print(f"[CYCLE] Replaced stale fill ticket={old_t} with new ticket={ticket} (lots={fill_lots}) at fills[{replaced_idx}]")
         else:
             session.setdefault("fills", []).append(new_fill)
             print(f"[CYCLE] Fallback: Appended new ticket={ticket}")
@@ -4443,7 +4550,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         progress["sum_close_price"] = progress.get("sum_close_price", 0.0) + cycle_close_price
         progress["sum_reopen_price"] = progress.get("sum_reopen_price", 0.0) + reopen_price
         side_info = session.get("sides", {}).get(account, {})
-        lot_size = progress.get("last_closed_lots") or data.get("lots") or side_info.get("lot_size") or session.get("lot_size", 0.01)
+        lot_size = new_fill.get("lots") or progress.get("last_closed_lots") or data.get("lots") or side_info.get("lot_size") or session.get("lot_size", 0.01)
         progress["sum_lots"] = progress.get("sum_lots", 0.0) + float(lot_size)
         spread_cost = abs(reopen_price - cycle_close_price)
         progress["total_spread_cost"] = progress.get("total_spread_cost", 0.0) + spread_cost
@@ -5922,18 +6029,20 @@ def _run_hedge_monitor_all():
                                             # which causes Path 2 (missing tickets detector) to re-detect them after this rollback finishes
                                             # and fire a duplicate counterparty close!
                                             for c_t in candidate_missing[:len(unique_to_add)]:
+                                                fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
+                                                                  if f.get("account") == min_acc and _normalize_ticket(f.get("ticket")) == c_t), 0)
+                                                c_lots = fill_lots or float(session.get("sides", {}).get(min_acc, {}).get("lot_size") or session.get("lot_size", 0))
                                                 session.setdefault("close_fills", []).append({
                                                     "account": min_acc,
                                                     "ticket": c_t,
                                                     "price": None,
+                                                    "lots": c_lots,
                                                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                                     "ts_epoch": now_ts,
                                                     "external": True,
                                                     "verified": bool(has_verified),
                                                 })
                                                 session.setdefault("closed", {})[min_acc] = session.get("closed", {}).get(min_acc, 0) + 1
-                                                fill_lots = next((f.get("lots", 0) for f in session.get("fills", [])
-                                                                  if f.get("account") == min_acc and _normalize_ticket(f.get("ticket")) == c_t), 0)
                                                 if fill_lots:
                                                     _update_closed_lots(session, min_acc, fill_lots)
                                                 print(f"[HEDGE-REBAL] Recorded externally closed ticket {c_t} on {min_acc} in close_fills (rebalancing {max_acc})")
@@ -6182,10 +6291,10 @@ def _run_hedge_monitor_all():
                                     except (ValueError, TypeError):
                                         heal_lots = 0.01
 
-                                    # Lot size guard: if pos has lots information, reject if it does not match this session's lot size
+                                    # Lot size: use position's actual lots if available
                                     pos_lots = float(pos.get("lots", 0.0) or 0.0)
-                                    if pos_lots > 0 and heal_lots > 0 and abs(pos_lots - heal_lots) > 0.0001:
-                                        continue
+                                    if pos_lots > 0:
+                                        heal_lots = pos_lots
 
                                     # Over-fill guard: do not auto-heal into a session if it has already reached total_positions
                                     # (unless in active cycle_limit phase where an open was explicitly dispatched)
@@ -8946,6 +9055,7 @@ def update_session(session_id):
                           "max_errors", "trade_pause",
                           "execution_order", "max_accum_lots", "max_accum_deals",
                           "side1_max_spread", "side2_max_spread",
+                          "side1_lot_size", "side2_lot_size", "lot_size",
                           "close_count", "action", "cycle_days",
                           "limit_distance", "limit_batch_size", "limit_days", "trail_step",
                           "cycle_limit_days", "cycle_limit_distance", "cycle_limit_trail_step", "cycle_limit_batch_size",
@@ -8953,7 +9063,7 @@ def update_session(session_id):
                           "require_diff_skew_open", "require_diff_skew_close",
                           "avoid_news")
             # Fields that require draft/paused to change
-            structural_fields = ("pair", "lot_size", "total_positions",
+            structural_fields = ("pair", "total_positions",
                                  "comment", "sides")
 
             is_hot_only = all(f in hot_fields for f in data.keys())
@@ -9691,6 +9801,9 @@ def poll_command():
                         cmd["lots"] = first_ticket.get("lots", side_lots)
                     else:
                         cmd["close_ticket"] = first_ticket
+                        f_match = next((f for f in session.get("fills", []) if f.get("account") == account and _normalize_ticket(f.get("ticket")) == _normalize_ticket(first_ticket)), None)
+                        if f_match and f_match.get("lots"):
+                            cmd["lots"] = f_match["lots"]
                 print(f"[CMD-TRACE] ROLLBACK to acct={account}: {cmd}")
                 return jsonify(cmd)
 
@@ -9830,7 +9943,7 @@ def poll_command():
                         "session_id": sid,
                         "action": "close",
                         "pair": side_pair,
-                        "lots": side_lots,
+                        "lots": fill_lots,
                         "side": side_info.get("action", "buy"),
                         "max_spread": 9999,  # Cycle close: bypass spread check
                         "comment": side_info.get("comment") or session["comment"],
@@ -9857,7 +9970,16 @@ def poll_command():
             # Handle cycle open phase — build a normal open command
             if action.startswith("cycle_"):
                 action_for_cmd = "open"  # During cycle open phase, command is "open"
-                cycle_lots = progress.get("last_closed_lots") or side_lots
+                cycle_lots = progress.get("last_closed_lots")
+                if not cycle_lots:
+                    ct = progress.get("closed_ticket")
+                    if ct is not None:
+                        for cf in reversed(session.get("close_fills", [])):
+                            if cf.get("account") == account and _normalize_ticket(cf.get("ticket")) == _normalize_ticket(ct):
+                                cycle_lots = cf.get("lots")
+                                break
+                if not cycle_lots:
+                    cycle_lots = side_lots
             else:
                 action_for_cmd = action
                 cycle_lots = side_lots
@@ -9924,6 +10046,8 @@ def poll_command():
                         t = _normalize_ticket(af.get("ticket", 0))
                         if t not in acct_closed_tickets and t not in pending_rb:
                             cmd["close_ticket"] = t
+                            if af.get("lots"):
+                                cmd["lots"] = af["lots"]
                             break
 
             print(f"[CMD-TRACE] NORMAL to acct={account}: {cmd}")
@@ -10278,6 +10402,7 @@ def trade_result():
                         "ticket": ticket,
                         "price": float(close_price) if close_price else None,
                         "quote_price": float(quote_price) if quote_price else None,
+                        "lots": float(lot_val),
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "ts_epoch": time.time(),
                         "cmd_ts": cmd_sent_ts,
@@ -10332,6 +10457,7 @@ def trade_result():
                         "ticket": ticket,
                         "price": float(close_price) if close_price else None,
                         "quote_price": float(quote_price) if quote_price else None,
+                        "lots": _cl_lot,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "ts_epoch": time.time(),
                         "cmd_ts": cmd_sent_ts,
@@ -10712,6 +10838,7 @@ def api_status():
             "symbol": info.get("symbol", ""),
             "swapfree": _is_account_swapfree(acc),
             "stats_log": acc in _snap_settings.get("stats_log_accounts", []),
+            "account_currency": info.get("account_currency"),
         }
 
     # Attach live diff/spread data to each session for UI display
@@ -10845,6 +10972,17 @@ def api_status():
         if not include_fills:
             sc.pop('fills', None)
             sc.pop('close_fills', None)
+        else:
+            for f in sc.get('fills', []):
+                if f.get('lots') is None or f.get('lots') <= 0:
+                    acc = f.get('account')
+                    f['lots'] = float(sc.get("sides", {}).get(acc, {}).get("lot_size") or sc.get("lot_size", 0.01))
+            for cf in sc.get('close_fills', []):
+                if cf.get('lots') is None or cf.get('lots') <= 0:
+                    acc = cf.get('account')
+                    t = cf.get('ticket')
+                    matched_of = next((f for f in sc.get('fills', []) if f.get('account') == acc and _normalize_ticket(f.get('ticket')) == _normalize_ticket(t)), None) if t else None
+                    cf['lots'] = float((matched_of.get('lots') if matched_of else 0) or sc.get("sides", {}).get(acc, {}).get("lot_size") or sc.get("lot_size", 0.01))
         enriched_sessions.append(sc)
 
     # News blackout status
@@ -10968,7 +11106,33 @@ def api_status():
     except Exception:
         pass
 
+    # ── Denomination detection ─────────────────────────────────────────────────
+    # Merge manual account_currency overrides from dashboard_settings, then
+    # stamp denomination + denomination_source onto every account dict.
+    _manual_currencies = _snap_settings.get("account_currencies", {})
+    for _accts_dict in (fix_accts, mt_accts, iforex_accts, ea_status):
+        for aid, ainfo in _accts_dict.items():
+            if aid in _manual_currencies:
+                ainfo["account_currency"] = _manual_currencies[aid]
+            cur, src = _detect_denomination(aid, ainfo)
+            ainfo["denomination"] = cur
+            ainfo["denomination_source"] = src
+    # Also enrich manual_accounts dict
+    for aid, ainfo in _snap_manual_accounts.items():
+        if aid in _manual_currencies:
+            ainfo = dict(ainfo)  # don't mutate the snapshot in-place for manual accounts
+            ainfo["account_currency"] = _manual_currencies[aid]
+        cur, src = _detect_denomination(aid, ainfo)
+        ainfo["denomination"] = cur
+        ainfo["denomination_source"] = src
+    # Include iforex_accts now that denomination is stamped
+    try:
+        iforex_accts_cur = {k: v for k, v in iforex_accts.items()}
+    except Exception:
+        iforex_accts_cur = {}
+
     # Include margin alert thresholds in response for frontend
+
     margin_alert_data = {
         "global_threshold": _snap_settings.get("margin_alert_threshold", 85),
         "per_account": _snap_settings.get("margin_alert_thresholds", {}),
@@ -11170,6 +11334,7 @@ def add_account():
 
         conn_type = data.get("conn_type", "manual")  # manual, fix, poll
         group_label = str(data.get("group_label", "")).strip()
+        account_currency = str(data.get("account_currency", data.get("currency", ""))).strip().upper()
         with lock:
             manual_accounts[name] = {
                 "conn_type": conn_type,
@@ -11177,7 +11342,11 @@ def add_account():
                 "balance": data.get("balance"),
                 "equity": data.get("equity"),
                 "swapfree": bool(data.get("swapfree", False)),
+                "account_currency": account_currency or None,
             }
+            if account_currency:
+                dashboard_settings.setdefault("account_currencies", {})[name] = account_currency
+                _save_settings()
         _log_event(None, name, "account_added", f"type={conn_type}")
         _save_strategies()
         return jsonify({"ok": True, "name": name})
@@ -11220,6 +11389,14 @@ def update_account(account_name):
                 acct["notes"] = str(data["notes"])
             if "is_hidden" in data:
                 acct["is_hidden"] = bool(data["is_hidden"])
+            if "account_currency" in data:
+                cur_val = str(data["account_currency"]).strip().upper() if data["account_currency"] else None
+                acct["account_currency"] = cur_val
+                if cur_val:
+                    dashboard_settings.setdefault("account_currencies", {})[account_name] = cur_val
+                else:
+                    dashboard_settings.get("account_currencies", {}).pop(account_name, None)
+                _save_settings()
             if "fee_threshold" in data:
                 try:
                     acct["fee_threshold"] = float(data["fee_threshold"])
@@ -11264,11 +11441,13 @@ def update_account(account_name):
                     if k == account_name or v.get("label") == account_name or v.get("group_label") == account_name:
                         v["swapfree"] = sf_val
 
-            # Sync swapfree to ea_account_info
+            # Sync swapfree and account_currency to ea_account_info
             for k, v in ea_account_info.items():
                 if k == account_name or v.get("label") == account_name or v.get("group_label") == account_name or str(v.get("login") or "") == acc_str:
                     if "swapfree" in data:
                         v["swapfree"] = bool(data["swapfree"])
+                    if "account_currency" in data:
+                        v["account_currency"] = str(data["account_currency"]).strip().upper() if data["account_currency"] else None
 
             # Sync to FIX accounts config if it exists
             if fix_manager:
@@ -11278,6 +11457,9 @@ def update_account(account_name):
                     if aid == account_name or c.get("label") == account_name or c.get("group_label") == account_name or c.get("external_account_id") == account_name:
                         if "group_label" in data:
                             c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "account_currency" in data:
+                            c["account_currency"] = str(data["account_currency"]).strip().upper() if data["account_currency"] else None
                             changed = True
                         if "swapfree" in data:
                             c["swapfree"] = bool(data["swapfree"])
@@ -11308,6 +11490,9 @@ def update_account(account_name):
                     if aid == account_name or c.get("label") == account_name or str(c.get("login") or "") == acc_str or c.get("group_label") == account_name:
                         if "group_label" in data:
                             c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "account_currency" in data:
+                            c["account_currency"] = str(data["account_currency"]).strip().upper() if data["account_currency"] else None
                             changed = True
                         if "swapfree" in data:
                             c["swapfree"] = bool(data["swapfree"])
@@ -11341,6 +11526,9 @@ def update_account(account_name):
                     if aid == account_name or c.get("label") == account_name or c.get("group_label") == account_name:
                         if "group_label" in data:
                             c["group_label"] = str(data["group_label"]).strip()
+                            changed = True
+                        if "account_currency" in data:
+                            c["account_currency"] = str(data["account_currency"]).strip().upper() if data["account_currency"] else None
                             changed = True
                         if "swapfree" in data:
                             c["swapfree"] = bool(data["swapfree"])
@@ -11658,7 +11846,7 @@ def update_fix_account(account_id):
                      'auto_connect_start', 'cycle_reminder_enabled',
                      'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
                      'day_schedule', 'day_schedule_template',
-                     'group_label', 'swapfree', 'margin_alert_threshold', 'alert_email', 'alert_telegram', 'notes']:
+                     'group_label', 'swapfree', 'margin_alert_threshold', 'alert_email', 'alert_telegram', 'notes', 'account_currency']:
             if key in data:
                 if key == "day_schedule":
                     acct.config[key] = _normalize_day_schedule(data[key])
@@ -11744,6 +11932,7 @@ def add_mt_direct_account():
             "day_schedule_template": data.get("day_schedule_template"),
             "alert_email": data.get("alert_email"),
             "alert_telegram": data.get("alert_telegram"),
+            "account_currency": str(data["account_currency"]).strip().upper() if data.get("account_currency") else None,
         }
         ok = mt_direct_manager.add_account(account_id, config, auto_connect=auto_connect)
         if not ok:
@@ -11816,7 +12005,7 @@ def update_mt_direct_account(account_id):
         for key in ['login', 'server', 'port', 'label', 'slippage', 'magic_number', 'type', 'stop_out_level',
                      'auto_connect_start', 'cycle_reminder_enabled', 'cycle_reminder_days',
                      'cycle_max_days', 'auto_cycle_enabled', 'day_schedule', 'day_schedule_template',
-                     'alert_email', 'alert_telegram', 'swapfree', 'notes']:
+                     'alert_email', 'alert_telegram', 'swapfree', 'notes', 'account_currency']:
             if key in data:
                 if key == "day_schedule":
                     acct.config[key] = _normalize_day_schedule(data[key])
@@ -12049,7 +12238,7 @@ def update_iforex_account(account_id):
         data = request.get_json(force=True)
         for key in ['label', 'group_label', 'account_number', 'username', 'password', 'cookie', 'security_token',
                      'base_url', 'leverage', 'swapfree', 'stop_out_level',
-                     'alert_email', 'alert_telegram']:
+                     'alert_email', 'alert_telegram', 'account_currency']:
             if key in data:
                 acct.config[key] = data[key]
         if "label" in data:
@@ -15120,7 +15309,10 @@ body {
         <label>Group Label</label>
         <input type="text" id="aGroupLabel" placeholder="e.g. A">
       </div>
-
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="aCurrency" placeholder="e.g. USD" style="text-transform:uppercase;">
+      </div>
     </div>
     <div class="btn-group" style="margin-top:16px;">
       <button class="btn btn-primary" onclick="addAccount()">Add</button>
@@ -15154,6 +15346,10 @@ body {
       <div class="form-group">
         <label>Group Label</label>
         <input type="text" id="fxGroupLabel" placeholder="e.g. A">
+      </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="fxCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
       </div>
       <div class="form-group">
         <label>Host</label>
@@ -15366,6 +15562,10 @@ body {
         <label>Stop Out Level (%) <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
         <input type="number" id="mtdStopOutLevel" step="0.1" min="0" max="100" placeholder="e.g. 20">
       </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="mtdCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
+      </div>
       <div class="form-group" style="grid-column: 1 / -1; margin-top: 8px; display: none;">
         <label>Alert Email(s) Override <span style="font-size:0.7rem;color:var(--text2)">(comma-separated; optional)</span></label>
         <input type="text" id="mtdAlertEmails" placeholder="e.g. override1@example.com, override2@example.com">
@@ -15476,6 +15676,10 @@ body {
         <label>Stop Out Level (%)</label>
         <input type="number" id="eeaStopOutLevel" step="0.1" min="0" max="100" placeholder="e.g. 50">
       </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="eeaCurrency" placeholder="e.g. USD" style="text-transform:uppercase;">
+      </div>
       <div class="form-group" style="display:flex;align-items:center;margin-top:18px;">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;">
           <input type="checkbox" id="eeaSwapFree">
@@ -15580,6 +15784,10 @@ body {
         <label>Stop Out Level (%)</label>
         <input type="number" id="emtdStopOutLevel" step="0.1" min="0" max="100" placeholder="e.g. 20">
       </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="emtdCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
+      </div>
       <div class="form-group" style="grid-column: 1 / -1; margin-top: 8px; display: none;">
         <label>Alert Email(s) Override <span style="font-size:0.7rem;color:var(--text2)">(comma-separated; optional)</span></label>
         <input type="text" id="emtdAlertEmails" placeholder="e.g. override1@example.com, override2@example.com">
@@ -15680,6 +15888,10 @@ body {
         <input type="number" id="ifxLeverage" value="400" placeholder="e.g. 400">
       </div>
       <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="ifxCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
+      </div>
+      <div class="form-group">
         <label>Username / Email <span style="font-size:0.7rem;color:var(--text2);">(for auto-login)</span></label>
         <input type="text" id="ifxUsername" placeholder="e.g. 12330940 or email">
       </div>
@@ -15743,6 +15955,10 @@ body {
         <label>Stop Out Level (%)</label>
         <input type="number" id="eifxStopOutLevel" placeholder="e.g. 0">
       </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="eifxCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
+      </div>
       <div class="form-group" style="grid-column: 1 / -1;">
         <label>Security Token <span style="font-size:0.7rem;color:var(--text2);">(from browser console: <code>window.systemInfo.securityToken</code>)</span></label>
         <input type="text" id="eifxSecurityToken">
@@ -15802,6 +16018,10 @@ body {
       <div class="form-group">
         <label>Group Label</label>
         <input type="text" id="efxGroupLabel">
+      </div>
+      <div class="form-group">
+        <label>Account Currency <span style="font-size:0.7rem;color:var(--text2)">(optional)</span></label>
+        <input type="text" id="efxCurrency" placeholder="Auto-detect (e.g. USD)" style="text-transform:uppercase;">
       </div>
       <div class="form-group">
         <label>Host</label>
@@ -17344,7 +17564,8 @@ function renderOpenedDeals() {
         symbol2: pair2,
         side1Action: (side1.action || 'sell').toUpperCase(),
         side2Action: (side2.action || 'buy').toUpperCase(),
-        lots: s.lot_size,
+        lots1: (f1 && f1.lots != null) ? f1.lots : ((side1 && side1.lot_size != null) ? side1.lot_size : s.lot_size),
+        lots2: (f2 && f2.lots != null) ? f2.lots : ((side2 && side2.lot_size != null) ? side2.lot_size : s.lot_size),
         time1: f1 ? f1.ts : (s.updated_at || '-'),
         time2: f2 ? f2.ts : (s.updated_at || '-'),
         ticket1: f1 ? f1.ticket : '-',
@@ -17408,7 +17629,7 @@ function renderOpenedDeals() {
       <td rowspan="2" style="vertical-align:middle;font-weight:600;">${d.pairLabel}</td>
       <td style="font-size:0.7rem;">${d.session1}</td>
       <td>${d.side1Action}</td>
-      <td>${d.lots}</td>
+      <td>${d.lots1}</td>
       <td style="font-size:0.7rem;">${d.time1}</td>
       <td>${d.ticket1}</td>
       <td>${d.price1}</td>
@@ -17421,7 +17642,7 @@ function renderOpenedDeals() {
     <tr class="deal-row-bottom">
       <td style="font-size:0.7rem;">${d.session2}</td>
       <td>${d.side2Action}</td>
-      <td>${d.lots}</td>
+      <td>${d.lots2}</td>
       <td style="font-size:0.7rem;">${d.time2}</td>
       <td>${d.ticket2}</td>
       <td>${d.price2}</td>
@@ -17555,7 +17776,8 @@ function renderClosedDeals() {
         session1: getAccountLabel(accs[0]), session2: getAccountLabel(accs[1]),
         side1Action: (side1.action || 'buy').toUpperCase(),
         side2Action: (side2.action || 'sell').toUpperCase(),
-        lots: s.lot_size,
+        lots1: (c1 && c1.lots != null) ? c1.lots : ((o1 && o1.lots != null) ? o1.lots : ((side1 && side1.lot_size != null) ? side1.lot_size : s.lot_size)),
+        lots2: (c2 && c2.lots != null) ? c2.lots : ((o2 && o2.lots != null) ? o2.lots : ((side2 && side2.lot_size != null) ? side2.lot_size : s.lot_size)),
         openTime1: openTime1 || '-', openTime2: openTime2 || '-',
         closeTime1: c1 ? c1.ts : '-', closeTime2: c2 ? c2.ts : '-',
         ticket1: c1 ? c1.ticket : '-', ticket2: c2 ? c2.ticket : '-',
@@ -17620,7 +17842,7 @@ function renderClosedDeals() {
       <td rowspan="2" style="vertical-align:middle;font-weight:600;">${d.pairLabel}</td>
       <td style="font-size:0.7rem;">${d.session1}</td>
       <td>${d.side1Action}</td>
-      <td>${d.lots}</td>
+      <td>${d.lots1}</td>
       <td style="font-size:0.7rem;">${d.openTime1}</td>
       <td style="font-size:0.7rem;">${d.closeTime1}</td>
       <td>${d.ticket1}</td>
@@ -17633,7 +17855,7 @@ function renderClosedDeals() {
     <tr class="deal-row-bottom">
       <td style="font-size:0.7rem;">${d.session2}</td>
       <td>${d.side2Action}</td>
-      <td>${d.lots}</td>
+      <td>${d.lots2}</td>
       <td style="font-size:0.7rem;">${d.openTime2}</td>
       <td style="font-size:0.7rem;">${d.closeTime2}</td>
       <td>${d.ticket2}</td>
@@ -18133,7 +18355,7 @@ function renderInstrumentsTable() {
     return `<tr>
     <td data-col="0"><span class="badge ${badgeClass(s.status)}">${s.status}</span></td>
     <td data-col="1"><input class="inl" value="${s.pair}" ${ro} onchange="inlineEditSession('${s.id}','pair',this.value.trim());this.value=this.value.trim()"></td>
-    <td data-col="2"><input class="inl" type="number" step="0.01" min="0.01" value="${s.lot_size}" ${ro} onchange="inlineEditSession('${s.id}','lot_size',parseFloat(this.value))"></td>
+    <td data-col="2"><input class="inl" type="number" step="0.01" min="0.01" value="${s.lot_size}" onchange="inlineEditSession('${s.id}','lot_size',parseFloat(this.value))"></td>
     <td data-col="3">${renderSide(s, 1)}</td>
     <td data-col="4">${renderSide(s, 2)}</td>
     <td data-col="5"><input class="inl" type="number" step="1" value="${s.diff_to_open != null ? s.diff_to_open : ''}" onchange="inlineEditSession('${s.id}','diff_to_open',this.value===''?null:parseInt(this.value))" style="${(s.diff_to_open != null && s.curr_diff_open != null && s.curr_diff_open < s.diff_to_open && s.action === 'open') ? 'border-color:var(--red);color:var(--red)' : ''}"></td>
@@ -20634,6 +20856,25 @@ function _nopEqCell(ratioStr) {
   </td>`;
 }
 
+// ── Denomination helpers ─────────────────────────────────────────────────
+function _currencySymbol(info) {
+  const sym_map = {
+    USD:'$', EUR:'€', GBP:'£', JPY:'¥', CHF:'Fr\u00a0',
+    CAD:'CA$', AUD:'A$', NZD:'NZ$', SEK:'kr\u00a0', NOK:'kr\u00a0',
+    DKK:'kr\u00a0', SGD:'S$', HKD:'HK$', MXN:'MX$', ZAR:'R\u00a0',
+    TRY:'₺', PLN:'zł\u00a0', HUF:'Ft\u00a0', CZK:'Kč\u00a0', RUB:'₽',
+    CNH:'¥', CNY:'¥',
+  };
+  const cur = (info && (info.denomination || info.account_currency || '')).toUpperCase();
+  return sym_map[cur] || (cur ? cur + '\u00a0' : '');
+}
+function _denomTip(info) {
+  const cur = (info && (info.denomination || info.account_currency || '')).toUpperCase() || 'USD';
+  const src = (info && info.denomination_source) || '';
+  const srcNote = src && src !== 'api' ? ` (inferred from ${src})` : '';
+  return `Account currency: ${cur}${srcNote}`;
+}
+
 function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccounts, cycleReminders, swapDelta, iforexAccounts) {
   iforexAccounts = iforexAccounts || (typeof iforex_accounts_cache !== 'undefined' ? iforex_accounts_cache : {});
 
@@ -20661,7 +20902,9 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   const fundDists = window._fundDistributions || {};
   cycleReminders = cycleReminders || {};
   swapDelta = swapDelta || {};
+
   function _swapDeltaCell(id) {
+
     const d = swapDelta[id];
     if (d == null) return '<td style="font-size:0.78rem;color:var(--text2)">-</td>';
     const color = d >= 0 ? 'var(--green)' : 'var(--red)';
@@ -20803,12 +21046,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td title="Gives proximity of margin call">${ml1}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, id)}
-        <td>${bal}</td>
-        <td>${eq}</td>
-        <td>${optEqVal}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${bal}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${eq}</td>
+        <td>${_currencySymbol(info)}${optEqVal}</td>
         <td style="${shiftColor}">${shiftVal}</td>
         ${_intendedLotsCell(id, info.group_label)}
-        <td style="${pnl1Style}">${pnl1}</td>
+        <td style="${pnl1Style}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnl1}</td>
         <td>${lev}</td>
         <td>${pos1}</td>
         ${_lotsCell(id, lots1, lots1Style)}
@@ -20883,12 +21126,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td title="Gives proximity of margin call">${mlMt}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, id)}
-        <td>${bal}</td>
-        <td>${eq}</td>
-        <td>${optEqMt}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${bal}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${eq}</td>
+        <td>${_currencySymbol(info)}${optEqMt}</td>
         <td style="${shiftMtColor}">${shiftMt}</td>
         ${_intendedLotsCell(displayName, info.group_label)}
-        <td style="${pnlMtStyle}">${pnlMt}</td>
+        <td style="${pnlMtStyle}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnlMt}</td>
         <td>${lev}</td>
         <td>${posMt}</td>
         ${_lotsCell(id, lotsMt, lotsMtStyle)}
@@ -20961,12 +21204,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td title="Gives proximity of margin call">${mlIfx}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, id)}
-        <td>${bal}</td>
-        <td>${eq}</td>
-        <td>${optEqIfx}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${bal}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${eq}</td>
+        <td>${_currencySymbol(info)}${optEqIfx}</td>
         <td style="${shiftIfxColor}">${shiftIfx}</td>
         ${_intendedLotsCell(displayName, info.group_label)}
-        <td style="${pnlIfxStyle}">${pnlIfx}</td>
+        <td style="${pnlIfxStyle}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnlIfx}</td>
         <td>${lev}</td>
         <td>${posIfx}</td>
         ${_lotsCell(id, lotsIfx, lotsIfxStyle)}
@@ -21043,12 +21286,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td title="Gives proximity of margin call">${mlM}</td>
         ${_pipsToMcCell(eaInfo || info)}
         ${_ageCell(null, name)}
-        <td>${bal}</td>
-        <td>${eq}</td>
-        <td>${optEqM}</td>
+        <td title="${_denomTip(eaInfo || info)}">${_currencySymbol(eaInfo || info)}${bal}</td>
+        <td title="${_denomTip(eaInfo || info)}">${_currencySymbol(eaInfo || info)}${eq}</td>
+        <td>${_currencySymbol(eaInfo || info)}${optEqM}</td>
         <td style="${shiftMColor}">${shiftM}</td>
         ${_intendedLotsCell(name, info.group_label)}
-        <td>-</td>
+        <td title="${_denomTip(eaInfo || info)}">-</td>
         <td>${lev}</td>
         <td>-</td>
         <td>-</td>
@@ -21108,12 +21351,12 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td title="Gives proximity of margin call">${mlE}</td>
         ${_pipsToMcCell(info)}
         ${_ageCell(info, acc)}
-        <td>${bal}</td>
-        <td>${eq}</td>
-        <td>${optEqE}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${bal}</td>
+        <td title="${_denomTip(info)}">${_currencySymbol(info)}${eq}</td>
+        <td>${_currencySymbol(info)}${optEqE}</td>
         <td style="${shiftEColor}">${shiftE}</td>
         ${_intendedLotsCell(acc, mConfig.group_label)}
-        <td>-</td>
+        <td title="${_denomTip(info)}">-</td>
         <td>${lev}</td>
         <td>-</td>
         <td>-</td>
@@ -21340,11 +21583,14 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let hasOptEq = false, hasShift = false;
     const memberIds = [];
     let connectedCount = 0;  // Count of connected accounts in this group
+    const groupDenoms = new Set();
 
     for (const m of members) {
       const info = m.info || {};
       const hb = heartbeats ? (heartbeats[m.id] || {}) : {};
       memberIds.push(m.id);
+      const mCur = (info.denomination || info.account_currency || hb.denomination || hb.account_currency || '').toUpperCase();
+      if (mCur) groupDenoms.add(mCur);
 
       // Connection status
       let isConnected = false;
@@ -21529,6 +21775,15 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       ? `<td style="${sdColor};font-size:0.78rem"><a href="#" onclick="showGroupSwapBreakdown('${prefix}', '${groupMemberIdsStr}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument swap breakdown for this group">${fSwapDelta}</a></td>`
       : `<td style="${sdColor};font-size:0.78rem">${fSwapDelta}</td>`;
 
+    let grpSym = '', grpTip = '';
+    if (groupDenoms.size === 1) {
+      const c = Array.from(groupDenoms)[0];
+      grpSym = _currencySymbol({denomination: c});
+      grpTip = `Group currency: ${c}`;
+    } else if (groupDenoms.size > 1) {
+      grpTip = `Mixed currencies in group: ${Array.from(groupDenoms).join(', ')}`;
+    }
+
     rows.push(`<tr style="background:var(--surface2);border-bottom:1px solid var(--border);">
       <td></td>
       <td><strong title="${memberList}">${prefix}</strong> <span style="font-size:0.68rem;color:var(--text2);">(${memberCount})</span></td>
@@ -21545,12 +21800,12 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
         return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
       })()}
       <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
-      <td>${fBal}</td>
-      <td>${fEq}</td>
-      <td>${fOptEq}</td>
+      <td title="${grpTip}">${grpSym}${fBal}</td>
+      <td title="${grpTip}">${grpSym}${fEq}</td>
+      <td>${grpSym}${fOptEq}</td>
       <td style="${shiftColor}">${fShift}</td>
       ${_intendedLotsCell(prefix, prefix, true)}
-      <td style="${pnlColor}">${fPnl}</td>
+      <td style="${pnlColor}" title="${grpTip}">${grpSym}${fPnl}</td>
       <td>${maxMuLev || '-'}</td>
       <td>${fPos}</td>
       ${groupLotsCell}
@@ -21795,8 +22050,8 @@ function _renderSwapBreakdownModal(title, data) {
 
 function showAddAccountModal() {
   document.getElementById('aAcctName').value = '';
-
   document.getElementById('aGroupLabel').value = '';
+  if (document.getElementById('aCurrency')) document.getElementById('aCurrency').value = '';
   document.getElementById('addAccountModal').classList.add('active');
 }
 function closeAddAccountModal() {
@@ -21806,12 +22061,15 @@ async function addAccount() {
   const name = document.getElementById('aAcctName').value.trim();
   const connType = 'poll';
   const groupLabel = document.getElementById('aGroupLabel').value.trim();
+  const currency = document.getElementById('aCurrency') ? document.getElementById('aCurrency').value.trim().toUpperCase() : '';
   if (!name) { alert('Account name is required'); return; }
   try {
+    const payload = {name, conn_type: connType, group_label: groupLabel};
+    if (currency) payload.account_currency = currency;
     const res = await fetch('/api/accounts', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({name, conn_type: connType, group_label: groupLabel})
+      body: JSON.stringify(payload)
     });
     const data = await res.json();
     if (data.error) { alert(data.error); return; }
@@ -22255,6 +22513,7 @@ async function editFixAccount(id) {
     document.getElementById('efxAlertEmails').value = cfg.alert_email || '';
     document.getElementById('efxAlertTelegramIds').value = cfg.alert_telegram || '';
     document.getElementById('efxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    if (document.getElementById('efxCurrency')) document.getElementById('efxCurrency').value = cfg.account_currency || '';
     if (document.getElementById('efxSwapFree')) document.getElementById('efxSwapFree').checked = !!cfg.swapfree;
     document.getElementById('editFixAccountModal').classList.add('active');
     toggleFixFields('efx');
@@ -22270,6 +22529,7 @@ async function saveFixAccountEdit() {
   const payload = {
     label: document.getElementById('efxLabel').value.trim(),
     group_label: document.getElementById('efxGroupLabel').value.trim(),
+    account_currency: document.getElementById('efxCurrency') ? (document.getElementById('efxCurrency').value.trim().toUpperCase() || undefined) : undefined,
     host: host,
     trade_port: parseInt(document.getElementById('efxTradePort').value) || 5202,
     quote_port: parseInt(document.getElementById('efxQuotePort').value) || 5201,
@@ -22339,6 +22599,7 @@ async function showAddFixAccountModal() {
   document.getElementById('fxAlertEmails').value = '';
   document.getElementById('fxAlertTelegramIds').value = '';
   document.getElementById('fxStopOutLevel').value = '';
+  if (document.getElementById('fxCurrency')) document.getElementById('fxCurrency').value = '';
   if (document.getElementById('fxSwapFree')) document.getElementById('fxSwapFree').checked = false;
   setDayScheduleInputs('fx', DEFAULT_DAY_SCHEDULE);
   document.getElementById('addFixAccountModal').classList.add('active');
@@ -22356,6 +22617,7 @@ async function addFixAccount(autoConnect = true) {
     account_id: id,
     label: document.getElementById('fxLabel').value.trim(),
     group_label: document.getElementById('fxGroupLabel').value.trim(),
+    account_currency: document.getElementById('fxCurrency') ? (document.getElementById('fxCurrency').value.trim().toUpperCase() || undefined) : undefined,
     host: host || 'openapi',
     trade_port: parseInt(document.getElementById('fxTradePort').value) || 5202,
     quote_port: parseInt(document.getElementById('fxQuotePort').value) || 5201,
@@ -22453,6 +22715,10 @@ function editEAAccount(name) {
 
   document.getElementById('eeaAlertEmails').value = info.alert_email || '';
   document.getElementById('eeaAlertTelegramIds').value = info.alert_telegram || '';
+  if (document.getElementById('eeaCurrency')) {
+    const curVal = info.account_currency || info.currency || eaInfo.account_currency || eaInfo.currency || (mtInfo && (mtInfo.account_currency || mtInfo.currency)) || (typeof dashboard_settings !== 'undefined' && dashboard_settings?.account_currencies?.[name]) || '';
+    document.getElementById('eeaCurrency').value = curVal;
+  }
   if (document.getElementById('eeaSwapFree')) {
     document.getElementById('eeaSwapFree').checked = !!(info.swapfree || eaInfo.swapfree || mtInfo?.swapfree);
   }
@@ -22466,9 +22732,11 @@ async function saveEAAccountEdit() {
   const name = document.getElementById('eeaAcctName').value;
   const connType = document.getElementById('eeaConnType').value;
   const stopOut = document.getElementById('eeaStopOutLevel').value.trim();
+  const curVal = document.getElementById('eeaCurrency') ? (document.getElementById('eeaCurrency').value.trim().toUpperCase() || null) : null;
   const payload = {
     conn_type: connType,
     group_label: document.getElementById('eeaGroupLabel').value.trim(),
+    account_currency: curVal,
     alert_email: document.getElementById('eeaAlertEmails').value.trim() || null,
     alert_telegram: document.getElementById('eeaAlertTelegramIds').value.trim() || null,
     stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
@@ -22500,7 +22768,8 @@ async function saveEAAccountEdit() {
       alert_email: document.getElementById('eeaAlertEmails').value.trim() || null,
       alert_telegram: document.getElementById('eeaAlertTelegramIds').value.trim() || null,
       stop_out_level: stopOut !== '' ? parseFloat(stopOut) : null,
-      swapfree: payload.swapfree
+      swapfree: payload.swapfree,
+      account_currency: curVal || undefined
     };
   }
 
@@ -22536,6 +22805,7 @@ function showAddMTDirectModal() {
   document.getElementById('mtdAlertEmails').value = '';
   document.getElementById('mtdAlertTelegramIds').value = '';
   document.getElementById('mtdStopOutLevel').value = '';
+  if (document.getElementById('mtdCurrency')) document.getElementById('mtdCurrency').value = '';
   if (document.getElementById('mtdSwapFree')) document.getElementById('mtdSwapFree').checked = false;
   document.getElementById('addMTDirectModal').classList.add('active');
 }
@@ -22564,6 +22834,7 @@ async function addMTDirectAccount(autoConnect = true) {
     cycle_max_days: document.getElementById('mtdCycleMaxDays').value.trim() !== '' ? parseInt(document.getElementById('mtdCycleMaxDays').value) : null,
     auto_cycle_enabled: document.getElementById('mtdAutoCycle').checked,
     label: id,
+    account_currency: document.getElementById('mtdCurrency') ? (document.getElementById('mtdCurrency').value.trim().toUpperCase() || undefined) : undefined,
     slippage: parseInt(document.getElementById('mtdSlippage').value) || 3,
     auto_connect: autoConnect,
     alert_email: document.getElementById('mtdAlertEmails').value.trim() || null,
@@ -22642,6 +22913,7 @@ async function editMTDirect(id) {
     document.getElementById('emtdAlertEmails').value = cfg.alert_email || '';
     document.getElementById('emtdAlertTelegramIds').value = cfg.alert_telegram || '';
     document.getElementById('emtdStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    if (document.getElementById('emtdCurrency')) document.getElementById('emtdCurrency').value = cfg.account_currency || '';
     if (document.getElementById('emtdSwapFree')) document.getElementById('emtdSwapFree').checked = !!cfg.swapfree;
     document.getElementById('editMTDirectModal').classList.add('active');
   } catch(e) { alert('Failed to load MT Direct config: ' + e); }
@@ -22658,6 +22930,7 @@ async function saveMTDirectEdit() {
     server: document.getElementById('emtdServer').value.trim(),
     port: parseInt(document.getElementById('emtdPort').value) || 443,
     label: document.getElementById('emtdLabel').value.trim(),
+    account_currency: document.getElementById('emtdCurrency') ? (document.getElementById('emtdCurrency').value.trim().toUpperCase() || undefined) : undefined,
     slippage: parseInt(document.getElementById('emtdSlippage').value) || 3,
     magic_number: parseInt(document.getElementById('emtdMagic').value) || 777888,
     auto_connect_start: document.getElementById('emtdAutoConnect').checked,
@@ -22882,6 +23155,7 @@ function showAddIForexModal() {
   if (document.getElementById('ifxUsername')) document.getElementById('ifxUsername').value = '';
   if (document.getElementById('ifxPassword')) document.getElementById('ifxPassword').value = '';
   document.getElementById('ifxLeverage').value = '400';
+  if (document.getElementById('ifxCurrency')) document.getElementById('ifxCurrency').value = '';
   document.getElementById('ifxSecurityToken').value = '';
   document.getElementById('ifxCookie').value = '';
   document.getElementById('ifxBaseUrl').value = 'https://trader.iforex.com/webpl4';
@@ -22957,6 +23231,7 @@ async function addIForexAccount() {
     account_number: document.getElementById('ifxAcctNumber').value.trim() || id,
     label: document.getElementById('ifxLabel').value.trim() || id,
     group_label: document.getElementById('ifxLabel').value.trim() || id,
+    account_currency: document.getElementById('ifxCurrency') ? (document.getElementById('ifxCurrency').value.trim().toUpperCase() || undefined) : undefined,
     username: username,
     password: password,
     cookie: cookie,
@@ -23003,6 +23278,7 @@ async function editIForexAccount(id) {
     }
     document.getElementById('eifxLeverage').value = cfg.leverage || 400;
     document.getElementById('eifxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
+    if (document.getElementById('eifxCurrency')) document.getElementById('eifxCurrency').value = cfg.account_currency || '';
     document.getElementById('eifxSecurityToken').value = cfg.security_token || '';
     document.getElementById('eifxCookie').value = cfg.cookie || '';
     document.getElementById('eifxBaseUrl').value = cfg.base_url || 'https://trader.iforex.com/webpl4';
@@ -23025,6 +23301,7 @@ async function saveIForexEdit() {
     account_number: document.getElementById('eifxAcctNumber').value.trim(),
     label: document.getElementById('eifxLabel').value.trim(),
     group_label: document.getElementById('eifxLabel').value.trim(),
+    account_currency: document.getElementById('eifxCurrency') ? (document.getElementById('eifxCurrency').value.trim().toUpperCase() || undefined) : undefined,
     username: document.getElementById('eifxUsername') ? document.getElementById('eifxUsername').value.trim() : '',
     password: document.getElementById('eifxPassword') ? document.getElementById('eifxPassword').value.trim() : '',
     leverage: parseInt(document.getElementById('eifxLeverage').value) || 400,

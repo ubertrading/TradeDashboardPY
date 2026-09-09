@@ -562,6 +562,7 @@ class CTraderFixAccount:
         self._leverage = config.get("leverage", None)  # Manual override from config
         self._total_pnl = 0.0
         self._total_swap = 0.0
+        self._account_currency = None  # Populated from TAG_CURRENCY (15) in collateral reports
         self._collateral_supported = True  # Assume supported until proven otherwise
         self._last_collateral_request = 0
 
@@ -1022,6 +1023,13 @@ class CTraderFixAccount:
                 elif tag == TAG_CASHOUTSTANDING:
                     # CashOutstanding (901) = margin used
                     self._margin_used = float(val_str)
+                elif tag == TAG_CURRENCY:
+                    # Currency (15) = account denomination (e.g. "USD", "EUR")
+                    cur = val_str.strip().upper()
+                    if len(cur) == 3 and cur.isalpha():
+                        self._account_currency = cur
+                        info = self.dd["ea_account_info"].setdefault(self.account_id, {})
+                        info["account_currency"] = cur
                 elif tag == TAG_ACCOUNT:
                     pass  # Account identifier, skip
 
@@ -3621,6 +3629,8 @@ class FixAccountManager:
                 "alert_email": acct.config.get("alert_email"),
                 "alert_telegram": acct.config.get("alert_telegram"),
                 "auto_connect_start": acct.config.get("auto_connect_start", True),
+                # account_currency: manual config override takes priority over API-detected value
+                "account_currency": acct.config.get("account_currency") or info.get("account_currency"),
             }
         return result
 
