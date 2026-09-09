@@ -243,26 +243,26 @@ DEFAULT_DAY_SCHEDULE_TEMPLATES = {
 def get_account_label(acct_id: str) -> str:
     """Return the user-editable display label for an account key.
 
-    Checks MT Direct accounts (``label`` field), then FIX accounts
-    (``group_label``), then manual accounts (``group_label``), falling back
-    to the raw ``acct_id`` when nothing is configured.  This keeps backend
-    notifications (email / Telegram / log messages) consistent with the UI.
+    Checks MT Direct accounts (``label`` field), then iFOREX direct accounts
+    (``label`` field), then FIX accounts (``label`` / ``group_label``), then
+    manual accounts, falling back to the raw ``acct_id`` when nothing is configured.
+    This keeps backend notifications (email / Telegram / log messages) consistent with the UI.
     """
     if mt_direct_manager:
         acct = mt_direct_manager.accounts.get(acct_id)
-        if acct and acct.config.get("label") and acct.config["label"] != acct_id:
+        if acct and acct.config.get("label"):
             return acct.config["label"]
     if 'iforex_manager' in globals() and iforex_manager:
         acct = iforex_manager.accounts.get(acct_id)
-        if acct and acct.config.get("label") and acct.config["label"] != acct_id:
+        if acct and acct.config.get("label"):
             return acct.config["label"]
     if fix_manager:
         acct = fix_manager.accounts.get(acct_id)
-        if acct and acct.config.get("group_label"):
-            return acct.config["group_label"]
+        if acct and (acct.config.get("label") or acct.config.get("group_label")):
+            return acct.config.get("label") or acct.config.get("group_label")
     man = manual_accounts.get(acct_id, {})
-    if man.get("group_label"):
-        return man["group_label"]
+    if man.get("label") or man.get("group_label"):
+        return man.get("label") or man.get("group_label")
     return acct_id
 
 def _normalize_day_schedule(raw):
@@ -16726,29 +16726,30 @@ let swap_delta_cache = {};
 let currentStrategyId = null;
 
 /**
- * Resolve an account key to its user-editable display label.
- * Checks MT Direct (label), iFOREX (label/group_label), FIX (group_label), manual accounts (group_label),
- * and EA heartbeats (label) in that priority order.
+ * Resolve an account key to its user-editable display Name (label).
+ * Checks MT Direct (label), iFOREX (label/group_label), FIX (label/group_label),
+ * manual accounts (label/group_label), and EA heartbeats (label) in that priority order.
  * Falls back to the raw key when no label is set.
  */
 function getAccountLabel(key) {
   if (!key) return key;
   // MT Direct accounts use a 'label' field
   const mtInfo = mt_direct_accounts_cache[key];
-  if (mtInfo && mtInfo.label && mtInfo.label !== key) return mtInfo.label;
+  if (mtInfo && mtInfo.label) return mtInfo.label;
   // iFOREX direct accounts use 'label' or 'group_label'
   const ifxInfo = iforex_accounts_cache[key];
   if (ifxInfo && (ifxInfo.label || ifxInfo.group_label)) {
     return ifxInfo.label || ifxInfo.group_label;
   }
-  // FIX & manual accounts use 'group_label'
+  // FIX accounts use 'label' first, then 'group_label'
   const fixInfo = fix_accounts_cache[key];
-  if (fixInfo && fixInfo.group_label) return fixInfo.group_label;
+  if (fixInfo && (fixInfo.label || fixInfo.group_label)) return fixInfo.label || fixInfo.group_label;
+  // Manual accounts use 'label' first, then 'group_label'
   const manInfo = manual_accounts_cache[key];
-  if (manInfo && manInfo.group_label) return manInfo.group_label;
+  if (manInfo && (manInfo.label || manInfo.group_label)) return manInfo.label || manInfo.group_label;
   // EA heartbeat-only accounts may carry a 'label'
   const eaInfo = ea_heartbeats_cache[key];
-  if (eaInfo && eaInfo.label && eaInfo.label !== key) return eaInfo.label;
+  if (eaInfo && eaInfo.label) return eaInfo.label;
   return key;
 }
 
@@ -17879,8 +17880,27 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
   items.forEach(({value, label}) => { labelMap[value] = label; });
 
   function renderList(filter) {
-    const q = (filter || '').toLowerCase();
-    const filtered = items.filter(({label}) => label.toLowerCase().startsWith(q));
+    const q = (filter || '').toLowerCase().trim();
+    let filtered;
+    if (!q) {
+      filtered = items;
+    } else {
+      const parts = q.split(/\s+/).filter(Boolean);
+      const startsWithMatches = [];
+      const includesMatches = [];
+      items.forEach(item => {
+        // Search against display label AND the underlying account ID (value)
+        const l = (item.label || '').toLowerCase();
+        const v = (item.value || '').toLowerCase();
+        const n = (item.name || '').toLowerCase();
+        if (l.startsWith(q) || v.startsWith(q) || n.startsWith(q)) {
+          startsWithMatches.push(item);
+        } else if (parts.every(p => l.includes(p) || v.includes(p) || n.includes(p))) {
+          includesMatches.push(item);
+        }
+      });
+      filtered = startsWithMatches.concat(includesMatches);
+    }
     list.innerHTML = '';
     if (filtered.length === 0) {
       list.innerHTML = '<li class="acct-combo-no-results">No matches</li>';
@@ -17911,11 +17931,15 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
   }
 
   function openList() {
-    renderList(input.value);
+    if (hidden.value && input.value === labelMap[hidden.value]) {
+      renderList('');
+    } else {
+      renderList(input.value);
+    }
     list.classList.add('open');
   }
 
-  input.addEventListener('focus', () => openList());
+  input.addEventListener('focus', () => { openList(); input.select(); });
   input.addEventListener('click', () => openList());
 
   input.addEventListener('input', () => {
@@ -17942,7 +17966,12 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
       if (items_el[idx]) items_el[idx].scrollIntoView({block:'nearest'});
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (highlighted) { selectItem(highlighted.dataset.value, highlighted.textContent); }
+      if (highlighted) {
+        selectItem(highlighted.dataset.value, highlighted.textContent);
+      } else if (items_el.length === 1) {
+        // Auto-select the only result when pressing Enter
+        selectItem(items_el[0].dataset.value, items_el[0].textContent);
+      }
     } else if (e.key === 'Escape') {
       list.classList.remove('open');
     }
@@ -17961,12 +17990,14 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
     Object.keys(labelMap).forEach(k => delete labelMap[k]);
     newItems.forEach(({value, label}) => { labelMap[value] = label; });
   };
-  // Set current value programmatically
+  // Set current value programmatically (e.g. when editing existing strategy)
   combo._setValue = (val) => {
     hidden.value = val || '';
-    input.value  = labelMap[val] || val || '';
+    // Use the label from the map; fall back to getAccountLabel, then the raw id
+    input.value  = labelMap[val] || (val ? getAccountLabel(val) : '') || val || '';
   };
 }
+
 
 function showNewStrategyModal() {
   document.getElementById('sStratName').value = '';
@@ -18105,27 +18136,23 @@ function renderStrategies(strats, sessions) {
 
 // ─── Edit Strategy modal (strategy details + instruments) ───────────────
 function _buildAcctItems() {
+  const seen = new Set();
   const allAccounts = [];
-  Object.keys(ea_heartbeats_cache).forEach(a => allAccounts.push(a));
-  Object.keys(manual_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  Object.keys(fix_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  Object.keys(mt_direct_accounts_cache).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  Object.keys(iforex_accounts_cache || {}).forEach(a => { if (!allAccounts.includes(a)) allAccounts.push(a); });
-  allAccounts.sort();
+  // Collect all known account IDs across all caches
+  Object.keys(mt_direct_accounts_cache).forEach(a => { if (!seen.has(a)) { seen.add(a); allAccounts.push(a); } });
+  Object.keys(iforex_accounts_cache || {}).forEach(a => { if (!seen.has(a)) { seen.add(a); allAccounts.push(a); } });
+  Object.keys(fix_accounts_cache || {}).forEach(a => { if (!seen.has(a)) { seen.add(a); allAccounts.push(a); } });
+  Object.keys(manual_accounts_cache).forEach(a => { if (!seen.has(a)) { seen.add(a); allAccounts.push(a); } });
+  Object.keys(ea_heartbeats_cache).forEach(a => { if (!seen.has(a)) { seen.add(a); allAccounts.push(a); } });
   return allAccounts.map(a => {
-    let lbl = '';
-    if (manual_accounts_cache[a] && manual_accounts_cache[a].group_label) {
-      lbl = manual_accounts_cache[a].group_label;
-    } else if (typeof fix_accounts_cache !== 'undefined' && fix_accounts_cache[a] && fix_accounts_cache[a].group_label) {
-      lbl = fix_accounts_cache[a].group_label;
-    } else if (typeof mt_direct_accounts_cache !== 'undefined' && mt_direct_accounts_cache[a] && mt_direct_accounts_cache[a].label) {
-      lbl = mt_direct_accounts_cache[a].label;
-    } else if (typeof iforex_accounts_cache !== 'undefined' && iforex_accounts_cache[a] && iforex_accounts_cache[a].label) {
-      lbl = iforex_accounts_cache[a].label;
-    }
-    return { value: a, label: lbl ? a + ' \u2014 ' + lbl : a };
-  });
+    const name = getAccountLabel(a);  // Resolved display Name
+    // Show "Name — ID" when name differs from ID, otherwise just the name (no duplicate)
+    const label = (name && name !== a) ? name + ' \u2014 ' + a : a;
+    return { value: a, label, name };
+  // Sort alphabetically by the display Name so accounts group by name prefix
+  }).sort((x, y) => x.label.toLowerCase().localeCompare(y.label.toLowerCase()));
 }
+
 function editStrategy(stratId) {
   currentStrategyId = stratId;
   const strat = strategies_cache.find(s => s.id === stratId);
