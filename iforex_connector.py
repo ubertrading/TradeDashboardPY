@@ -364,8 +364,8 @@ class IForexAccount:
 
         threading.Thread(target=_worker, daemon=True, name=f"iforex_reauth_{self.account_id}").start()
 
-    def get_quote(self, symbol: str, allow_live: bool = True) -> Optional[Tuple[float, float]]:
-        """Return (bid, ask) for symbol from cache or live fetch if allow_live=True."""
+    def get_quote(self, symbol: str, allow_live: bool = False) -> Optional[Tuple[float, float]]:
+        """Return (bid, ask) for symbol from cache or live fetch if allow_live=True (defaults to False for non-blocking)."""
         sym_clean = symbol.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
         with self._lock:
             q = self._quotes_cache.get(sym_clean)

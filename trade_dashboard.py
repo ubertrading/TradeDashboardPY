@@ -5962,26 +5962,34 @@ def _run_hedge_monitor_all():
                                             min_acct_obj = iforex_manager.accounts.get(min_acc)
 
                                         if min_acct_obj and getattr(min_acct_obj, 'connected', False):
-                                            if candidate_missing and hasattr(min_acct_obj, '_confirm_closed_tickets'):
-                                                try:
-                                                    has_verified = min_acct_obj._confirm_closed_tickets(candidate_missing)
-                                                except Exception as _e:
-                                                    print(f"[HEDGE-REBAL] Ticket history verification warning for {min_acc}: {_e}")
-                                            
-                                            # For Netting accounts or general deal history fallback
-                                            if not has_verified and hasattr(min_acct_obj, 'get_deal_history'):
-                                                try:
-                                                    dh = min_acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True)
-                                                    if dh and isinstance(dh, dict):
-                                                        deals_list = dh.get("deals") or dh.get("orders") or []
-                                                        if deals_list:
-                                                            has_verified = True
-                                                        elif dh.get("deal_count", 0) > 0:
-                                                            has_verified = True
-                                                        elif min_netting and dh.get("by_symbol"):
-                                                            has_verified = True
-                                                except Exception as _e:
-                                                    print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
+                                            # Release global lock during external I/O to avoid blocking status polls
+                                            _was_locked = hasattr(lock, 'release')
+                                            if _was_locked:
+                                                lock.release()
+                                            try:
+                                                if candidate_missing and hasattr(min_acct_obj, '_confirm_closed_tickets'):
+                                                    try:
+                                                        has_verified = min_acct_obj._confirm_closed_tickets(candidate_missing)
+                                                    except Exception as _e:
+                                                        print(f"[HEDGE-REBAL] Ticket history verification warning for {min_acc}: {_e}")
+
+                                                # For Netting accounts or general deal history fallback
+                                                if not has_verified and hasattr(min_acct_obj, 'get_deal_history'):
+                                                    try:
+                                                        dh = min_acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True, timeout=5)
+                                                        if dh and isinstance(dh, dict):
+                                                            deals_list = dh.get("deals") or dh.get("orders") or []
+                                                            if deals_list:
+                                                                has_verified = True
+                                                            elif dh.get("deal_count", 0) > 0:
+                                                                has_verified = True
+                                                            elif min_netting and dh.get("by_symbol"):
+                                                                has_verified = True
+                                                    except Exception as _e:
+                                                        print(f"[HEDGE-REBAL] Deal history query warning for {min_acc}: {_e}")
+                                            finally:
+                                                if _was_locked:
+                                                    lock.acquire()
                                 else:
                                     tickets_to_close = [_normalize_ticket(f["ticket"]) for f in open_session_fills[:excess]]
                                     print(f"[HEDGE-REBAL] gross-match: closing oldest {excess} fills on {max_acc}")
@@ -6623,22 +6631,30 @@ def _run_hedge_monitor_all():
                     if acct_obj and getattr(acct_obj, 'connected', False):
                         check_tickets = [t for t in missing_tickets if not str(t).startswith("MISSING_IMPORT")]
                         if check_tickets:
-                            if hasattr(acct_obj, '_confirm_closed_tickets'):
-                                try:
-                                    if acct_obj._confirm_closed_tickets(check_tickets):
-                                        has_history_confirmation = True
-                                except Exception as _e:
-                                    print(f"[HEDGE-REBAL] acct={account}: _confirm_closed_tickets warning: {_e}")
-                            if not has_history_confirmation and hasattr(acct_obj, 'get_deal_history'):
-                                try:
-                                    dh = acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True)
-                                    if dh and isinstance(dh, dict):
-                                        deals = dh.get("deals") or dh.get("orders") or []
-                                        deal_tickets = {str(d.get("ticket") or d.get("order") or d.get("position")) for d in deals if (d.get("ticket") or d.get("order") or d.get("position"))}
-                                        if any(str(ct) in deal_tickets for ct in check_tickets):
+                            # Release global lock during external I/O to avoid blocking status polls
+                            _was_locked = hasattr(lock, 'release')
+                            if _was_locked:
+                                lock.release()
+                            try:
+                                if hasattr(acct_obj, '_confirm_closed_tickets'):
+                                    try:
+                                        if acct_obj._confirm_closed_tickets(check_tickets):
                                             has_history_confirmation = True
-                                except Exception as _e:
-                                    print(f"[HEDGE-REBAL] acct={account}: get_deal_history warning: {_e}")
+                                    except Exception as _e:
+                                        print(f"[HEDGE-REBAL] acct={account}: _confirm_closed_tickets warning: {_e}")
+                                if not has_history_confirmation and hasattr(acct_obj, 'get_deal_history'):
+                                    try:
+                                        dh = acct_obj.get_deal_history(int(now_ts) - 300, int(now_ts), exclude_balance=True, timeout=5)
+                                        if dh and isinstance(dh, dict):
+                                            deals = dh.get("deals") or dh.get("orders") or []
+                                            deal_tickets = {str(d.get("ticket") or d.get("order") or d.get("position")) for d in deals if (d.get("ticket") or d.get("order") or d.get("position"))}
+                                            if any(str(ct) in deal_tickets for ct in check_tickets):
+                                                has_history_confirmation = True
+                                    except Exception as _e:
+                                        print(f"[HEDGE-REBAL] acct={account}: get_deal_history warning: {_e}")
+                            finally:
+                                if _was_locked:
+                                    lock.acquire()
 
                 if has_history_confirmation:
                     print(f"[HEDGE-REBAL] acct={account} sid={sid[:8]}: missing ticket(s) CONFIRMED CLOSED in broker deal history — bypassing debounce!")
@@ -8245,7 +8261,7 @@ def _should_issue_command(session, account):
                     try:
                         if_acct = iforex_manager.accounts.get(account)
                         if if_acct:
-                            q = if_acct.get_quote(instrument)
+                            q = if_acct.get_quote(instrument, allow_live=False)
                             if q and q[0] > 0 and q[1] > 0:
                                 bid, ask = q[0], q[1]
                                 stored_spread = round((ask - bid) * (1000 if "JPY" in instrument else 100000), 1)
@@ -8717,7 +8733,7 @@ def _calc_curr_diff(session, direction):
 
         # 0. iFOREX Direct quote lookup
         if iforex_acct and pair_i:
-            q = iforex_acct.get_quote(pair_i)
+            q = iforex_acct.get_quote(pair_i, allow_live=False)
             if q:
                 q_bid, q_ask = q[0], q[1]
                 got_quote = True
@@ -10897,7 +10913,11 @@ def api_status():
                 if direct_acct and side_pair:
                     if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
                         try:
-                            q = direct_acct.get_quote(side_pair)
+                            # Non-blocking quote lookup for status polling
+                            if hasattr(direct_acct, 'fetch_quote_live'):
+                                q = direct_acct.get_quote(side_pair, allow_live=False)
+                            else:
+                                q = direct_acct.get_quote(side_pair)
                             if q:
                                 q_bid, q_ask = q[0], q[1]
                                 sc[f"curr_bid_{sn}"] = q_bid

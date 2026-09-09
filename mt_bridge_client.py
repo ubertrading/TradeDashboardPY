@@ -767,7 +767,7 @@ class MtBridgeAccount:
             path += f"?{qs}"
         return _get(path, timeout=10) or []
 
-    def get_deal_history(self, from_ts, to_ts, fee_keywords=None, exclude_balance=True):
+    def get_deal_history(self, from_ts, to_ts, fee_keywords=None, exclude_balance=True, timeout=30):
         """Get deal history PnL totals."""
         eb = "true" if exclude_balance else "false"
         url = f"/api/accounts/{self.account_id}/history?from={int(from_ts)}&to={int(to_ts)}&exclude_balance={eb}"
@@ -775,7 +775,7 @@ class MtBridgeAccount:
             kw_str = ",".join(fee_keywords) if isinstance(fee_keywords, (list, tuple)) else str(fee_keywords)
             if kw_str.strip():
                 url += f"&fee_keywords={urllib.parse.quote(kw_str)}"
-        result = _get(url, timeout=30)
+        result = _get(url, timeout=timeout)
         if result and "error" in result:
             if "404" in str(result['error']):
                 logger.warning(f"[{self.account_id}] Bridge returned 404 for deal history (not connected?)")
