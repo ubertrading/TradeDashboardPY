@@ -1327,18 +1327,6 @@ def _detect_denomination(account_id, info):
         if f"-{c}-" in aid or aid.startswith(f"{c}-") or aid.endswith(f"-{c}"):
             return c, "account_id"
 
-    # 4. Known account / login EUR fallback (Swissquote, Dukascopy, Orbex, Deriv hedge legs)
-    login_str = str(info.get("login", "") or "").strip()
-    lbl_str = str(info.get("label", "") or "").strip().upper()
-    if login_str in {"1501836166", "2110248", "808973", "80667134", "651083", "2200537"}:
-        return "EUR", "broker_profile"
-    if aid in {"HU-8-A-DUKA1501836166", "HU-10-A-SQ2110248", "HU-10-B-ORBEX-808973", "HU-1-B-ORBEX-808973",
-               "HU-11-B-DER-80667134", "HU-1-B-DER-80667134", "HU-11-SQ-651083", "HU-12-A-SQ-2200537", "HU-12-A-SQ-2200537B"}:
-        return "EUR", "broker_profile"
-    if lbl_str in {"HU-8-A-DUKA1501836166", "HU-10-A-SQ2110248", "HU-10-B-ORBEX-808973",
-                   "HU-11-B-DER-80667134", "HU-11-SQ-651083", "HU-12-A-SQ-2200537"}:
-        return "EUR", "broker_profile"
-
     return "USD", "default"
 
 
@@ -5048,7 +5036,14 @@ def _extract_fee_symbol(comment, deal_symbol=""):
 
 
 def _find_recent_balance_deal(account, delta, now_ts):
-    """Query recent broker transactions to classify balance change (fee vs deposit/withdrawal)."""
+    """Query recent broker transactions to classify balance change (fee vs deposit/withdrawal).
+
+    Uses a wide time window (24 h back / 12 h forward) to handle broker servers in any
+    timezone (e.g. Orbex MT5 runs at UTC+3 / EEST, which is ~7 h ahead of UTC-4 local).
+
+    Returns a single deal dict on an exact match, a *synthetic composite* dict (with a
+    '_matched_deals' list) when a cluster of Charge/fee deals sums to delta, or None.
+    """
     try:
         acct_obj = None
         if mt_direct_manager and hasattr(mt_direct_manager, "accounts") and account in mt_direct_manager.accounts:
@@ -5061,9 +5056,9 @@ def _find_recent_balance_deal(account, delta, now_ts):
         if not acct_obj or not hasattr(acct_obj, "get_deal_history"):
             return None
 
-        # Query recent deals in ±5 minute window
-        from_ts = int(now_ts) - 300
-        to_ts = int(now_ts) + 60
+        # Wide window: 24 h back to 12 h forward — covers all broker timezone offsets
+        from_ts = int(now_ts) - 86400
+        to_ts   = int(now_ts) + 43200
         fee_kw = reporting_data.get("fee_keywords") or ["Holding Fee", "Fee", "Storage Fee"]
         hist = acct_obj.get_deal_history(from_ts, to_ts, fee_keywords=fee_kw, exclude_balance=False, timeout=10)
         if not hist or not isinstance(hist, dict):
@@ -5073,32 +5068,78 @@ def _find_recent_balance_deal(account, delta, now_ts):
         if not deals:
             return None
 
-        # Look for non-trade deal matching delta (profit or commission + profit ~ delta)
+        # Separate non-trade deals (skip buy/sell)
+        non_trade = [d for d in deals if str(d.get("type", "")).lower() not in ("buy", "sell")]
+        if not non_trade:
+            return None
+
+        # ── Pass 1: single deal exact-amount match ──
+        for d in reversed(non_trade):
+            deal_amt = float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
+            if abs(deal_amt - delta) < 0.05:
+                return d
+
+        # ── Pass 2: cluster of fee/charge deals whose SUM matches delta ──
+        # (Orbex rolls over multiple per-symbol storage fee deals simultaneously)
+        fee_kw_upper = {k.upper() for k in fee_kw} | {"FEE", "STORAGE FEE", "HOLDING FEE", "CHARGE", "STORAGE"}
+        fee_cluster = []
+        for d in non_trade:
+            deal_type_lc = str(d.get("type", "")).lower()
+            comment_up   = str(d.get("comment", "") or "").upper()
+            if (deal_type_lc in ("charge", "fee")
+                    or d.get("is_fee") is True
+                    or any(kw in comment_up for kw in fee_kw_upper)):
+                fee_cluster.append(d)
+
+        if fee_cluster:
+            cluster_sum = sum(
+                float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
+                for d in fee_cluster
+            )
+            tol = max(0.05, abs(delta) * 0.01)
+            if abs(cluster_sum - delta) <= tol:
+                # All sub-deals are storage fees?
+                all_storage = all(
+                    "storage" in str(d.get("comment", "") or "").lower()
+                    or d.get("fee_type") == "storage_fee"
+                    for d in fee_cluster
+                )
+                composite_comment = "; ".join(
+                    str(d.get("comment", "") or "") for d in fee_cluster if d.get("comment")
+                )
+                logger.info("[FEE-DETECT] %s: fee cluster of %d deals sums to %.2f (delta=%.2f)",
+                            account, len(fee_cluster), cluster_sum, delta)
+                return {
+                    "type": "charge",
+                    "profit": cluster_sum,
+                    "commission": 0.0,
+                    "comment": composite_comment,
+                    "symbol": "",
+                    "is_fee": True,
+                    "fee_type": "storage_fee" if all_storage else "fee",
+                    "_matched_deals": fee_cluster,
+                }
+
+        # ── Pass 3: best approximate single-deal match (within 10 %) ──
         best_deal = None
         best_diff = 999999.0
-        for d in reversed(deals):
-            deal_type = str(d.get("type", "")).lower()
-            if deal_type in ("buy", "sell"):
-                continue  # Skip regular trades
+        for d in reversed(non_trade):
             deal_amt = float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
             diff = abs(deal_amt - delta)
-            if diff < 0.05:  # Exact or near exact amount match
-                return d
             if diff < best_diff and diff < abs(delta) * 0.1:
                 best_diff = diff
                 best_deal = d
 
-        # If no amount match, return most recent non-trade deal if any
-        if not best_deal:
-            for d in reversed(deals):
-                deal_type = str(d.get("type", "")).lower()
-                if deal_type not in ("buy", "sell"):
-                    return d
+        # ── Pass 4: fallback — most recent non-trade deal ──
+        if not best_deal and non_trade:
+            best_deal = non_trade[-1]
 
         return best_deal
     except Exception as e:
         logger.warning("[FEE-DETECT] Error querying broker deals for %s: %s", account, e)
         return None
+
+
 
 
 def _check_fee_alerts():
@@ -5180,7 +5221,7 @@ def _check_fee_alerts():
                         fee_type = "fee"
                         
                         fee_kw_list = [k.upper() for k in (reporting_data.get("fee_keywords") or ["Holding Fee", "Fee", "Storage Fee"])]
-                        for bkw in ("FEE", "STORAGE FEE", "HOLDING FEE"):
+                        for bkw in ("FEE", "STORAGE FEE", "HOLDING FEE", "CHARGE"):
                             if bkw not in fee_kw_list:
                                 fee_kw_list.append(bkw)
 
@@ -5189,14 +5230,20 @@ def _check_fee_alerts():
                             deal_type = str(matched_deal.get("type", "") or "").lower()
                             deal_sym = str(matched_deal.get("symbol", "") or "")
                             comment_upper = comment.upper()
-                            
-                            is_explicit_fee = any(kw in comment_upper for kw in fee_kw_list) or ("fee" in deal_type) or (matched_deal.get("is_fee") is True)
+
+                            # MT5 DealType.Charge is used for storage/rollover fees
+                            is_explicit_fee = (
+                                any(kw in comment_upper for kw in fee_kw_list)
+                                or ("fee" in deal_type)
+                                or ("charge" in deal_type)
+                                or (matched_deal.get("is_fee") is True)
+                            )
                             if is_explicit_fee:
                                 is_deal_fee = True
                                 is_storage = "STORAGE" in comment_upper or matched_deal.get("fee_type") == "storage_fee"
                                 fee_type = "storage_fee" if is_storage else "fee"
                                 deal_sym = _extract_fee_symbol(comment, deal_sym)
-                        
+
                         # If matched deal confirms fee, or if comment has fee keywords:
                         if is_deal_fee:
                             fee_entry = {
@@ -5216,13 +5263,22 @@ def _check_fee_alerts():
                             _save_reporting()
                             app.logger.info("[FEE] Detected %s on %s: %.2f (%.2f -> %.2f) sym=%s comment=%s",
                                             fee_type, account, delta, prev_bal, new_bal, deal_sym, comment)
-                            
-                            # If it's a storage fee, integrate into live swap delta
+
+                            # If it's a storage fee, integrate into live swap delta.
+                            # For composite deals (_matched_deals), record each symbol's fee individually.
                             if fee_type == "storage_fee":
-                                _add_storage_fee_to_swap_delta(account, delta, deal_sym)
-                                
+                                sub_deals = matched_deal.get("_matched_deals") if matched_deal else None
+                                if sub_deals:
+                                    for sub in sub_deals:
+                                        sub_amt = float(sub.get("profit", 0.0) or 0.0) + float(sub.get("commission", 0.0) or 0.0)
+                                        sub_comment = str(sub.get("comment", "") or "")
+                                        sub_sym = _extract_fee_symbol(sub_comment, str(sub.get("symbol", "") or ""))
+                                        _add_storage_fee_to_swap_delta(account, sub_amt, sub_sym)
+                                else:
+                                    _add_storage_fee_to_swap_delta(account, delta, deal_sym)
+
                             _send_fee_alert(account, fee_entry)
-                            
+
                             # Log event for frontend speech notification
                             for _sid, _sess in list(sessions.items()):
                                 if account in _sess.get("sides", {}):
@@ -21408,9 +21464,11 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
   cycleReminders = cycleReminders || {};
   swapDelta = swapDelta || {};
 
-  function _swapDeltaCell(id) {
-
-    const d = swapDelta[id];
+  function _swapDeltaCell(id, info) {
+    // Look up by account id first, then by label (account key ≠ label on some brokers)
+    let d = swapDelta[id];
+    if (d == null && info && info.label)  d = swapDelta[info.label];
+    if (d == null && info && info.group_label) d = swapDelta[info.group_label];
     if (d == null) return '<td style="font-size:0.78rem;color:var(--text2)">-</td>';
     const color = d >= 0 ? 'var(--green)' : 'var(--red)';
     const sign = d > 0 ? '+' : '';
@@ -21563,7 +21621,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${mu1}</td>
         ${_marginAlertCell(id, true)}
         <td>${swap1}</td>
-        ${_swapDeltaCell(id)}
+        ${_swapDeltaCell(id, info)}
         <td style="font-size:0.78rem">${lp}</td>
         <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -21643,7 +21701,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${muMt}</td>
         ${_marginAlertCell(id, false)}
         <td>${swapMt}</td>
-        ${_swapDeltaCell(id)}
+        ${_swapDeltaCell(id, info)}
         <td style="font-size:0.78rem">-</td>
         <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -21721,7 +21779,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${muIfx}</td>
         ${_marginAlertCell(id, false)}
         <td>${swapIfx}</td>
-        ${_swapDeltaCell(id)}
+        ${_swapDeltaCell(id, info)}
         <td style="font-size:0.78rem">-</td>
         <td><input type="checkbox" ${info.auto_connect_start !== false ? 'checked' : ''} onchange="saveAccountField('${id}', 'auto_connect_start', this.checked)"></td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${id}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -21803,7 +21861,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${muM}</td>
         ${_marginAlertCell(name, false)}
         <td>-</td>
-        ${_swapDeltaCell(name)}
+        ${_swapDeltaCell(name, info)}
         <td style="font-size:0.78rem">${lp}</td>
         <td style="text-align:center;color:var(--text3)">-</td>
         <td><input class="inl" style="width:120px;" value="${info.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${name}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
@@ -21868,7 +21926,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${muE}</td>
         ${_marginAlertCell(acc, false)}
         <td>-</td>
-        ${_swapDeltaCell(acc)}
+        ${_swapDeltaCell(acc, info)}
         <td style="font-size:0.78rem">${lp}</td>
         <td style="text-align:center;color:var(--text3)">-</td>
         <td><input class="inl" style="width:120px;" value="${mConfig.alert_email || ''}" placeholder="No override" onchange="saveAccountField('${acc}', 'alert_email', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
