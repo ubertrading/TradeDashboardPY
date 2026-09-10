@@ -1699,9 +1699,44 @@ public class MtAccount
         }
     }
 
+    private static string ExtractFeeSymbol(string comment, string? dealSymbol)
+    {
+        if (!string.IsNullOrEmpty(dealSymbol) && !dealSymbol.Equals("FEES", StringComparison.OrdinalIgnoreCase))
+            return dealSymbol.Trim().ToUpperInvariant();
+        if (string.IsNullOrEmpty(comment))
+            return "FEES";
+        var m = System.Text.RegularExpressions.Regex.Match(comment, @"(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?([A-Za-z0-9._/-]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var s = m.Groups[1].Value.Trim().ToUpperInvariant();
+            if (s.Any(char.IsLetter)) return s;
+        }
+        var m2 = System.Text.RegularExpressions.Regex.Match(comment, @"fees?\s+(?:for\s+)?([A-Za-z0-9._/-]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (m2.Success)
+        {
+            var s = m2.Groups[1].Value.Trim().ToUpperInvariant();
+            if (s.Any(char.IsLetter) && s != "DEBIT" && s != "CREDIT" && s != "CHARGE" && s != "FOR") return s;
+        }
+        return "FEES";
+    }
+
+    private static bool IsFeeDeal(string comment, string dealType, string[]? feeKeywords)
+    {
+        if (string.IsNullOrEmpty(comment))
+        {
+            return dealType.Contains("fee", StringComparison.OrdinalIgnoreCase);
+        }
+        if (comment.Contains("fee", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (feeKeywords != null && feeKeywords.Any(kw => comment.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+            return true;
+        return dealType.Contains("fee", StringComparison.OrdinalIgnoreCase);
+    }
+
     // ─── Deal History ──────────────────────────────────────────────────────
     public object? GetDealHistory(long fromTs, long toTs, bool excludeBalance = true, string[]? feeKeywords = null)
     {
+
         if (!_connected) return null;
         try
         {
@@ -1775,26 +1810,7 @@ public class MtAccount
                         {
                             // Non-trade deal (Balance, Credit, Charge, etc.)
                             var dealComment = deal.Comment ?? "";
-                            if (hasFeeKeywords)
-                            {
-                                // Fee-keyword mode: include only entries whose comment matches a keyword
-                                bool matches = feeKeywords!.Any(kw => dealComment.Contains(kw, StringComparison.OrdinalIgnoreCase));
-                                if (!matches) { skippedBalance++; continue; }
-                            }
-                            else if (excludeBalance && isBalanceType)
-                            {
-                                // Default mode: exclude Balance/Credit fund transfers
-                                skippedBalance++;
-                                continue;
-                            }
-                            // Include as fee (storage fee, charge, etc.)
-                            var feeSymbol = string.IsNullOrEmpty(deal.Symbol) ? "FEES" : deal.Symbol;
-                            fees += deal.Profit + deal.Commission + deal.Fee;
-                            count++;
-                            if (!bySymbol.ContainsKey(feeSymbol))
-                                bySymbol[feeSymbol] = new double[5];
-                            bySymbol[feeSymbol][2] += deal.Profit + deal.Commission + deal.Fee;
-                            bySymbol[feeSymbol][3] += 1;
+                            bool isFee = IsFeeDeal(dealComment, dealTypeStr, feeKeywords);
 
                             ulong dTicket = 0;
                             try { dTicket = (ulong)((dynamic)deal).Deal; } catch { try { dTicket = (ulong)((dynamic)deal).Ticket; } catch {} }
@@ -1803,22 +1819,62 @@ public class MtAccount
                             string dTimeStr = "";
                             try { dTimeStr = ((DateTime)((dynamic)deal).Time).ToString("yyyy.MM.dd HH:mm:ss"); } catch { try { dTimeStr = ((DateTime)((dynamic)deal).Date).ToString("yyyy.MM.dd HH:mm:ss"); } catch { dTimeStr = DateTime.UtcNow.ToString("yyyy.MM.dd HH:mm:ss"); } }
 
-                            dealsList.Add(new {
-                                ticket = dTicket,
-                                order = dOrder,
-                                symbol = feeSymbol,
-                                type = dealTypeStr,
-                                lots = 0.0,
-                                open_price = 0.0,
-                                close_price = 0.0,
-                                open_time = dTimeStr,
-                                close_time = dTimeStr,
-                                profit = Math.Round(deal.Profit, 2),
-                                swap = 0.0,
-                                commission = Math.Round(deal.Commission + deal.Fee, 2),
-                                comment = dealComment
-                            });
+                            if (isFee)
+                            {
+                                var feeSymbol = ExtractFeeSymbol(dealComment, deal.Symbol);
+                                var feeAmount = deal.Profit + deal.Commission + deal.Fee;
+                                fees += feeAmount;
+                                count++;
+                                if (!bySymbol.ContainsKey(feeSymbol))
+                                    bySymbol[feeSymbol] = new double[5];
+                                bySymbol[feeSymbol][2] += feeAmount;
+                                bySymbol[feeSymbol][3] += 1;
+
+                                bool isStorage = dealComment.Contains("storage", StringComparison.OrdinalIgnoreCase);
+                                dealsList.Add(new {
+                                    ticket = dTicket,
+                                    order = dOrder,
+                                    symbol = feeSymbol,
+                                    type = dealTypeStr,
+                                    lots = 0.0,
+                                    open_price = 0.0,
+                                    close_price = 0.0,
+                                    open_time = dTimeStr,
+                                    close_time = dTimeStr,
+                                    profit = Math.Round(deal.Profit, 2),
+                                    swap = 0.0,
+                                    commission = Math.Round(deal.Commission + deal.Fee, 2),
+                                    comment = dealComment,
+                                    is_fee = true,
+                                    fee_type = isStorage ? "storage_fee" : "fee"
+                                });
+                            }
+                            else if (!excludeBalance)
+                            {
+                                dealsList.Add(new {
+                                    ticket = dTicket,
+                                    order = dOrder,
+                                    symbol = deal.Symbol ?? "",
+                                    type = dealTypeStr,
+                                    lots = 0.0,
+                                    open_price = 0.0,
+                                    close_price = 0.0,
+                                    open_time = dTimeStr,
+                                    close_time = dTimeStr,
+                                    profit = Math.Round(deal.Profit, 2),
+                                    swap = 0.0,
+                                    commission = Math.Round(deal.Commission + deal.Fee, 2),
+                                    comment = dealComment,
+                                    is_fee = false,
+                                    fee_type = "balance"
+                                });
+                            }
+                            else
+                            {
+                                skippedBalance++;
+                            }
                         }
+
                     }
                 }
                 if (skippedBalance > 0)
@@ -1885,45 +1941,57 @@ public class MtAccount
                         if (!string.IsNullOrEmpty(order.Symbol)) {
                             _logger.LogInformation("[{Id}] Non-trade order with symbol: Type={Type} Symbol={Sym} Comment={Cmt} Profit={P}", Config.Id, opStr, order.Symbol, comment, order.Profit);
                         }
-                        bool isBalanceOrCredit = opStr.Equals("Balance", StringComparison.OrdinalIgnoreCase)
-                                               || opStr.Equals("Credit", StringComparison.OrdinalIgnoreCase);
+                        bool isFee = IsFeeDeal(comment, opStr, feeKeywords);
 
-                        if (hasFeeKeywords)
+                        if (isFee)
                         {
-                            // Fee-keyword mode: include only entries whose comment matches a keyword
-                            bool matches = feeKeywords!.Any(kw => comment.Contains(kw, StringComparison.OrdinalIgnoreCase));
-                            if (!matches) continue;
+                            var feeSymbol = ExtractFeeSymbol(comment, order.Symbol);
+                            fees += order.Profit;
+                            count++;
+                            if (!bySymbol.ContainsKey(feeSymbol))
+                                bySymbol[feeSymbol] = new double[5];
+                            bySymbol[feeSymbol][2] += order.Profit;
+                            bySymbol[feeSymbol][3] += 1;
+
+                            bool isStorage = comment.Contains("storage", StringComparison.OrdinalIgnoreCase);
+                            dealsList.Add(new {
+                                ticket = order.Ticket,
+                                symbol = feeSymbol,
+                                type = opStr,
+                                lots = 0.0,
+                                open_price = 0.0,
+                                close_price = 0.0,
+                                open_time = order.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                                close_time = order.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                                profit = Math.Round(order.Profit, 2),
+                                swap = 0.0,
+                                commission = Math.Round(order.Commission, 2),
+                                comment = comment,
+                                is_fee = true,
+                                fee_type = isStorage ? "storage_fee" : "fee"
+                            });
                         }
-                        else if (excludeBalance && isBalanceOrCredit)
+                        else if (!excludeBalance)
                         {
-                            // Default mode: exclude Balance/Credit fund transfers; include other types (Charge etc.)
-                            continue;
+                            dealsList.Add(new {
+                                ticket = order.Ticket,
+                                symbol = order.Symbol ?? "",
+                                type = opStr,
+                                lots = 0.0,
+                                open_price = 0.0,
+                                close_price = 0.0,
+                                open_time = order.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                                close_time = order.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                                profit = Math.Round(order.Profit, 2),
+                                swap = 0.0,
+                                commission = Math.Round(order.Commission, 2),
+                                comment = comment,
+                                is_fee = false,
+                                fee_type = "balance"
+                            });
                         }
-
-                        // Include as fee (storage fee, charge, etc.) — NOT in pnl
-                        var feeSymbol = string.IsNullOrEmpty(order.Symbol) ? "FEES" : order.Symbol;
-                        fees += order.Profit;
-                        count++;
-                        if (!bySymbol.ContainsKey(feeSymbol))
-                            bySymbol[feeSymbol] = new double[5];
-                        bySymbol[feeSymbol][2] += order.Profit;
-                        bySymbol[feeSymbol][3] += 1;
-
-                        dealsList.Add(new {
-                            ticket = order.Ticket,
-                            symbol = feeSymbol,
-                            type = opStr,
-                            lots = 0.0,
-                            open_price = 0.0,
-                            close_price = 0.0,
-                            open_time = order.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
-                            close_time = order.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
-                            profit = Math.Round(order.Profit, 2),
-                            swap = 0.0,
-                            commission = Math.Round(order.Commission, 2),
-                            comment = comment
-                        });
                     }
+
                 }
                 var bySymbolResult = new Dictionary<string, object>();
                 foreach (var (sym, vals) in bySymbol)

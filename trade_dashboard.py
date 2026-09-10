@@ -731,6 +731,8 @@ _swap_delta = {
     "pre_by_instrument": {}, # account_id -> {symbol -> swap} before rollover
     "delta": {},        # account_id -> change in swap (computed live)
     "delta_by_instrument": {}, # account_id -> {symbol -> delta_swap} (computed live)
+    "storage_fees": {}, # account_id -> total storage fees for current rollover cycle
+    "storage_fees_by_instrument": {}, # account_id -> {symbol -> storage_fees}
     "snapshot_date": None,  # date string of last pre-rollover snapshot
     "snapshot_ts": 0,   # epoch when snapshot was taken
 }
@@ -747,12 +749,15 @@ def _load_swap_deltas():
                     _swap_delta["pre_by_instrument"] = data.get("pre_by_instrument", {})
                     _swap_delta["delta"] = data.get("delta", {})
                     _swap_delta["delta_by_instrument"] = data.get("delta_by_instrument", {})
+                    _swap_delta["storage_fees"] = data.get("storage_fees", {})
+                    _swap_delta["storage_fees_by_instrument"] = data.get("storage_fees_by_instrument", {})
                     _swap_delta["snapshot_date"] = data.get("snapshot_date")
                     _swap_delta["snapshot_ts"] = data.get("snapshot_ts", 0)
-            logger.info("[SWAP-DELTA] Loaded swap deltas from file (%d pre accounts, %d deltas)",
-                        len(_swap_delta["pre"]), len(_swap_delta["delta"]))
+            logger.info("[SWAP-DELTA] Loaded swap deltas from file (%d pre accounts, %d deltas, %d storage fee accounts)",
+                        len(_swap_delta["pre"]), len(_swap_delta["delta"]), len(_swap_delta.get("storage_fees", {})))
     except Exception as e:
         logger.error("[SWAP-DELTA] Failed loading swap deltas: %s", e)
+
 
 def _save_swap_deltas():
     try:
@@ -809,37 +814,68 @@ def _get_all_swap_breakdowns():
         logger.error("[SWAP-DELTA] Snapshot detailed collection error: %s", e, exc_info=True)
     return result
 
+def _add_storage_fee_to_swap_delta(account, amount, symbol):
+    """Record detected storage fee into _swap_delta so it is reflected in the Swap Delta column."""
+    try:
+        cur_sf = _swap_delta.setdefault("storage_fees", {})
+        cur_sf[account] = round(cur_sf.get(account, 0.0) + float(amount), 2)
+        
+        cur_sf_inst = _swap_delta.setdefault("storage_fees_by_instrument", {})
+        inst_dict = cur_sf_inst.setdefault(account, {})
+        sym_key = (symbol or "FEES").strip().upper()
+        inst_dict[sym_key] = round(inst_dict.get(sym_key, 0.0) + float(amount), 2)
+        
+        logger.info("[SWAP-DELTA] Added storage fee %.2f on %s (%s) → total account storage fee: %.2f",
+                    amount, account, sym_key, cur_sf[account])
+        _save_swap_deltas()
+        _compute_swap_deltas_live()
+    except Exception as e:
+        logger.error("[SWAP-DELTA] Failed to add storage fee for %s: %s", account, e, exc_info=True)
+
+
 def _compute_swap_deltas_live():
-    """Compute swap deltas by comparing current swap values to the pre-rollover snapshot.
+    """Compute swap deltas by comparing current swap values to the pre-rollover snapshot,
+    incorporating any storage fees detected for the current rollover cycle.
     Called from get_status on every poll after rollover."""
-    if not _swap_delta.get("pre"):
+    storage_fees = _swap_delta.get("storage_fees", {})
+    storage_by_inst = _swap_delta.get("storage_fees_by_instrument", {})
+
+    if not _swap_delta.get("pre") and not storage_fees:
         return _swap_delta.get("delta", {})
 
     current = _get_all_swap_values()
-    if not current:
-        return _swap_delta.get("delta", {})
-
     delta = {}
     delta_by_inst = {}
-    for aid, cur_val in current.items():
-        pre_val = _swap_delta["pre"].get(aid)
-        if pre_val is not None:
-            d = round(cur_val - pre_val, 2)
-            if d != 0:
-                delta[aid] = d
+
+    all_aids = set(current.keys()) | set(_swap_delta.get("pre", {}).keys()) | set(storage_fees.keys())
+
+    for aid in all_aids:
+        cur_val = current.get(aid)
+        pre_val = _swap_delta.get("pre", {}).get(aid)
+        pos_swap_d = 0.0
+        if cur_val is not None and pre_val is not None:
+            pos_swap_d = cur_val - pre_val
+        st_fee = float(storage_fees.get(aid, 0.0) or 0.0)
+        tot_d = round(pos_swap_d + st_fee, 2)
+        if tot_d != 0:
+            delta[aid] = tot_d
 
         # Calculate per-instrument delta for this account
         info = ea_account_info.get(aid, {})
         cur_sbi = info.get("swap_by_instrument", {})
-        pre_sbi = _swap_delta["pre_by_instrument"].get(aid, {})
-        all_syms = set(cur_sbi.keys()) | set(pre_sbi.keys())
+        pre_sbi = _swap_delta.get("pre_by_instrument", {}).get(aid, {})
+        st_inst = storage_by_inst.get(aid, {})
+
+        all_syms = set(cur_sbi.keys()) | set(pre_sbi.keys()) | set(st_inst.keys())
         inst_deltas = {}
         for sym in all_syms:
             c_val = cur_sbi.get(sym, 0.0)
             p_val = pre_sbi.get(sym, 0.0)
-            d_val = round(c_val - p_val, 2)
-            if d_val != 0:
-                inst_deltas[sym] = d_val
+            d_val = c_val - p_val
+            s_fee = float(st_inst.get(sym, 0.0) or 0.0)
+            tot_sym_d = round(d_val + s_fee, 2)
+            if tot_sym_d != 0:
+                inst_deltas[sym] = tot_sym_d
         if inst_deltas:
             delta_by_inst[aid] = inst_deltas
 
@@ -849,6 +885,7 @@ def _compute_swap_deltas_live():
         _save_swap_deltas()
 
     return _swap_delta.get("delta", {})
+
 
 def _calculate_optimal_fund_distributions(all_accounts_info):
     """
@@ -1500,6 +1537,8 @@ def _swap_delta_loop():
             _swap_delta["snapshot_ts"] = time.time()
             _swap_delta["delta"] = {}  # Clear old deltas; live computation will repopulate after 5 PM
             _swap_delta["delta_by_instrument"] = {}
+            _swap_delta["storage_fees"] = {}
+            _swap_delta["storage_fees_by_instrument"] = {}
             _save_swap_deltas()
             logger.info("[SWAP-DELTA] Pre-rollover snapshot taken: %d accounts on %s | values: %s",
                         len(snap), snap_date,
@@ -1843,7 +1882,7 @@ def _log_market_stats(account, info):
         pass  # never crash the trading loop for stats
 
 import_results = {}  # request_id -> result dict (kept for 60s after completion)
-reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee"]}
+reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee", "Fee", "Storage Fee"]}
 
 # ─── FIX Account Manager ────────────────────────────────────────────────────
 try:
@@ -2243,7 +2282,7 @@ def _load_reporting():
                 reporting_data = data
                 reporting_data.setdefault("snapshots", [])
                 reporting_data.setdefault("fees", [])
-                reporting_data.setdefault("fee_keywords", ["Holding Fee"])
+                reporting_data.setdefault("fee_keywords", ["Holding Fee", "Fee", "Storage Fee"])
                 reporting_data.setdefault("cashflow_adjustments", {})
                 app.logger.info("Loaded %d snapshots, %d fees from %s",
                                 len(reporting_data["snapshots"]),
@@ -2251,7 +2290,7 @@ def _load_reporting():
                 return
     except Exception:
         app.logger.exception("Failed loading reporting data")
-    reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee"], "cashflow_adjustments": {}}
+    reporting_data = {"snapshots": [], "fees": [], "fee_keywords": ["Holding Fee", "Fee", "Storage Fee"], "cashflow_adjustments": {}}
 
 _load_reporting()
 
@@ -3242,31 +3281,78 @@ def _send_fee_alert(account, fee_entry):
         return  # below threshold, skip
 
     grp = manual_accounts.get(account, {}).get("group_label", "")
-    subject = f"\u26a0\ufe0f Fee Alert: {account}"
-    body = (f"Fee detected on account {account}\n"
+    fee_type = fee_entry.get("fee_type", "fee")
+    is_storage = fee_type == "storage_fee" or "storage" in fee_entry.get("label", "").lower()
+    title = "Storage Fee Alert" if is_storage else "Fee Alert"
+    sym = fee_entry.get("symbol", "")
+    sym_str = f" ({sym})" if sym and sym != "FEES" else ""
+    comment = fee_entry.get("comment", "")
+    comment_str = f"\nComment: {comment}" if comment else ""
+    tg_comment_str = f"\nComment: <code>{comment}</code>" if comment else ""
+
+    subject = f"⚠️ {title}: {account}{sym_str}"
+    body = (f"{title} detected on account {account}{sym_str}\n"
             f"Group: {grp}\n"
             f"Amount: {fee_entry.get('amount', 0):.2f}\n"
             f"Balance: {fee_entry.get('balance_before', 0):.2f} → {fee_entry.get('balance_after', 0):.2f}\n"
-            f"Time: {fee_entry.get('ts', '')}")
-    tg_msg = (f"<b>\u26a0\ufe0f Fee Alert</b>\n"
-              f"Account: <code>{account}</code>\n"
+            f"Time: {fee_entry.get('ts', '')}{comment_str}")
+    tg_msg = (f"<b>⚠️ {title}</b>\n"
+              f"Account: <code>{account}</code>{sym_str}\n"
               f"Group: {grp}\n"
               f"Amount: <b>{fee_entry.get('amount', 0):.2f}</b>\n"
               f"Balance: {fee_entry.get('balance_before', 0):.2f} → {fee_entry.get('balance_after', 0):.2f}\n"
-              f"Time: {fee_entry.get('ts', '')}")
+              f"Time: {fee_entry.get('ts', '')}{tg_comment_str}")
 
     def _send():
         ok_e, err_e = _send_email(subject, body, account_id=account)
         ok_t, err_t = _send_telegram(tg_msg, account_id=account)
         if ok_e:
-            app.logger.info("[ALERT] Email sent for fee on %s", account)
+            app.logger.info("[ALERT] Email sent for %s on %s", title.lower(), account)
         if ok_t:
-            app.logger.info("[ALERT] Telegram sent for fee on %s", account)
+            app.logger.info("[ALERT] Telegram sent for %s on %s", title.lower(), account)
         if not ok_e and not ok_t and (dashboard_settings.get("email", {}).get("enabled") or
                                        dashboard_settings.get("telegram", {}).get("enabled")):
-            app.logger.warning("[ALERT] Failed to send fee alert for %s: email=%s, tg=%s",
-                               account, err_e, err_t)
+            app.logger.warning("[ALERT] Failed to send %s for %s: email=%s, tg=%s",
+                               title.lower(), account, err_e, err_t)
     threading.Thread(target=_send, daemon=True, name=f"FeeAlert-{account}").start()
+
+
+def _send_balance_change_alert(account, change_entry):
+    """Send balance change alert (deposit / withdrawal / balance adjustment) via enabled channels."""
+    delta = change_entry.get("amount", 0)
+    direction = "Credit (Deposit)" if delta > 0 else "Debit (Withdrawal)"
+    grp = manual_accounts.get(account, {}).get("group_label", "")
+    comment = change_entry.get("comment", "")
+    comment_str = f"\nComment: {comment}" if comment else ""
+    tg_comment_str = f"\nComment: <code>{comment}</code>" if comment else ""
+
+    subject = f"ℹ️ Balance Change Alert: {account} ({direction})"
+    body = (f"Balance change detected on account {account}\n"
+            f"Type: {direction}\n"
+            f"Group: {grp}\n"
+            f"Amount: {delta:+.2f}\n"
+            f"Balance: {change_entry.get('balance_before', 0):.2f} → {change_entry.get('balance_after', 0):.2f}\n"
+            f"Time: {change_entry.get('ts', '')}{comment_str}")
+    tg_msg = (f"<b>ℹ️ Balance Change Alert</b>\n"
+              f"Account: <code>{account}</code>\n"
+              f"Type: <b>{direction}</b>\n"
+              f"Group: {grp}\n"
+              f"Amount: <b>{delta:+.2f}</b>\n"
+              f"Balance: {change_entry.get('balance_before', 0):.2f} → {change_entry.get('balance_after', 0):.2f}\n"
+              f"Time: {change_entry.get('ts', '')}{tg_comment_str}")
+
+    def _send():
+        ok_e, err_e = _send_email(subject, body, account_id=account)
+        ok_t, err_t = _send_telegram(tg_msg, account_id=account)
+        if ok_e:
+            app.logger.info("[ALERT] Email sent for balance change on %s", account)
+        if ok_t:
+            app.logger.info("[ALERT] Telegram sent for balance change on %s", account)
+        if not ok_e and not ok_t and (dashboard_settings.get("email", {}).get("enabled") or
+                                       dashboard_settings.get("telegram", {}).get("enabled")):
+            app.logger.warning("[ALERT] Failed to send balance change alert for %s: email=%s, tg=%s",
+                               account, err_e, err_t)
+    threading.Thread(target=_send, daemon=True, name=f"BalChangeAlert-{account}").start()
 
 # ─── Pips to Margin Call ─────────────────────────────────────────────────────
 
@@ -4928,8 +5014,83 @@ def _has_position_changed(prev_pos, new_pos):
             pass
     return False
 
+def _extract_fee_symbol(comment, deal_symbol=""):
+    """Extract symbol from storage fee or fee comment if deal symbol is missing or generic."""
+    if deal_symbol and deal_symbol.upper() != "FEES":
+        return deal_symbol.upper().strip()
+    if not comment:
+        return "FEES"
+    # Match: Storage Fees [optional Ndays] <SYMBOL> [optional volume]
+    m = re.search(r'(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
+    if m:
+        sym = m.group(1).strip()
+        if any(c.isalpha() for c in sym):
+            return sym.upper()
+    # Match generic: Fee [for] <SYMBOL>
+    m2 = re.search(r'fees?\s+(?:for\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
+    if m2:
+        sym = m2.group(1).strip()
+        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR"):
+            return sym.upper()
+    return "FEES"
+
+
+def _find_recent_balance_deal(account, delta, now_ts):
+    """Query recent broker transactions to classify balance change (fee vs deposit/withdrawal)."""
+    try:
+        acct_obj = None
+        if mt_direct_manager and hasattr(mt_direct_manager, "accounts") and account in mt_direct_manager.accounts:
+            acct_obj = mt_direct_manager.accounts.get(account)
+        elif fix_manager and hasattr(fix_manager, "accounts") and account in fix_manager.accounts:
+            acct_obj = fix_manager.accounts.get(account)
+        elif 'iforex_manager' in globals() and iforex_manager and hasattr(iforex_manager, "accounts") and account in iforex_manager.accounts:
+            acct_obj = iforex_manager.accounts.get(account)
+
+        if not acct_obj or not hasattr(acct_obj, "get_deal_history"):
+            return None
+
+        # Query recent deals in ±5 minute window
+        from_ts = int(now_ts) - 300
+        to_ts = int(now_ts) + 60
+        fee_kw = reporting_data.get("fee_keywords") or ["Holding Fee", "Fee", "Storage Fee"]
+        hist = acct_obj.get_deal_history(from_ts, to_ts, fee_keywords=fee_kw, exclude_balance=False, timeout=10)
+        if not hist or not isinstance(hist, dict):
+            return None
+
+        deals = hist.get("deals", [])
+        if not deals:
+            return None
+
+        # Look for non-trade deal matching delta (profit or commission + profit ~ delta)
+        best_deal = None
+        best_diff = 999999.0
+        for d in reversed(deals):
+            deal_type = str(d.get("type", "")).lower()
+            if deal_type in ("buy", "sell"):
+                continue  # Skip regular trades
+            deal_amt = float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
+            diff = abs(deal_amt - delta)
+            if diff < 0.05:  # Exact or near exact amount match
+                return d
+            if diff < best_diff and diff < abs(delta) * 0.1:
+                best_diff = diff
+                best_deal = d
+
+        # If no amount match, return most recent non-trade deal if any
+        if not best_deal:
+            for d in reversed(deals):
+                deal_type = str(d.get("type", "")).lower()
+                if deal_type not in ("buy", "sell"):
+                    return d
+
+        return best_deal
+    except Exception as e:
+        logger.warning("[FEE-DETECT] Error querying broker deals for %s: %s", account, e)
+        return None
+
+
 def _check_fee_alerts():
-    """Universal fee detector: monitors all accounts in ea_account_info for balance drops."""
+    """Universal fee and balance detector: monitors all accounts in ea_account_info for balance changes."""
     try:
         now_ts = time.time()
         for account, info in list(ea_account_info.items()):
@@ -4937,22 +5098,19 @@ def _check_fee_alerts():
             if new_bal is None:
                 continue
             
-            # ── 1. Always track position changes independently of balance drops ──
+            # ── 1. Always track position changes independently of balance changes ──
             prev_pos = _last_known_positions.get(account)
             new_pos = info.get("positions")
             if _has_position_changed(prev_pos, new_pos):
                 _last_pos_change_ts[account] = now_ts
-                # We do NOT update _last_known_positions here yet, we wait until the end of the loop
-                # so the rest of the logic can still compare prev_pos and new_pos if needed.
 
             prev_bal = _last_known_balances.get(account)
             if prev_bal is not None:
                 delta = new_bal - prev_bal
-                if delta < -0.001:  # balance decreased
+                if abs(delta) > 0.001:  # Balance changed (debit or credit)
                     
                     # ── 2. Check if a position changed recently (within 60s) ──
-                    # This handles cases where the position changed BEFORE the balance dropped
-                    # (broker latency) or AT THE SAME TIME.
+                    # If positions changed, this balance change is likely realized PnL from a trade close
                     last_change = _last_pos_change_ts.get(account, 0)
                     if (now_ts - last_change) < 60:
                         _last_known_balances[account] = new_bal
@@ -4972,8 +5130,8 @@ def _check_fee_alerts():
                         _pending_fee_alerts.pop(account, None)
                         continue
 
-                    # ── 3. WAIT FOR CONFIRMATION ──
-                    # Prevent race condition where MT4 updates balance BEFORE positions
+                    # ── 3. WAIT FOR CONFIRMATION (15s) ──
+                    # Prevent race condition where broker updates balance BEFORE positions
                     pending = _pending_fee_alerts.get(account)
                     if not pending:
                         _pending_fee_alerts[account] = {
@@ -4987,11 +5145,10 @@ def _check_fee_alerts():
                         # Still in the 15-second waiting window
                         continue
                     else:
-                        # 15 seconds passed, no position change arrived. It's a genuine fee.
+                        # 15 seconds passed, no position change arrived.
                         _pending_fee_alerts.pop(account)
                         prev_bal = pending["prev_bal"]
                         delta = new_bal - prev_bal
-                    
                     
                     # Cooldown check: only record if no close was just processed in sessions (cooldown 60s from last trade)
                     last_trade = 0
@@ -5000,30 +5157,89 @@ def _check_fee_alerts():
                             lt = _sess.get("last_trade_ts", {}).get(account, 0)
                             if lt > last_trade:
                                 last_trade = lt
-                    if (now_ts - last_trade) > 60:  # no recent trade — likely a fee
-                        fee_entry = {
-                            "id": str(uuid.uuid4())[:8],
-                            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "ts_epoch": now_ts,
-                            "account": account,
-                            "amount": round(delta, 2),
-                            "balance_before": round(prev_bal, 2),
-                            "balance_after": round(new_bal, 2),
-                            "label": "auto-detected",
-                        }
-                        reporting_data["fees"].append(fee_entry)
-                        _save_reporting()
-                        app.logger.info("[FEE] Detected balance drop on %s: %.2f (%.2f -> %.2f)",
-                                        account, delta, prev_bal, new_bal)
-                        _send_fee_alert(account, fee_entry)
-                        # Log event for frontend speech notification
-                        for _sid, _sess in list(sessions.items()):
-                            if account in _sess.get("sides", {}):
-                                _log_event(_sid, account, "fee_detected",
-                                           f"Fee {delta:.2f} on {account} ({prev_bal:.2f} -> {new_bal:.2f})")
-                                break
+
+                    if (now_ts - last_trade) > 60:  # no recent trade in session
+                        # Query broker deal history to classify fee vs deposit/withdrawal
+                        matched_deal = _find_recent_balance_deal(account, delta, now_ts)
+                        comment = ""
+                        deal_type = ""
+                        deal_sym = ""
+                        is_deal_fee = False
+                        fee_type = "fee"
+                        
+                        fee_kw_list = [k.upper() for k in (reporting_data.get("fee_keywords") or ["Holding Fee", "Fee", "Storage Fee"])]
+                        for bkw in ("FEE", "STORAGE FEE", "HOLDING FEE"):
+                            if bkw not in fee_kw_list:
+                                fee_kw_list.append(bkw)
+
+                        if matched_deal:
+                            comment = str(matched_deal.get("comment", "") or "")
+                            deal_type = str(matched_deal.get("type", "") or "").lower()
+                            deal_sym = str(matched_deal.get("symbol", "") or "")
+                            comment_upper = comment.upper()
+                            
+                            is_explicit_fee = any(kw in comment_upper for kw in fee_kw_list) or ("fee" in deal_type) or (matched_deal.get("is_fee") is True)
+                            if is_explicit_fee:
+                                is_deal_fee = True
+                                is_storage = "STORAGE" in comment_upper or matched_deal.get("fee_type") == "storage_fee"
+                                fee_type = "storage_fee" if is_storage else "fee"
+                                deal_sym = _extract_fee_symbol(comment, deal_sym)
+                        
+                        # If matched deal confirms fee, or if comment has fee keywords:
+                        if is_deal_fee:
+                            fee_entry = {
+                                "id": str(uuid.uuid4())[:8],
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "ts_epoch": now_ts,
+                                "account": account,
+                                "amount": round(delta, 2),
+                                "balance_before": round(prev_bal, 2),
+                                "balance_after": round(new_bal, 2),
+                                "label": "storage-fee" if fee_type == "storage_fee" else "fee",
+                                "fee_type": fee_type,
+                                "symbol": deal_sym or "FEES",
+                                "comment": comment,
+                            }
+                            reporting_data["fees"].append(fee_entry)
+                            _save_reporting()
+                            app.logger.info("[FEE] Detected %s on %s: %.2f (%.2f -> %.2f) sym=%s comment=%s",
+                                            fee_type, account, delta, prev_bal, new_bal, deal_sym, comment)
+                            
+                            # If it's a storage fee, integrate into live swap delta
+                            if fee_type == "storage_fee":
+                                _add_storage_fee_to_swap_delta(account, delta, deal_sym)
+                                
+                            _send_fee_alert(account, fee_entry)
+                            
+                            # Log event for frontend speech notification
+                            for _sid, _sess in list(sessions.items()):
+                                if account in _sess.get("sides", {}):
+                                    _log_event(_sid, account, "fee_detected",
+                                               f"{fee_type.replace('_', ' ').title()} {delta:.2f} on {account} ({deal_sym})")
+                                    break
+                        else:
+                            # Genuine balance operation (withdrawal, deposit, transfer) or unconfirmed
+                            # Must NOT be alerted as fee, and must NOT be added to reporting_data["fees"]
+                            change_entry = {
+                                "id": str(uuid.uuid4())[:8],
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "ts_epoch": now_ts,
+                                "account": account,
+                                "amount": round(delta, 2),
+                                "balance_before": round(prev_bal, 2),
+                                "balance_after": round(new_bal, 2),
+                                "comment": comment or ("Withdrawal / Debit" if delta < 0 else "Deposit / Credit"),
+                            }
+                            app.logger.info("[BALANCE-CHANGE] Detected balance change on %s: %+.2f (%.2f -> %.2f) comment=%s",
+                                            account, delta, prev_bal, new_bal, comment)
+                            _send_balance_change_alert(account, change_entry)
+                            for _sid, _sess in list(sessions.items()):
+                                if account in _sess.get("sides", {}):
+                                    _log_event(_sid, account, "balance_changed",
+                                               f"Balance {delta:+.2f} on {account} ({prev_bal:.2f} -> {new_bal:.2f})")
+                                    break
                 else:
-                    # Balance did not decrease, or went up
+                    # Balance did not change
                     _last_known_balances[account] = new_bal
                     if info.get("positions") is not None:
                         _last_known_positions[account] = info.get("positions")
@@ -11355,7 +11571,15 @@ def api_swap_breakdown():
             
             for sym in all_syms:
                 # Sum buy + sell lots to get total lots open
-                vals = lbi.get(sym, {})
+                vals = lbi.get(sym)
+                if vals is None:
+                    # Suffix tolerance (e.g. storage fee has "USDCHF." while open lots are "USDCHF", or vice versa)
+                    sym_clean = sym.rstrip(".")
+                    for lk, lv in lbi.items():
+                        if lk == sym_clean or lk.rstrip(".") == sym_clean:
+                            vals = lv
+                            break
+                vals = vals or {}
                 lots_val = round(vals.get("buy", 0.0) + vals.get("sell", 0.0), 2)
                 
                 d_swap = inst_deltas.get(sym, 0.0)

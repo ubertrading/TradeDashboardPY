@@ -13,6 +13,7 @@ Follows the same integration pattern as fix_connector.py:
 
 import os
 import sys
+import re
 import json
 import time
 import logging
@@ -75,7 +76,29 @@ _registered_accounts = []
 _registry_lock = threading.Lock()
 
 
+def extract_fee_symbol(comment, deal_symbol=""):
+    """Extract symbol from storage fee or fee comment if deal symbol is missing or generic."""
+    if deal_symbol and deal_symbol.upper() != "FEES":
+        return deal_symbol.upper().strip()
+    if not comment:
+        return "FEES"
+    # Match: Storage Fees [optional Ndays] <SYMBOL> [optional volume]
+    m = re.search(r'(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
+    if m:
+        sym = m.group(1).strip()
+        if any(c.isalpha() for c in sym):
+            return sym.upper()
+    # Match generic: Fee [for] <SYMBOL>
+    m2 = re.search(r'fees?\s+(?:for\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
+    if m2:
+        sym = m2.group(1).strip()
+        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR"):
+            return sym.upper()
+    return "FEES"
+
+
 def _pause_all_callbacks():
+
     """Unsubscribe .NET event handlers from ALL registered accounts."""
     with _registry_lock:
         for acct in _registered_accounts:
@@ -1138,6 +1161,7 @@ class MT4DirectAccount:
             return None
         if fee_keywords is None:
             fee_keywords = []
+        exclude_balance = kwargs.get("exclude_balance", True)
         try:
             import System
             from datetime import datetime as _dt, timezone as _tz
@@ -1174,6 +1198,9 @@ class MT4DirectAccount:
 
             # Uppercase fee keywords for case-insensitive matching
             fee_kw_upper = [kw.upper() for kw in fee_keywords if kw]
+            for bkw in ("FEE", "STORAGE FEE", "HOLDING FEE"):
+                if bkw not in fee_kw_upper:
+                    fee_kw_upper.append(bkw)
 
             deals_list = []
 
@@ -1254,28 +1281,61 @@ class MT4DirectAccount:
                             "comment": comment,
                             "sl": sl_val,
                             "tp": tp_val,
+                            "is_fee": False,
+                            "fee_type": "trade",
                         })
-                    elif not is_balance:
-                        # Non-trade deal (e.g. charge, storage fee)
-                        total_fees += profit + commission + taxes + fee
-                        deal_count += 1
-                        deals_list.append({
-                            "ticket": ticket,
-                            "symbol": sym or "FEES",
-                            "type": otype,
-                            "lots": 0.0,
-                            "open_price": 0.0,
-                            "close_price": 0.0,
-                            "open_time": str(open_time_raw or ""),
-                            "close_time": str(close_time_raw or ""),
-                            "profit": round(profit, 2),
-                            "swap": 0.0,
-                            "commission": round(commission + taxes + fee, 2),
-                            "taxes": round(taxes, 2),
-                            "comment": comment,
-                            "sl": 0.0,
-                            "tp": 0.0,
-                        })
+                    else:
+                        comment_upper = comment.upper()
+                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('FEE' in otype.upper())
+                        if is_fee:
+                            fee_amount = profit + commission + taxes + fee
+                            total_fees += fee_amount
+                            deal_count += 1
+                            fee_sym = extract_fee_symbol(comment, sym)
+                            if fee_sym:
+                                entry = by_symbol.setdefault(fee_sym, {"pnl": 0.0, "lots": 0.0, "fees": 0.0})
+                                entry.setdefault("fees", 0.0)
+                                entry["fees"] += fee_amount
+                            is_storage = "STORAGE" in comment_upper
+                            deals_list.append({
+                                "ticket": ticket,
+                                "symbol": fee_sym,
+                                "type": otype,
+                                "lots": 0.0,
+                                "open_price": 0.0,
+                                "close_price": 0.0,
+                                "open_time": str(open_time_raw or ""),
+                                "close_time": str(close_time_raw or ""),
+                                "profit": round(profit, 2),
+                                "swap": 0.0,
+                                "commission": round(commission + taxes + fee, 2),
+                                "taxes": round(taxes, 2),
+                                "comment": comment,
+                                "sl": 0.0,
+                                "tp": 0.0,
+                                "is_fee": True,
+                                "fee_type": "storage_fee" if is_storage else "fee",
+                            })
+                        elif not exclude_balance:
+                            deals_list.append({
+                                "ticket": ticket,
+                                "symbol": sym or "",
+                                "type": otype,
+                                "lots": 0.0,
+                                "open_price": 0.0,
+                                "close_price": 0.0,
+                                "open_time": str(open_time_raw or ""),
+                                "close_time": str(close_time_raw or ""),
+                                "profit": round(profit, 2),
+                                "swap": 0.0,
+                                "commission": round(commission + taxes + fee, 2),
+                                "taxes": round(taxes, 2),
+                                "comment": comment,
+                                "sl": 0.0,
+                                "tp": 0.0,
+                                "is_fee": False,
+                                "fee_type": "balance",
+                            })
 
                 except Exception as e:
                     logger.warning("[%s] Error processing history order: %s", self.account_id, e)
@@ -1289,7 +1349,9 @@ class MT4DirectAccount:
                     "pnl": round(v["pnl"], 2),
                     "hedge_lots": hedge_lots,
                     "pnl_per_lot": round(v["pnl"] / hedge_lots, 2) if hedge_lots > 0 else 0.0,
+                    "fees": round(v.get("fees", 0.0), 2),
                 }
+
 
             result = {
                 "pnl": round(total_pnl, 2),
@@ -2849,9 +2911,11 @@ class MT5DirectAccount:
             return None
         if fee_keywords is None:
             fee_keywords = []
+        exclude_balance = kwargs.get("exclude_balance", True)
         try:
             import System
             from datetime import datetime as _dt, timezone as _tz
+
 
             # Convert Unix timestamps to .NET DateTime.
             # Pad ±3 hours for reliability (same as MT4).
@@ -2909,7 +2973,11 @@ class MT5DirectAccount:
             total_fees = 0.0
             deal_count = 0
             fee_kw_upper = [kw.upper() for kw in fee_keywords if kw]
+            for bkw in ("FEE", "STORAGE FEE", "HOLDING FEE"):
+                if bkw not in fee_kw_upper:
+                    fee_kw_upper.append(bkw)
             by_symbol = {}  # { "EURUSD": {"pnl": 0.0, "lots": 0.0} }
+
 
             # Diagnostic: dump first order's attributes to debug filtering
             if raw_orders:
@@ -2997,28 +3065,62 @@ class MT5DirectAccount:
                             "comment": comment,
                             "sl": sl_val,
                             "tp": tp_val,
+                            "is_fee": False,
+                            "fee_type": "trade",
                         })
-                    elif not is_balance:
-                        # Non-trade deal (e.g. charge, storage fee)
-                        total_fees += profit + commission + fee
-                        deal_count += 1
-                        deals_list.append({
-                            "ticket": ticket,
-                            "symbol": sym or "FEES",
-                            "type": deal_type,
-                            "lots": 0.0,
-                            "open_price": 0.0,
-                            "close_price": 0.0,
-                            "open_time": str(open_time_raw or ""),
-                            "close_time": str(close_time_raw or ""),
-                            "profit": round(profit, 2),
-                            "swap": 0.0,
-                            "commission": round(commission + fee, 2),
-                            "taxes": 0.0,
-                            "comment": comment,
-                            "sl": 0.0,
-                            "tp": 0.0,
-                        })
+                    else:
+                        comment_upper = comment.upper()
+                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('fee' in deal_type)
+                        if is_fee:
+                            fee_amount = profit + commission + fee
+                            total_fees += fee_amount
+                            deal_count += 1
+                            fee_sym = extract_fee_symbol(comment, sym)
+                            if fee_sym:
+                                entry = by_symbol.setdefault(fee_sym, {"pnl": 0.0, "lots": 0.0, "fees": 0.0})
+                                entry.setdefault("fees", 0.0)
+                                entry["fees"] += fee_amount
+                            is_storage = "STORAGE" in comment_upper
+                            deals_list.append({
+                                "ticket": ticket,
+                                "symbol": fee_sym,
+                                "type": deal_type,
+                                "lots": 0.0,
+                                "open_price": 0.0,
+                                "close_price": 0.0,
+                                "open_time": str(open_time_raw or ""),
+                                "close_time": str(close_time_raw or ""),
+                                "profit": round(profit, 2),
+                                "swap": 0.0,
+                                "commission": round(commission + fee, 2),
+                                "taxes": 0.0,
+                                "comment": comment,
+                                "sl": 0.0,
+                                "tp": 0.0,
+                                "is_fee": True,
+                                "fee_type": "storage_fee" if is_storage else "fee",
+                            })
+                        elif not exclude_balance:
+                            deals_list.append({
+                                "ticket": ticket,
+                                "symbol": sym or "",
+                                "type": deal_type,
+                                "lots": 0.0,
+                                "open_price": 0.0,
+                                "close_price": 0.0,
+                                "open_time": str(open_time_raw or ""),
+                                "close_time": str(close_time_raw or ""),
+                                "profit": round(profit, 2),
+                                "swap": 0.0,
+                                "commission": round(commission + fee, 2),
+                                "taxes": 0.0,
+                                "comment": comment,
+                                "sl": 0.0,
+                                "tp": 0.0,
+                                "is_fee": False,
+                                "fee_type": "balance",
+                            })
+
                 except Exception as e:
                     logger.warning("[%s] Error processing MT5 history deal: %s", self.account_id, e)
                     continue
@@ -3031,7 +3133,9 @@ class MT5DirectAccount:
                     "pnl": round(v["pnl"], 2),
                     "hedge_lots": hedge_lots,
                     "pnl_per_lot": round(v["pnl"] / hedge_lots, 2) if hedge_lots > 0 else 0.0,
+                    "fees": round(v.get("fees", 0.0), 2),
                 }
+
 
             result = {
                 "pnl": round(total_pnl, 2),
