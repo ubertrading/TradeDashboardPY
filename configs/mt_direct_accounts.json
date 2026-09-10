@@ -58,6 +58,7 @@
     "login": "2110248",
     "alert_email": null,
     "alert_telegram": null,
-    "lot_multiplier": 100000
+    "lot_multiplier": 100000,
+    "account_currency": "EUR"
   }
 }

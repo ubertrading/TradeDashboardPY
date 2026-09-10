@@ -45,5 +45,16 @@
     "chat_id": "",
     "enabled": false
   },
-  "theme_colors": {}
+  "theme_colors": {},
+  "account_currencies": {
+    "HU-8-A-DUKA1501836166": "EUR",
+    "HU-10-A-SQ2110248": "EUR",
+    "HU-1-B-ORBEX-808973": "EUR",
+    "HU-1-B-DER-80667134": "EUR",
+    "HU-11-SQ-651083": "EUR",
+    "HU-12-A-SQ-2200537b": "EUR",
+    "HU-10-B-ORBEX-808973": "EUR",
+    "HU-11-B-DER-80667134": "EUR",
+    "HU-12-A-SQ-2200537": "EUR"
+  }
 }

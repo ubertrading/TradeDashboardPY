@@ -776,15 +776,21 @@ class MT4DirectAccount:
                     info[prop] = int(val) if prop == "leverage" else float(val)
             except Exception:
                 pass
-        # AccountName on the MT4 API is documented as "Currency name of the current account"
-        # (i.e. the deposit/denomination currency, e.g. "USD"). Store it for denomination detection.
+        # Extract account currency: prefer Account.currency (ConGroup struct on MT4 Server API),
+        # then fall back to AccountName (which may be a 3-letter code like "EUR" or a composite like "1299147.2201EUR")
         try:
-            acct_name = getattr(self._client, "AccountName", None)
-            if acct_name is not None:
-                s = str(acct_name).strip().upper()
-                # Only accept it if it looks like a 3-letter currency code
-                if len(s) == 3 and s.isalpha():
-                    info["account_currency"] = s
+            con_group = getattr(self._client, "Account", None)
+            grp_cur = getattr(con_group, "currency", None) if con_group else None
+            if grp_cur and len(str(grp_cur).strip()) == 3 and str(grp_cur).strip().isalpha():
+                info["account_currency"] = str(grp_cur).strip().upper()
+            else:
+                acct_name = getattr(self._client, "AccountName", None)
+                if acct_name is not None:
+                    s = str(acct_name).strip().upper()
+                    if len(s) == 3 and s.isalpha():
+                        info["account_currency"] = s
+                    elif len(s) >= 3 and s[-3:].isalpha():
+                        info["account_currency"] = s[-3:]
         except Exception:
             pass
 

@@ -1308,7 +1308,7 @@ def _detect_denomination(account_id, info):
     4. Default to "USD"
     """
     # 1. Explicit from API or config (already merged onto info by get_status())
-    cur = info.get("account_currency")
+    cur = info.get("account_currency") or info.get("currency")
     if cur:
         s = str(cur).strip().upper()
         if s in _KNOWN_CURRENCIES:
@@ -1326,6 +1326,18 @@ def _detect_denomination(account_id, info):
     for c in _KNOWN_CURRENCIES:
         if f"-{c}-" in aid or aid.startswith(f"{c}-") or aid.endswith(f"-{c}"):
             return c, "account_id"
+
+    # 4. Known account / login EUR fallback (Swissquote, Dukascopy, Orbex, Deriv hedge legs)
+    login_str = str(info.get("login", "") or "").strip()
+    lbl_str = str(info.get("label", "") or "").strip().upper()
+    if login_str in {"1501836166", "2110248", "808973", "80667134", "651083", "2200537"}:
+        return "EUR", "broker_profile"
+    if aid in {"HU-8-A-DUKA1501836166", "HU-10-A-SQ2110248", "HU-10-B-ORBEX-808973", "HU-1-B-ORBEX-808973",
+               "HU-11-B-DER-80667134", "HU-1-B-DER-80667134", "HU-11-SQ-651083", "HU-12-A-SQ-2200537", "HU-12-A-SQ-2200537B"}:
+        return "EUR", "broker_profile"
+    if lbl_str in {"HU-8-A-DUKA1501836166", "HU-10-A-SQ2110248", "HU-10-B-ORBEX-808973",
+                   "HU-11-B-DER-80667134", "HU-11-SQ-651083", "HU-12-A-SQ-2200537"}:
+        return "EUR", "broker_profile"
 
     return "USD", "default"
 
@@ -11420,6 +11432,8 @@ def api_status():
         for aid, ainfo in _accts_dict.items():
             if aid in _manual_currencies:
                 ainfo["account_currency"] = _manual_currencies[aid]
+            elif ainfo.get("label") and ainfo.get("label") in _manual_currencies:
+                ainfo["account_currency"] = _manual_currencies[ainfo["label"]]
             cur, src = _detect_denomination(aid, ainfo)
             ainfo["denomination"] = cur
             ainfo["denomination_source"] = src
@@ -11428,6 +11442,9 @@ def api_status():
         if aid in _manual_currencies:
             ainfo = dict(ainfo)  # don't mutate the snapshot in-place for manual accounts
             ainfo["account_currency"] = _manual_currencies[aid]
+        elif ainfo.get("label") and ainfo.get("label") in _manual_currencies:
+            ainfo = dict(ainfo)
+            ainfo["account_currency"] = _manual_currencies[ainfo["label"]]
         cur, src = _detect_denomination(aid, ainfo)
         ainfo["denomination"] = cur
         ainfo["denomination_source"] = src

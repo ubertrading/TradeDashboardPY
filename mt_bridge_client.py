@@ -184,14 +184,22 @@ def _delete(path, timeout=30):
 _bridge_process = None
 
 def ensure_bridge_running():
-    """Start the bridge service if not already running."""
+    """Start the bridge service if not already running, restarting if outdated."""
     global _bridge_process
     # Check if already running
     try:
         result = _get("/api/status", timeout=2)
         if result.get("status") == "ok":
-            logger.info("MtBridgeService already running")
-            return True
+            if result.get("version") == "2.1-currency":
+                logger.info("MtBridgeService already running (version %s)", result.get("version"))
+                return True
+            else:
+                logger.warning("Running MtBridgeService is outdated (version=%s, expected 2.1-currency). Terminating to upgrade...", result.get("version"))
+                try:
+                    subprocess.run(["taskkill", "/F", "/IM", "MtBridgeService.exe"], capture_output=True, timeout=5)
+                    time.sleep(1.5)
+                except Exception as e:
+                    logger.warning("Could not terminate old MtBridgeService: %s", e)
     except Exception:
         pass
 
@@ -397,6 +405,9 @@ class MtBridgeAccount:
             acct["total_pnl"] = round(acct["profit"], 2)
             
         acct["leverage"] = info.get("leverage", 0)
+        cur = self.config.get("account_currency") or info.get("account_currency") or info.get("currency")
+        if cur:
+            acct["account_currency"] = str(cur).strip().upper()
         acct["mt_direct"] = True
         acct["conn_type"] = self.conn_type
         acct["direct_mode"] = True
@@ -2188,6 +2199,9 @@ class MtBridgeManager:
                 "alert_email": acct.config.get("alert_email"),
                 "alert_telegram": acct.config.get("alert_telegram"),
                 "auto_connect_start": acct.config.get("auto_connect_start", True),
+                "swapfree": acct.config.get("swapfree", False),
+                "stop_out_level": acct.config.get("stop_out_level"),
+                "account_currency": acct.config.get("account_currency") or info.get("account_currency") or info.get("currency"),
             }
         return result
 

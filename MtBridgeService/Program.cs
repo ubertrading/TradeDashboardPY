@@ -12,7 +12,7 @@ var accountStore = new AccountStore(app.Logger);
 app.MapGet("/api/status", () =>
 {
     var statuses = accountStore.GetAllStatus();
-    return Results.Ok(new { status = "ok", accounts = statuses });
+    return Results.Ok(new { status = "ok", accounts = statuses, version = "2.1-currency" });
 });
 
 
@@ -160,6 +160,7 @@ public record AccountConfig
     public bool AutoConnect { get; init; } = true;
     public string? Label { get; init; }
     public double LotMultiplier { get; init; } = 100000;
+    public string? AccountCurrency { get; init; } // Manual override (e.g. "EUR")
     public JsonElement? Extra { get; init; } // pass-through for any extra config
 }
 
@@ -523,6 +524,21 @@ public class AccountStore
                 lotMultiplier = lmp;
         }
 
+        // Account Currency (manual override e.g. "EUR")
+        string? accountCurrency = null;
+        JsonElement propVal;
+        if (elem.TryGetProperty("account_currency", out propVal) || elem.TryGetProperty("currency", out propVal) || elem.TryGetProperty("AccountCurrency", out propVal))
+        {
+            accountCurrency = propVal.GetString()?.Trim().ToUpperInvariant();
+        }
+        if (string.IsNullOrEmpty(accountCurrency) && elem.TryGetProperty("extra", out var extraObj))
+        {
+            if (extraObj.TryGetProperty("account_currency", out propVal) || extraObj.TryGetProperty("currency", out propVal) || extraObj.TryGetProperty("AccountCurrency", out propVal))
+            {
+                accountCurrency = propVal.GetString()?.Trim().ToUpperInvariant();
+            }
+        }
+
         return new AccountConfig
         {
             Id = id,
@@ -534,6 +550,7 @@ public class AccountStore
             AutoConnect = autoConnect,
             Label = label,
             LotMultiplier = lotMultiplier,
+            AccountCurrency = accountCurrency,
             Extra = elem
         };
     }
@@ -569,6 +586,7 @@ public class MtAccount
     private double _balance, _equity, _margin, _freeMargin, _profit;
     private double _credit;
     private int _leverage;
+    private string? _currency; // account denomination currency (e.g. "EUR")
     private readonly object _infoLock = new();
 
     // Reconnect
@@ -986,6 +1004,19 @@ public class MtAccount
 
                         // Note: Stale data handling is now done below for both MT4 and MT5
                     }
+
+                    // Extract account currency from MT5 API (e.g. "EUR", "USD")
+                    // Config override takes highest priority
+                    if (string.IsNullOrEmpty(_currency))
+                    {
+                        try
+                        {
+                            var cur = _mt5.AccountCurrency;
+                            if (!string.IsNullOrWhiteSpace(cur))
+                                _currency = cur.Trim().ToUpperInvariant();
+                        }
+                        catch { }
+                    }
                 }
                 else if (_mt4 != null)
                 {
@@ -996,6 +1027,32 @@ public class MtAccount
                     _profit = _mt4.AccountProfit;
                     _credit = _mt4.AccountCredit;
                     _leverage = _mt4.AccountLeverage;
+
+                    // Extract account currency from MT4 ConGroup.currency (most reliable)
+                    // Config override takes highest priority
+                    if (string.IsNullOrEmpty(_currency))
+                    {
+                        try
+                        {
+                            var grpCur = _mt4.Account.currency;
+                            if (!string.IsNullOrWhiteSpace(grpCur) && grpCur.Length == 3 && grpCur.All(char.IsLetter))
+                            {
+                                _currency = grpCur.Trim().ToUpperInvariant();
+                            }
+                            else
+                            {
+                                // Fallback: parse trailing 3-letter ISO code from AccountName (e.g. "1299147.2201EUR")
+                                var acctName = _mt4.AccountName ?? "";
+                                if (acctName.Length >= 3)
+                                {
+                                    var tail = acctName.Substring(acctName.Length - 3).ToUpperInvariant();
+                                    if (tail.All(char.IsLetter))
+                                        _currency = tail;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
                 }
 
                 // STALE DATA / GLITCH HANDLING (Applies to both MT4 and MT5)
@@ -1119,6 +1176,10 @@ public class MtAccount
     {
         lock (_infoLock)
         {
+            // Config-level override wins over API-detected currency
+            var currency = !string.IsNullOrWhiteSpace(Config.AccountCurrency)
+                ? Config.AccountCurrency!.Trim().ToUpperInvariant()
+                : _currency;
             return new
             {
                 connected = _connected,
@@ -1131,7 +1192,8 @@ public class MtAccount
                 credit = _credit,
                 leverage = _leverage,
                 positions = _positions.Count,
-                last_error = _lastError
+                last_error = _lastError,
+                account_currency = currency
             };
         }
     }
@@ -1142,7 +1204,10 @@ public class MtAccount
         platform = Config.Platform,
         label = Config.Label,
         positions = _positions.Count,
-        last_error = _lastError
+        last_error = _lastError,
+        account_currency = !string.IsNullOrWhiteSpace(Config.AccountCurrency)
+            ? Config.AccountCurrency!.Trim().ToUpperInvariant()
+            : _currency
     };
 
     public object GetPositions() => _positions.Values.ToList();
