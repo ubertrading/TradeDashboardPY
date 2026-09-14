@@ -13684,7 +13684,7 @@ def list_statements():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/statements/generate', methods=['POST'])
+@app.route('/statements/generate', methods=['GET', 'POST'])
 def generate_statements():
     """Trigger on-demand full statement generation."""
     try:
@@ -13692,7 +13692,12 @@ def generate_statements():
             _save_full_statements()
 
         threading.Thread(target=_run, daemon=True, name="StmtsOnDemand").start()
-        return jsonify({"ok": True, "status": "generating", "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        return jsonify({
+            "ok": True,
+            "status": "generating",
+            "message": "Full statement generation initiated. Files will be saved directly to stmts/.",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -13719,6 +13724,16 @@ def get_statement_file(filename):
 # ─── API Routes Catalog Endpoint ──────────────────────────────────────────
 
 _ROUTE_FALLBACK_DESCRIPTIONS = {
+    "/statements": {
+        "GET": "Browse master statements index.html or retrieve JSON listing of available account statements."
+    },
+    "/statements/generate": {
+        "GET": "Trigger on-demand generation of full all-time account statements.",
+        "POST": "Trigger on-demand generation of full all-time account statements."
+    },
+    "/statements/<path:filename>": {
+        "GET": "Download or view individual HTML statement or JSON data."
+    },
     "/api/sessions": {
         "GET": "List all configured trading sessions and their current states.",
         "POST": "Create a new trading session with account pairings, lots, and filters."
@@ -24989,27 +25004,33 @@ function renderApiRoutes(routes) {
   }
 
   const methodColors = {
-    'GET': { bg: 'rgba(2,132,199,0.15)', color: '#38bdf8', border: 'rgba(2,132,199,0.4)' },
-    'POST': { bg: 'rgba(22,163,74,0.15)', color: '#4ade80', border: 'rgba(22,163,74,0.4)' },
-    'PUT': { bg: 'rgba(217,119,6,0.15)', color: '#fbbf24', border: 'rgba(217,119,6,0.4)' },
-    'PATCH': { bg: 'rgba(147,51,234,0.15)', color: '#c084fc', border: 'rgba(147,51,234,0.4)' },
-    'DELETE': { bg: 'rgba(220,38,38,0.15)', color: '#f87171', border: 'rgba(220,38,38,0.4)' }
+    'GET': { bg: 'rgba(2,132,199,0.18)', color: '#38bdf8', border: 'rgba(2,132,199,0.45)' },
+    'POST': { bg: 'rgba(22,163,74,0.18)', color: '#4ade80', border: 'rgba(22,163,74,0.45)' },
+    'PUT': { bg: 'rgba(217,119,6,0.18)', color: '#fbbf24', border: 'rgba(217,119,6,0.45)' },
+    'PATCH': { bg: 'rgba(147,51,234,0.18)', color: '#c084fc', border: 'rgba(147,51,234,0.45)' },
+    'DELETE': { bg: 'rgba(220,38,38,0.18)', color: '#f87171', border: 'rgba(220,38,38,0.45)' }
   };
 
   tbody.innerHTML = routes.map((r) => {
-    // Badges for all methods
+    // Badges for all methods in the Method column (clickable to open tester and run)
     const methodBadges = r.methods.map(m => {
       const c = methodColors[m] || { bg: 'rgba(255,255,255,0.1)', color: '#e4e6f0', border: 'var(--border)' };
-      return `<span style="display:inline-block; font-size:0.72rem; font-weight:700; padding:2px 6px; border-radius:4px; margin-right:3px; background:${c.bg}; color:${c.color}; border:1px solid ${c.border};">${m}</span>`;
+      return `<button type="button" class="btn btn-sm" onclick="openApiTester('${encodeURIComponent(r.rule)}', '${m}')" style="display:inline-flex; align-items:center; gap:2px; font-size:0.72rem; font-weight:700; padding:2px 6px; border-radius:4px; margin-right:3px; margin-bottom:2px; background:${c.bg}; color:${c.color}; border:1px solid ${c.border}; cursor:pointer;" title="Click to test ${m} ${r.rule}">▶ ${m}</button>`;
+    }).join('');
+
+    // Method action buttons in Actions column (one for each supported method)
+    const methodActionBtns = r.methods.map(m => {
+      const c = methodColors[m] || { bg: 'rgba(255,255,255,0.1)', color: '#e4e6f0', border: 'var(--border)' };
+      return `<button type="button" class="btn btn-sm" onclick="openApiTester('${encodeURIComponent(r.rule)}', '${m}')" style="padding:2px 8px; font-size:0.72rem; font-weight:700; margin-right:3px; margin-bottom:2px; background:${c.bg}; color:${c.color}; border:1px solid ${c.border}; cursor:pointer;" title="Send ${m} request to ${r.rule}">▶ ${m}</button>`;
     }).join('');
 
     // Safe direct open for GET routes without mandatory parameter placeholders
     const isDirectGet = r.methods.includes('GET') && !r.rule.includes('<') && r.rule !== '/api/trade_result';
     const openBtn = isDirectGet
-      ? `<a href="${r.rule}" target="_blank" class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem; text-decoration:none; margin-right:4px;" title="Open GET endpoint in new browser tab">↗ Open</a>`
+      ? `<a href="${r.rule}" target="_blank" class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem; text-decoration:none; margin-right:3px; margin-bottom:2px;" title="Open GET endpoint directly in new browser tab">↗ Open</a>`
       : '';
 
-    const copyBtn = `<button class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem;" onclick="copyRouteText('${r.rule}', this)" title="Copy route path">📋 Copy</button>`;
+    const copyBtn = `<button type="button" class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem; margin-bottom:2px;" onclick="copyRouteText('${r.rule}', this)" title="Copy route path">📋 Copy</button>`;
 
     return `
       <tr>
@@ -25026,7 +25047,7 @@ function renderApiRoutes(routes) {
           ${r.summary || r.endpoint}
         </td>
         <td style="text-align:center; white-space:nowrap; vertical-align:middle;">
-          ${openBtn}${copyBtn}
+          ${methodActionBtns}${openBtn}${copyBtn}
         </td>
       </tr>
     `;
@@ -25044,6 +25065,266 @@ function copyRouteText(text, btn) {
     }, 1200);
   }).catch(() => {
     prompt('Copy endpoint URL:', text);
+  });
+}
+
+// ─── Interactive API Tester Functions ──────────────────────────────────────────
+let _currentApiRoute = null;
+
+function openApiTester(encodedRule, method = 'GET', autoSend = true) {
+  const rule = decodeURIComponent(encodedRule);
+  const routeObj = _allApiRoutes.find(r => r.rule === rule) || { rule, methods: [method], summary: '' };
+  _currentApiRoute = routeObj;
+
+  const modal = document.getElementById('apiTesterModal');
+  if (!modal) return;
+
+  const titleEl = document.getElementById('apiTesterTitle');
+  if (titleEl) titleEl.textContent = rule;
+
+  const summaryEl = document.getElementById('apiTesterSummary');
+  if (summaryEl) summaryEl.textContent = routeObj.summary || routeObj.endpoint || rule;
+
+  const urlInput = document.getElementById('apiTesterUrlInput');
+  if (urlInput) urlInput.value = rule;
+
+  const methodSelect = document.getElementById('apiTesterMethodSelect');
+  if (methodSelect) {
+    const methods = routeObj.methods && routeObj.methods.length ? routeObj.methods : ['GET', 'POST', 'PUT', 'DELETE'];
+    methodSelect.innerHTML = methods.map(m => `<option value="${m}">${m}</option>`).join('');
+    methodSelect.value = method;
+  }
+
+  updateApiTesterMethodBadge(method);
+
+  const bodySection = document.getElementById('apiTesterBodySection');
+  const bodyText = document.getElementById('apiTesterBodyText');
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (bodySection) bodySection.style.display = 'block';
+    if (bodyText && (!bodyText.value || bodyText.value.trim() === '')) {
+      bodyText.value = '{}';
+    }
+  } else {
+    if (bodySection) bodySection.style.display = 'none';
+  }
+
+  const hasParams = rule.includes('<');
+  const hintEl = document.getElementById('apiTesterParamHint');
+  if (hintEl) hintEl.style.display = hasParams ? 'block' : 'none';
+
+  const newTabBtn = document.getElementById('apiTesterNewTabBtn');
+  if (newTabBtn) {
+    newTabBtn.style.display = (!hasParams && method === 'GET') ? 'inline-block' : 'none';
+  }
+
+  const statusBadge = document.getElementById('apiTesterStatusBadge');
+  if (statusBadge) {
+    statusBadge.textContent = 'Ready to send';
+    statusBadge.style.background = 'var(--surface2)';
+    statusBadge.style.color = 'var(--text2)';
+  }
+  const timeBadge = document.getElementById('apiTesterTimeBadge');
+  if (timeBadge) timeBadge.textContent = '';
+  const sizeBadge = document.getElementById('apiTesterSizeBadge');
+  if (sizeBadge) sizeBadge.textContent = '';
+  const respBody = document.getElementById('apiTesterResponseBody');
+  if (respBody) respBody.textContent = 'Click "Send Request" to test this endpoint.';
+
+  modal.style.display = 'flex';
+
+  if (!hasParams && autoSend) {
+    executeApiTesterRequest();
+  } else if (hasParams && urlInput) {
+    setTimeout(() => { urlInput.focus(); }, 100);
+  }
+}
+
+function updateApiTesterMethodBadge(method) {
+  const badge = document.getElementById('apiTesterMethodBadge');
+  if (!badge) return;
+  badge.textContent = method;
+  const colors = {
+    'GET': { bg: 'rgba(2,132,199,0.2)', color: '#38bdf8', border: 'rgba(2,132,199,0.45)' },
+    'POST': { bg: 'rgba(22,163,74,0.2)', color: '#4ade80', border: 'rgba(22,163,74,0.45)' },
+    'PUT': { bg: 'rgba(217,119,6,0.2)', color: '#fbbf24', border: 'rgba(217,119,6,0.45)' },
+    'PATCH': { bg: 'rgba(147,51,234,0.2)', color: '#c084fc', border: 'rgba(147,51,234,0.45)' },
+    'DELETE': { bg: 'rgba(220,38,38,0.2)', color: '#f87171', border: 'rgba(220,38,38,0.45)' }
+  };
+  const c = colors[method] || { bg: 'rgba(255,255,255,0.1)', color: '#e4e6f0', border: 'var(--border)' };
+  badge.style.background = c.bg;
+  badge.style.color = c.color;
+  badge.style.borderColor = c.border;
+}
+
+function onApiTesterMethodChange() {
+  const method = document.getElementById('apiTesterMethodSelect')?.value || 'GET';
+  updateApiTesterMethodBadge(method);
+  const bodySection = document.getElementById('apiTesterBodySection');
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (bodySection) bodySection.style.display = 'block';
+  } else {
+    if (bodySection) bodySection.style.display = 'none';
+  }
+}
+
+function closeApiTester() {
+  const modal = document.getElementById('apiTesterModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function openApiTesterInTab() {
+  const url = document.getElementById('apiTesterUrlInput')?.value;
+  if (url) window.open(url, '_blank');
+}
+
+function formatApiTesterBody() {
+  const bodyEl = document.getElementById('apiTesterBodyText');
+  if (!bodyEl || !bodyEl.value.trim()) return;
+  try {
+    const parsed = JSON.parse(bodyEl.value);
+    bodyEl.value = JSON.stringify(parsed, null, 2);
+  } catch(e) {
+    alert('Invalid JSON: ' + e.message);
+  }
+}
+
+async function executeApiTesterRequest() {
+  const urlInput = document.getElementById('apiTesterUrlInput');
+  const methodSelect = document.getElementById('apiTesterMethodSelect');
+  const sendBtn = document.getElementById('apiTesterSendBtn');
+  const spinner = document.getElementById('apiTesterSendSpinner');
+  const statusBadge = document.getElementById('apiTesterStatusBadge');
+  const timeBadge = document.getElementById('apiTesterTimeBadge');
+  const sizeBadge = document.getElementById('apiTesterSizeBadge');
+  const respBody = document.getElementById('apiTesterResponseBody');
+
+  const url = (urlInput?.value || '').trim();
+  const method = methodSelect?.value || 'GET';
+
+  if (!url) {
+    alert('Please enter a valid URL path.');
+    return;
+  }
+  if (url.includes('<')) {
+    alert('Please replace the <...> parameter placeholder with a real value before sending.');
+    if (urlInput) urlInput.focus();
+    return;
+  }
+
+  if (sendBtn) sendBtn.disabled = true;
+  if (spinner) spinner.style.display = 'inline-block';
+  if (statusBadge) {
+    statusBadge.textContent = '⏳ Sending...';
+    statusBadge.style.background = 'rgba(217,119,6,0.2)';
+    statusBadge.style.color = '#fbbf24';
+  }
+  if (timeBadge) timeBadge.textContent = '';
+  if (sizeBadge) sizeBadge.textContent = '';
+  if (respBody) respBody.textContent = `Connecting to ${method} ${url}...`;
+
+  const t0 = performance.now();
+
+  try {
+    const fetchOptions = {
+      method: method,
+      headers: {}
+    };
+
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      fetchOptions.headers['Content-Type'] = 'application/json';
+      const bodyText = (document.getElementById('apiTesterBodyText')?.value || '').trim();
+      if (bodyText && bodyText !== '{}') {
+        fetchOptions.body = bodyText;
+      } else if (method === 'POST') {
+        fetchOptions.body = '{}';
+      }
+    }
+
+    const res = await fetch(url, fetchOptions);
+    const latency = Math.round(performance.now() - t0);
+    const status = res.status;
+    const statusText = res.statusText || (status === 200 ? 'OK' : '');
+
+    if (statusBadge) {
+      statusBadge.textContent = `${status} ${statusText}`;
+      if (status >= 200 && status < 300) {
+        statusBadge.style.background = 'rgba(22,163,74,0.25)';
+        statusBadge.style.color = '#4ade80';
+      } else if (status >= 300 && status < 400) {
+        statusBadge.style.background = 'rgba(2,132,199,0.25)';
+        statusBadge.style.color = '#38bdf8';
+      } else {
+        statusBadge.style.background = 'rgba(220,38,38,0.25)';
+        statusBadge.style.color = '#f87171';
+      }
+    }
+
+    if (timeBadge) timeBadge.textContent = `⏱️ ${latency}ms`;
+
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+
+    if (sizeBadge) {
+      const bytes = new Blob([text]).size;
+      sizeBadge.textContent = bytes > 1024 ? `📦 ${(bytes / 1024).toFixed(1)} KB` : `📦 ${bytes} B`;
+    }
+
+    if (contentType.includes('application/json')) {
+      try {
+        const parsed = JSON.parse(text);
+        if (respBody) respBody.textContent = JSON.stringify(parsed, null, 2);
+      } catch(e) {
+        if (respBody) respBody.textContent = text;
+      }
+    } else {
+      if (respBody) respBody.textContent = text || `[Empty response, status ${status}]`;
+    }
+
+  } catch(err) {
+    const latency = Math.round(performance.now() - t0);
+    if (statusBadge) {
+      statusBadge.textContent = 'Network Error';
+      statusBadge.style.background = 'rgba(220,38,38,0.25)';
+      statusBadge.style.color = '#f87171';
+    }
+    if (timeBadge) timeBadge.textContent = `⏱️ ${latency}ms`;
+    if (respBody) respBody.textContent = `❌ Request Failed:\n${err.message || err}`;
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+    if (spinner) spinner.style.display = 'none';
+  }
+}
+
+function copyApiTesterResponse(btn) {
+  const text = document.getElementById('apiTesterResponseBody')?.textContent || '';
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }).catch(() => {
+    prompt('Response:', text);
+  });
+}
+
+function copyApiTesterCurl(btn) {
+  const url = document.getElementById('apiTesterUrlInput')?.value || '';
+  const method = document.getElementById('apiTesterMethodSelect')?.value || 'GET';
+  const fullUrl = window.location.origin + (url.startsWith('/') ? url : '/' + url);
+  let curl = `curl -X ${method} "${fullUrl}"`;
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    const body = document.getElementById('apiTesterBodyText')?.value || '';
+    curl += ` -H "Content-Type: application/json"`;
+    if (body.trim()) {
+      curl += ` -d '${body.trim()}'`;
+    }
+  }
+  navigator.clipboard.writeText(curl).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ cURL Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }).catch(() => {
+    prompt('cURL command:', curl);
   });
 }
 
@@ -25117,6 +25398,69 @@ function copyRouteText(text, btn) {
     <p id="pairBreakdownFooter" style="margin-top:10px;font-size:0.7rem;color:var(--text2);">Hedge Lots = deal count &divide; 2 (1 buy + 1 sell = 1 lot). Click outside to close.</p>
   </div>
 </div>
+<!-- API Request Tester Modal -->
+<div id="apiTesterModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:10001;justify-content:center;align-items:center;" onclick="if(event.target===this)closeApiTester()">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:80%;min-width:480px;max-width:960px;max-height:92vh;overflow-y:auto;box-shadow:0 20px 40px rgba(0,0,0,0.6);position:relative;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="apiTesterMethodBadge" style="font-size:0.78rem;font-weight:700;padding:3px 8px;border-radius:4px;background:rgba(2,132,199,0.2);color:#38bdf8;border:1px solid rgba(2,132,199,0.4);">GET</span>
+        <h3 id="apiTesterTitle" style="margin:0;font-size:1.15rem;font-family:Consolas,monospace;color:#93c5fd;">/api/status</h3>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn btn-sm" id="apiTesterNewTabBtn" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:4px 8px;" onclick="openApiTesterInTab()" title="Open URL in browser tab">↗ Tab</button>
+        <button class="btn btn-sm" style="background:var(--red);color:#fff;border:none;padding:4px 10px;font-weight:bold;cursor:pointer;" onclick="closeApiTester()">✕</button>
+      </div>
+    </div>
+    <div id="apiTesterSummary" style="font-size:0.83rem;color:var(--text2);margin-bottom:14px;padding:6px 10px;background:var(--surface2);border-radius:6px;border-left:3px solid var(--accent);">Description here</div>
+
+    <!-- Request Form Bar -->
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
+      <select id="apiTesterMethodSelect" onchange="onApiTesterMethodChange()" style="width:110px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-weight:bold;font-size:0.85rem;">
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+        <option value="PUT">PUT</option>
+        <option value="PATCH">PATCH</option>
+        <option value="DELETE">DELETE</option>
+      </select>
+      <input type="text" id="apiTesterUrlInput" style="flex:1;min-width:240px;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-family:Consolas,monospace;font-size:0.88rem;" placeholder="/url">
+      <button class="btn btn-primary" id="apiTesterSendBtn" onclick="executeApiTesterRequest()" style="padding:8px 18px;font-weight:600;display:flex;align-items:center;gap:6px;">
+        <span id="apiTesterSendSpinner" style="display:none;">⏳</span>
+        <span>🚀 Send Request</span>
+      </button>
+    </div>
+
+    <div id="apiTesterParamHint" style="display:none;margin-bottom:12px;font-size:0.78rem;color:#fbbf24;background:rgba(217,119,6,0.15);padding:6px 10px;border-radius:6px;border:1px solid rgba(217,119,6,0.3);">
+      ⚠️ Note: This route contains parameter placeholders (e.g. &lt;session_id&gt;). Please replace them with actual values in the URL box above before sending.
+    </div>
+
+    <!-- Body Section (for POST / PUT / PATCH) -->
+    <div id="apiTesterBodySection" style="margin-bottom:14px;display:none;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <label style="font-size:0.75rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Request Body (JSON)</label>
+        <button class="btn btn-sm btn-secondary" onclick="formatApiTesterBody()" style="padding:2px 8px;font-size:0.7rem;">Format JSON</button>
+      </div>
+      <textarea id="apiTesterBodyText" rows="4" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-family:Consolas,monospace;font-size:0.82rem;resize:vertical;" placeholder="{}"></textarea>
+    </div>
+
+    <!-- Response Section -->
+    <div id="apiTesterResponseSection" style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:0.8rem;font-weight:600;color:var(--text2);">RESPONSE:</span>
+          <span id="apiTesterStatusBadge" style="font-size:0.78rem;font-weight:700;padding:2px 8px;border-radius:4px;background:var(--surface2);color:var(--text2);">Ready to send</span>
+          <span id="apiTesterTimeBadge" style="font-size:0.75rem;color:var(--text2);"></span>
+          <span id="apiTesterSizeBadge" style="font-size:0.75rem;color:var(--text2);"></span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-sm btn-secondary" onclick="copyApiTesterResponse(this)" style="padding:3px 8px;font-size:0.72rem;">📋 Copy Response</button>
+          <button class="btn btn-sm btn-secondary" onclick="copyApiTesterCurl(this)" style="padding:3px 8px;font-size:0.72rem;">📋 Copy cURL</button>
+        </div>
+      </div>
+      <pre id="apiTesterResponseBody" style="margin:0;max-height:350px;overflow:auto;padding:12px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);font-family:Consolas,monospace;font-size:0.82rem;color:var(--text);white-space:pre-wrap;word-break:break-all;">Click "Send Request" to test this endpoint.</pre>
+    </div>
+  </div>
+</div>
+
 <!-- Custom Confirm Modal (must be last in DOM for z-order on popout page) -->
 <div class="modal-overlay" id="confirmModal" style="z-index:9999;">
   <div class="modal" style="max-width:400px;text-align:center;padding:24px;">
