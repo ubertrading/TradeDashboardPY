@@ -168,12 +168,16 @@ from logging.handlers import RotatingFileHandler
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_FILE = os.path.join(_LOGS_DIR, "dashboard.log")
 
+# Raw streams for console output before redirection
+_raw_stdout = sys.__stdout__ or sys.stdout
+_raw_stderr = sys.__stderr__ or sys.stderr
+
 # Root logger: console + rolling file
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
-# Console handler
-console_handler = logging.StreamHandler()
+# Console handler (writes directly to raw stderr so redirected sys.stderr never recurses)
+console_handler = logging.StreamHandler(_raw_stderr)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 root_logger.addHandler(console_handler)
 
@@ -193,16 +197,44 @@ dashboard_settings = {}
 _dashboard_start_time = time.time()
 sessions = {}           # session_id -> session dict
 
-# Redirect print() to logger so HEDGE-MON, HEDGE-TRACE etc. are captured in the log file
-class _PrintLogger:
+# Redirect print() and stderr to logger so all console output and exceptions are captured in dashboard.log
+class _StreamToLogger:
+    def __init__(self, log_fn, prefix=""):
+        self.log_fn = log_fn
+        self.prefix = prefix
     def write(self, msg):
-        msg = msg.rstrip()
-        if msg:
-            root_logger.info(msg)
+        stripped = msg.rstrip()
+        if stripped:
+            if self.prefix:
+                self.log_fn("%s %s", self.prefix, stripped)
+            else:
+                self.log_fn("%s", stripped)
     def flush(self):
         pass
 
-sys.stdout = _PrintLogger()
+sys.stdout = _StreamToLogger(root_logger.info)
+sys.stderr = _StreamToLogger(root_logger.error, prefix="[STDERR]")
+
+# Global unhandled exception hooks to ensure fatal crashes are recorded in dashboard.log
+def _handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        root_logger.warning("KeyboardInterrupt received.")
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    root_logger.critical("UNCAUGHT FATAL EXCEPTION: %s: %s", exc_type.__name__, exc_value,
+                         exc_info=(exc_type, exc_value, exc_traceback))
+
+def _handle_thread_exception(args):
+    if issubclass(args.exc_type, KeyboardInterrupt):
+        return
+    root_logger.critical("UNCAUGHT THREAD EXCEPTION in %s: %s: %s",
+                         getattr(args.thread, 'name', str(args.thread)),
+                         args.exc_type.__name__, args.exc_value,
+                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+sys.excepthook = _handle_uncaught_exception
+if hasattr(threading, "excepthook"):
+    threading.excepthook = _handle_thread_exception
 
 # ─── In-memory state ────────────────────────────────────────────────────────
 event_log = []          # list of {ts, session_id, account, event, detail}
@@ -2862,15 +2894,26 @@ def _save_daily_statements(date_str=None):
                 stmt["lots_by_instrument"]  = info.get("lots_by_instrument", {})
                 stmt["swap_by_instrument"]  = info.get("swap_by_instrument", {})
 
-                # ── Today's closed deal history ─────────────────────────────
+                # ── Closed deal history (all connectors) ────────────────────
                 deal_hist = None
                 acct_obj  = None
+                # Try MT Direct first
                 if mt_direct_manager:
                     acct_obj = mt_direct_manager.accounts.get(acct_id)
+                # Fallback: MT Bridge client
+                if not acct_obj and 'mt_bridge_client' in globals() and mt_bridge_client:
+                    acct_obj = mt_bridge_client.accounts.get(acct_id) if hasattr(mt_bridge_client, 'accounts') else None
+                # Fallback: FIX manager
+                if not acct_obj and 'fix_manager' in globals() and fix_manager:
+                    acct_obj = fix_manager.accounts.get(acct_id)
+                # Fallback: iFOREX manager
+                if not acct_obj and 'iforex_manager' in globals() and iforex_manager:
+                    acct_obj = iforex_manager.accounts.get(acct_id)
+
                 if acct_obj and hasattr(acct_obj, "get_deal_history"):
                     try:
                         deal_hist = acct_obj.get_deal_history(
-                            day_from_ts, day_to_ts, exclude_balance=True)
+                            0, day_to_ts, exclude_balance=False)
                     except Exception as _dh_err:
                         logger.warning("[STMTS] deal_history failed for %s: %s", acct_id, _dh_err)
 
@@ -2880,15 +2923,23 @@ def _save_daily_statements(date_str=None):
                     stmt["day_fees"]       = deal_hist.get("fees")
                     stmt["day_deal_count"] = deal_hist.get("deal_count")
                     stmt["day_by_symbol"]  = deal_hist.get("by_symbol", {})
+                    stmt["deals"]          = deal_hist.get("deals", [])
                 else:
                     stmt["day_pnl"] = stmt["day_swap"] = stmt["day_fees"] = stmt["day_deal_count"] = None
                     stmt["day_by_symbol"] = {}
+                    stmt["deals"] = []
 
-                # ── Write per-account file ──────────────────────────────────
+                # ── Write per-account HTML Statement and JSON backup ─────────
                 safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
-                stmt_path = os.path.join(day_dir, f"{safe_id}.json")
-                with open(stmt_path, "w", encoding="utf-8") as _f:
-                    json.dump(stmt, _f, indent=2, default=str)
+                html_path = os.path.join(day_dir, f"{safe_id}.html")
+                json_path = os.path.join(day_dir, f"{safe_id}.json")
+
+                html_content = _render_metatrader_html_statement(stmt)
+                with open(html_path, "w", encoding="utf-8") as _fhtml:
+                    _fhtml.write(html_content)
+
+                with open(json_path, "w", encoding="utf-8") as _fjson:
+                    json.dump(stmt, _fjson, indent=2, default=str)
 
                 summary_rows.append({
                     "account_id":   acct_id,
@@ -2905,7 +2956,7 @@ def _save_daily_statements(date_str=None):
             except Exception as _acct_err:
                 logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err)
 
-        # ── Write summary ───────────────────────────────────────────────────
+        # ── Write summary.json and index.html ───────────────────────────────
         summary = {
             "date":          date_str,
             "generated_ts":  generated_ts,
@@ -2916,7 +2967,12 @@ def _save_daily_statements(date_str=None):
         with open(summary_path, "w", encoding="utf-8") as _f:
             json.dump(summary, _f, indent=2, default=str)
 
-        logger.info("[STMTS] Saved daily statements for %s: %d accounts → %s",
+        index_path = os.path.join(day_dir, "index.html")
+        index_html = _render_summary_index_html(date_str, summary_rows)
+        with open(index_path, "w", encoding="utf-8") as _findex:
+            _findex.write(index_html)
+
+        logger.info("[STMTS] Saved daily HTML statements for %s: %d accounts → %s",
                     date_str, len(summary_rows), day_dir)
 
     except Exception as e:
@@ -25161,17 +25217,57 @@ if __name__ == '__main__':
     # Start universal hedge monitor (works for EA poll, MT Direct, FIX — all account types)
     _start_hedge_monitor_thread()
 
-    app.logger.info("Starting Trade Dashboard on %s:%d", TRADE_HOST, TRADE_PORT)
     try:
+        from waitress import serve
+    except ImportError:
+        app.logger.info("Waitress not installed — attempting auto-installation via pip...")
         try:
-            from waitress import serve
-        except ImportError:
-            app.logger.info("Waitress not installed — attempting auto-installation via pip...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "waitress"])
             from waitress import serve
             app.logger.info("Waitress successfully installed.")
-        serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=16)
-    except Exception as e:
-        app.logger.warning("Waitress not available or failed to start: %s — falling back to Flask dev server", e)
-        app.run(host=TRADE_HOST, port=TRADE_PORT, threaded=True)
+        except Exception as e:
+            app.logger.warning("Waitress installation failed: %s — falling back to Flask dev server", e)
+            serve = None
+
+    _shutdown_requested = False
+
+    def _sig_handler(signum, frame):
+        global _shutdown_requested
+        _shutdown_requested = True
+        app.logger.warning("Received signal %s (e.g. SIGINT/SIGTERM) — initiating graceful shutdown...", signum)
+
+    try:
+        import signal
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+    except Exception:
+        pass
+
+    while not _shutdown_requested:
+        app.logger.info("Starting Trade Dashboard server on %s:%d", TRADE_HOST, TRADE_PORT)
+        try:
+            if serve is not None:
+                serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=16)
+            else:
+                app.run(host=TRADE_HOST, port=TRADE_PORT, threaded=True)
+        except KeyboardInterrupt:
+            app.logger.warning("KeyboardInterrupt detected. Shutting down Trade Dashboard.")
+            _shutdown_requested = True
+            break
+        except SystemExit as se:
+            app.logger.warning("SystemExit detected (code: %s). Shutting down Trade Dashboard.", se.code)
+            _shutdown_requested = True
+            break
+        except Exception as e:
+            app.logger.error("Web server crashed with error: %s. Auto-restarting in 3s...", e, exc_info=True)
+            time.sleep(3)
+            continue
+
+        if _shutdown_requested:
+            app.logger.info("Trade Dashboard shut down cleanly per request.")
+            break
+        else:
+            app.logger.warning("Trade Dashboard server stopped unexpectedly (no exception raised). Auto-restarting in 2s...")
+            time.sleep(2)
+
 
