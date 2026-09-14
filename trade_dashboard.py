@@ -13876,66 +13876,89 @@ def pnl_request_create():
         except ValueError:
             return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
 
-        # Find all accounts under this name (optionally filtered to a specific hedge subgroup).
-        # Group label format: NAME-HEDGENUM-SIDE  (e.g. HU-02-A)
-        # Account names follow: NAME-hedgenumber-side-accountnumber (e.g. HU-1-A-SQ2200508)
-        acct_list = []
-        seen = set()
+        # ── Account resolution ──────────────────────────────────────────────
+        # If the frontend sent an explicit account list, use it directly.
+        # This is the preferred path: the Reporting tab already knows which
+        # accounts belong to each hedge group, so we trust its list.
+        explicit_accounts = data.get("accounts")
+        if explicit_accounts and isinstance(explicit_accounts, list):
+            acct_list = [a.strip() for a in explicit_accounts if isinstance(a, str) and a.strip()]
+            app.logger.info("[PnL] Using explicit account list from frontend: %s", acct_list)
+        else:
+            # Fallback: resolve accounts server-side from labels/names.
+            # Group label format: NAME-HEDGENUM-SIDE  (e.g. HU-02-A)
+            acct_list = []
+            seen = set()
 
-        # If hedge_key is set (e.g. "HU-02"), match accounts whose label prefix is NAME-HEDGENUM.
-        # Otherwise fall back to matching just the NAME (original behaviour).
-        hedge_key_upper = hedge_key.upper() if hedge_key else ""
+            # If hedge_key is set (e.g. "HU-02"), match accounts whose label prefix is NAME-HEDGENUM.
+            # Otherwise fall back to matching just the NAME (original behaviour).
+            hedge_key_upper = hedge_key.upper() if hedge_key else ""
 
-        def _check_account(acc, grp=""):
-            if acc in seen:
-                return
-            # Check group_label first
-            if grp:
-                parts = grp.split("-")
-                if hedge_key_upper:
-                    # Subgroup mode: match "NAME-HEDGENUM" prefix exactly
-                    grp_prefix = "-".join(p.strip() for p in parts[:2]).upper() if len(parts) >= 2 else parts[0].strip().upper()
-                    if grp_prefix == hedge_key_upper:
-                        acct_list.append(acc)
-                        seen.add(acc)
-                        return
-                else:
-                    # Name-level mode: match first segment
-                    if parts[0].strip().upper() == name.upper():
-                        acct_list.append(acc)
-                        seen.add(acc)
-                        return
-            # Then check account name itself
-            acc_parts = acc.split("-")
-            if hedge_key_upper:
-                acc_prefix = "-".join(p.strip() for p in acc_parts[:2]).upper() if len(acc_parts) >= 2 else acc_parts[0].strip().upper()
-                if acc_prefix == hedge_key_upper:
-                    acct_list.append(acc)
-                    seen.add(acc)
-            else:
-                if acc_parts[0].strip().upper() == name.upper():
-                    acct_list.append(acc)
-                    seen.add(acc)
-
-        # EA / heartbeat accounts
-        for acc in list(ea_account_info.keys()):
-            grp = manual_accounts.get(acc, {}).get("group_label", "")
-            _check_account(acc, grp)
-        # Manual accounts
-        for acc, info in manual_accounts.items():
-            _check_account(acc, info.get("group_label", ""))
-        # FIX / OpenAPI accounts
-        if fix_manager:
-            for acc, acct in fix_manager.accounts.items():
-                _check_account(acc, acct.config.get("group_label", ""))
-        # MT Direct accounts — check config["label"] first (same as Reporting tab)
-        if mt_direct_manager:
-            for acc in mt_direct_manager.accounts:
-                mt_acct = mt_direct_manager.accounts[acc]
-                grp = mt_acct.config.get("label", "")
+            def _resolve_label(acc):
+                """Resolve the best group label for an account, checking MT Direct label,
+                FIX config, and manual_accounts — same priority as the Reporting tab."""
+                grp = ""
+                if mt_direct_manager:
+                    mt_acct = mt_direct_manager.accounts.get(acc)
+                    if mt_acct:
+                        grp = mt_acct.config.get("label", "")
+                if not grp and fix_manager:
+                    fix_acct = fix_manager.accounts.get(acc)
+                    if fix_acct:
+                        grp = fix_acct.config.get("group_label", "")
                 if not grp:
                     grp = manual_accounts.get(acc, {}).get("group_label", "")
-                _check_account(acc, grp)
+                return (grp or "").strip()
+
+            def _check_account(acc):
+                if acc in seen:
+                    return
+                # Skip hidden accounts (archived / disabled in the UI)
+                if manual_accounts.get(acc, {}).get("is_hidden") is True:
+                    return
+                grp = _resolve_label(acc)
+                if grp:
+                    parts = grp.split("-")
+                    if hedge_key_upper:
+                        # Subgroup mode: match "NAME-HEDGENUM" prefix exactly
+                        grp_prefix = "-".join(p.strip() for p in parts[:2]).upper() if len(parts) >= 2 else parts[0].strip().upper()
+                        if grp_prefix == hedge_key_upper:
+                            acct_list.append(acc)
+                            seen.add(acc)
+                    else:
+                        # Name-level mode: match first segment
+                        if parts[0].strip().upper() == name.upper():
+                            acct_list.append(acc)
+                            seen.add(acc)
+                    # If a label exists but didn't match, do NOT fall through to
+                    # raw account-name matching — the label is authoritative.
+                    return
+                # No label anywhere — fall back to account name prefix
+                acc_parts = acc.split("-")
+                if hedge_key_upper:
+                    acc_prefix = "-".join(p.strip() for p in acc_parts[:2]).upper() if len(acc_parts) >= 2 else acc_parts[0].strip().upper()
+                    if acc_prefix == hedge_key_upper:
+                        acct_list.append(acc)
+                        seen.add(acc)
+                else:
+                    if acc_parts[0].strip().upper() == name.upper():
+                        acct_list.append(acc)
+                        seen.add(acc)
+
+            # EA / heartbeat accounts
+            for acc in list(ea_account_info.keys()):
+                _check_account(acc)
+            # Manual accounts
+            for acc in manual_accounts:
+                _check_account(acc)
+            # FIX / OpenAPI accounts
+            if fix_manager:
+                for acc in fix_manager.accounts:
+                    _check_account(acc)
+            # MT Direct accounts
+            if mt_direct_manager:
+                for acc in mt_direct_manager.accounts:
+                    _check_account(acc)
 
         scope_label = hedge_key if hedge_key else name
         if not acct_list:
@@ -20365,6 +20388,9 @@ function renderGroupSummary(data) {
     return;
   }
   const rows = [];
+  // Cache hedge group data so openPnlModal can resolve exact account lists
+  window._reportingHedgeGroups = hg;
+  window._reportingNameTotals = nt;
   const fmt = v => v != null ? v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '\u2014';
   const dot = online => '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (online ? 'var(--green)' : 'var(--red)') + ';margin-right:4px;"></span>';
 
@@ -24269,15 +24295,50 @@ async function deleteIForexAccount(id) {
 }
 // ── PnL Report Functions ──
 let _pnlCurrentName = '';
+let _pnlCurrentHedgeKey = '';
+let _pnlCurrentAccounts = null;
 let _pnlRequestId = '';
 let _pnlPollTimer = null;
 let _pnlLastData = null;  // cached last completed PnL response for pair breakdown popup
 
-function openPnlModal(name, hedgeKey) {
+function openPnlModal(name, hedgeKey, explicitAccounts) {
   _pnlCurrentName = name;
   _pnlCurrentHedgeKey = hedgeKey || '';
+
+  // Resolve target account list from reporting cache
+  if (Array.isArray(explicitAccounts) && explicitAccounts.length > 0) {
+    _pnlCurrentAccounts = explicitAccounts;
+  } else if (hedgeKey && window._reportingHedgeGroups && window._reportingHedgeGroups[hedgeKey]) {
+    const hgObj = window._reportingHedgeGroups[hedgeKey];
+    _pnlCurrentAccounts = (hgObj.accounts || []).map(a => a.name).filter(Boolean);
+  } else if (name && window._reportingHedgeGroups) {
+    const matched = [];
+    Object.values(window._reportingHedgeGroups).forEach(g => {
+      if ((g.name || '').toUpperCase() === (name || '').toUpperCase() && Array.isArray(g.accounts)) {
+        g.accounts.forEach(a => {
+          if (a.name && !matched.includes(a.name)) matched.push(a.name);
+        });
+      }
+    });
+    _pnlCurrentAccounts = matched.length > 0 ? matched : null;
+  } else {
+    _pnlCurrentAccounts = null;
+  }
+
   const label = hedgeKey ? ('🔗 ' + hedgeKey) : ('👤 ' + name);
   document.getElementById('pnlModalTitle').textContent = '📊 PnL Report — ' + label;
+
+  const subEl = document.getElementById('pnlModalSubtitle');
+  if (subEl) {
+    if (_pnlCurrentAccounts && _pnlCurrentAccounts.length > 0) {
+      subEl.textContent = 'Targeting ' + _pnlCurrentAccounts.length + ' account' + (_pnlCurrentAccounts.length > 1 ? 's' : '') + ': ' + _pnlCurrentAccounts.join(', ');
+      subEl.style.display = '';
+    } else {
+      subEl.textContent = '';
+      subEl.style.display = 'none';
+    }
+  }
+
   // Default dates: Sunday of current week to today
   const now = new Date();
   const sunday = new Date(now);
@@ -24613,6 +24674,7 @@ async function requestPnl() {
     const body = { name: _pnlCurrentName, from_date: fromDate, to_date: toDate,
                    exclude_balance: document.getElementById('pnlExcludeBalance').checked };
     if (_pnlCurrentHedgeKey) body.hedge_key = _pnlCurrentHedgeKey;
+    if (Array.isArray(_pnlCurrentAccounts) && _pnlCurrentAccounts.length > 0) body.accounts = _pnlCurrentAccounts;
     if (feeKw) body.fee_keywords = feeKw;
     const resp = await fetch('/api/pnl/request', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await resp.json();
@@ -25339,6 +25401,7 @@ function copyApiTesterCurl(btn) {
         <button class="btn btn-sm" style="background:var(--red);color:#fff;border:none;" onclick="closePnlModal()">✕</button>
       </div>
     </div>
+    <div id="pnlModalSubtitle" style="font-size:0.75rem;color:var(--text2);margin-top:-10px;margin-bottom:12px;display:none;"></div>
     <div id="pnlForm">
       <div style="display:flex;gap:12px;margin-bottom:12px;">
         <div style="flex:1"><label style="font-size:0.75rem;color:var(--text2);">FROM DATE</label><input type="date" id="pnlFromDate" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);"></div>
@@ -25934,8 +25997,12 @@ if __name__ == '__main__':
 
     def _sig_handler(signum, frame):
         global _shutdown_requested
+        if _shutdown_requested:
+            app.logger.warning("Repeated signal %s received — forcing immediate termination.", signum)
+            os._exit(1)
         _shutdown_requested = True
         app.logger.warning("Received signal %s (e.g. SIGINT/SIGTERM) — initiating graceful shutdown...", signum)
+        raise KeyboardInterrupt
 
     try:
         import signal
