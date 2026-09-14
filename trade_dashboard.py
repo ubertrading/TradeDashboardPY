@@ -13716,6 +13716,125 @@ def get_statement_file(filename):
         return jsonify({"error": str(e)}), 500
 
 
+# ─── API Routes Catalog Endpoint ──────────────────────────────────────────
+
+_ROUTE_FALLBACK_DESCRIPTIONS = {
+    "/api/sessions": {
+        "GET": "List all configured trading sessions and their current states.",
+        "POST": "Create a new trading session with account pairings, lots, and filters."
+    },
+    "/api/sessions/<session_id>": {
+        "GET": "Get full configuration and runtime metrics for a specific session.",
+        "PUT": "Update settings/parameters for a specific session.",
+        "DELETE": "Permanently delete a trading session."
+    },
+    "/api/sessions/<session_id>/start": {
+        "POST": "Start / resume an execution cycle for the session."
+    },
+    "/api/sessions/<session_id>/stop": {
+        "POST": "Pause / stop the trading session immediately."
+    },
+    "/api/sessions/<session_id>/clear_errors": {
+        "POST": "Clear error flags and spread rejection counters on the session."
+    },
+    "/api/status": {
+        "GET": "Central status poll: live account metrics, quotes, sessions, and active alerts."
+    },
+    "/api/events": {
+        "GET": "Fetch recent system audit and operational log events."
+    },
+    "/api/recalculate_fund_distributions": {
+        "POST": "Recalculate optimal fund allocations and investor distributions."
+    },
+    "/api/strategies": {
+        "GET": "List all strategy definitions and their account pairings."
+    },
+    "/": {
+        "GET": "Main trading execution dashboard single-page web application."
+    },
+    "/manifest.json": {
+        "GET": "PWA web application manifest for mobile/desktop install."
+    },
+    "/sw.js": {
+        "GET": "PWA service worker script for offline handling and resource caching."
+    }
+}
+
+def _categorize_route(rule):
+    r = rule.lower()
+    if r.startswith('/api/sessions'):
+        return 'Sessions'
+    if r in ('/api/poll_command', '/api/trade_result'):
+        return 'EA Command Loop'
+    if r.startswith('/statements'):
+        return 'Statements'
+    if r in ('/api/status', '/api/events', '/api/lots_breakdown', '/api/swap_breakdown', '/api/recalculate_fund_distributions'):
+        return 'Status & Exposure'
+    if r.startswith('/api/fix_accounts'):
+        return 'FIX Connector'
+    if r.startswith('/api/mt_direct_accounts'):
+        return 'MT Direct'
+    if r.startswith('/api/iforex_accounts'):
+        return 'iFOREX'
+    if r.startswith('/api/ctrader'):
+        return 'cTrader'
+    if r.startswith('/api/accounts'):
+        return 'Accounts'
+    if r.startswith('/api/strategies') or r in ('/api/position_report',) or r.startswith('/api/import_status'):
+        return 'Strategies & Import'
+    if r.startswith('/api/reporting') or r.startswith('/api/day_schedule_templates'):
+        return 'Reporting & Fees'
+    if r.startswith('/api/reports'):
+        return 'Quote Stats'
+    if r.startswith('/api/pnl'):
+        return 'PnL Engine'
+    if r.startswith('/api/settings') or r in ('/api/confirm_rollback', '/api/pending_rollbacks'):
+        return 'Settings & Alerts'
+    return 'Web & PWA'
+
+@app.route('/api/routes', methods=['GET'])
+def get_api_routes():
+    """Return a comprehensive catalog of all registered Flask routes with descriptions and categories."""
+    try:
+        catalog = []
+        for rule in app.url_map.iter_rules():
+            if rule.endpoint == 'static':
+                continue
+            view_func = app.view_functions.get(rule.endpoint)
+            doc = (getattr(view_func, '__doc__', '') or '').strip()
+            methods = sorted([m for m in rule.methods if m not in ('HEAD', 'OPTIONS')])
+
+            # Extract docstring summary or use fallback
+            summary = doc.split('\n')[0].strip() if doc else ""
+            if not summary:
+                fb = _ROUTE_FALLBACK_DESCRIPTIONS.get(rule.rule, {})
+                for m in methods:
+                    if m in fb:
+                        summary = fb[m]
+                        break
+                if not summary:
+                    summary = rule.endpoint.replace('_', ' ').capitalize()
+
+            category = _categorize_route(rule.rule)
+
+            catalog.append({
+                "rule": rule.rule,
+                "endpoint": rule.endpoint,
+                "methods": methods,
+                "category": category,
+                "summary": summary,
+                "doc": doc
+            })
+
+        catalog.sort(key=lambda x: (x["category"], x["rule"]))
+        return jsonify({
+            "count": len(catalog),
+            "routes": catalog
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── PnL Report API ─────────────────────────────────────────────────────────
 
 @app.route('/api/pnl/request', methods=['POST'])
@@ -15004,6 +15123,7 @@ body {
     <button class="tab-btn" data-tab="eventlog" onclick="switchTab('eventlog')">📋 Event Log</button>
     <button class="tab-btn" data-tab="reporting" onclick="switchTab('reporting')">📈 Reporting</button>
     <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ Settings</button>
+    <button class="tab-btn" data-tab="api-routes" onclick="switchTab('api-routes')">🔌 API Routes</button>
   </div>
   <div class="tab-nav-controls">
     <span id="serverTime" style="font-size:0.82rem;color:var(--text2);font-weight:600;">--:--:--</span>
@@ -15618,6 +15738,68 @@ body {
   </div>
 
 </div>
+</div>
+
+<!-- TAB 6: API Routes -->
+<div class="tab-panel" id="tab-api-routes">
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
+      <div>
+        <h2 style="margin:0; font-size:1.3rem; display:flex; align-items:center; gap:8px;">
+          <span>🔌 API Routes & Endpoints</span>
+          <span id="apiRouteCountBadge" style="font-size:0.75rem; background:var(--surface2); color:var(--accent); padding:2px 8px; border-radius:12px; border:1px solid var(--border);">Loading...</span>
+        </h2>
+        <p style="margin:4px 0 0 0; font-size:0.8rem; color:var(--text2);">Complete catalog of all HTTP REST endpoints, webhook callbacks, and asset routes registered in this trading engine.</p>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn btn-sm btn-primary" onclick="loadApiRoutes(true)" title="Reload catalog from server">🔄 Refresh</button>
+        <a href="/api/routes" target="_blank" class="btn btn-sm btn-secondary" style="text-decoration:none;" title="View raw JSON format">📄 Raw JSON</a>
+      </div>
+    </div>
+
+    <!-- Search & Filter Controls -->
+    <div style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap; align-items:center;">
+      <div style="flex:1; min-width:240px;">
+        <input type="text" id="apiRouteSearchInput" placeholder="🔍 Search route URL, method, keyword, or description..."
+               oninput="filterApiRoutes()"
+               style="width:100%; box-sizing:border-box; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:0.85rem;">
+      </div>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <select id="apiRouteMethodFilter" onchange="filterApiRoutes()" style="padding:7px 10px; border-radius:6px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:0.82rem; font-weight:600;">
+          <option value="ALL">All Methods</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+        <select id="apiRouteCategoryFilter" onchange="filterApiRoutes()" style="padding:7px 10px; border-radius:6px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:0.82rem; font-weight:600;">
+          <option value="ALL">All Categories</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Category Pills Navigation -->
+    <div id="apiCategoryPills" style="display:flex; gap:6px; margin-bottom:14px; overflow-x:auto; padding-bottom:4px; flex-wrap:wrap;"></div>
+
+    <!-- Routes Table -->
+    <div style="overflow-x:auto; border-radius:6px; border:1px solid var(--border);">
+      <table class="accounts-table" id="apiRoutesTable" style="width:100%;">
+        <thead>
+          <tr style="background:var(--surface2);">
+            <th style="width:100px;">Method</th>
+            <th style="min-width:280px;">Endpoint Route</th>
+            <th style="width:150px;">Category</th>
+            <th>Description</th>
+            <th style="width:130px; text-align:center;">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="apiRoutesTableBody">
+          <tr><td colspan="5" style="text-align:center; padding:24px; color:var(--text2);">Loading API routes...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 </div>
@@ -17321,6 +17503,7 @@ function switchTab(tabId) {
   // Tab-specific hooks
   if (tabId === 'settings') loadSettings();
   if (tabId === 'reporting') refreshReporting();
+  if (tabId === 'api-routes') loadApiRoutes();
 }
 
 // Strategy sub-tab switching (inside Edit Strategy modal)
@@ -24693,6 +24876,175 @@ function resetThemeColors() {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({theme_colors: {}})
   }).catch(() => {});
+}
+
+// ─── API Routes Catalog Tab ────────────────────────────────────────────────
+let _allApiRoutes = [];
+let _activeApiCategory = 'ALL';
+let _apiRoutesLoaded = false;
+
+async function loadApiRoutes(force = false) {
+  if (_apiRoutesLoaded && !force) return;
+  const tbody = document.getElementById('apiRoutesTableBody');
+  const countBadge = document.getElementById('apiRouteCountBadge');
+  if (tbody && !force) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--text2);">Loading API routes from server...</td></tr>';
+  if (countBadge) countBadge.textContent = 'Loading...';
+
+  try {
+    const res = await fetch('/api/routes?_t=' + Date.now());
+    const data = await res.json();
+    _allApiRoutes = data.routes || [];
+    _apiRoutesLoaded = true;
+
+    // Populate category dropdown and quick pills
+    const categories = ['ALL', ...new Set(_allApiRoutes.map(r => r.category).filter(Boolean))].sort();
+
+    // Category select dropdown
+    const catSelect = document.getElementById('apiRouteCategoryFilter');
+    if (catSelect) {
+      catSelect.innerHTML = categories.map(c => `<option value="${c}">${c === 'ALL' ? 'All Categories' : c}</option>`).join('');
+      catSelect.value = _activeApiCategory;
+    }
+
+    // Category pills
+    const pillsContainer = document.getElementById('apiCategoryPills');
+    if (pillsContainer) {
+      pillsContainer.innerHTML = categories.map(c => {
+        const count = c === 'ALL' ? _allApiRoutes.length : _allApiRoutes.filter(r => r.category === c).length;
+        const isActive = c === _activeApiCategory;
+        const style = isActive
+          ? 'background:var(--accent); color:#fff; border:1px solid var(--accent);'
+          : 'background:var(--surface2); color:var(--text2); border:1px solid var(--border);';
+        return `<button class="btn btn-sm" onclick="setApiCategoryPill('${c}')" style="${style} padding:3px 10px; font-size:0.75rem; border-radius:14px; cursor:pointer; white-space:nowrap;">${c === 'ALL' ? 'All' : c} (${count})</button>`;
+      }).join('');
+    }
+
+    filterApiRoutes();
+  } catch(err) {
+    console.error('Failed to load API routes:', err);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--red);">Failed to load routes: ${err}</td></tr>`;
+    if (countBadge) countBadge.textContent = 'Error';
+  }
+}
+
+function setApiCategoryPill(category) {
+  _activeApiCategory = category;
+  const catSelect = document.getElementById('apiRouteCategoryFilter');
+  if (catSelect) catSelect.value = category;
+
+  // Update active pill style
+  const pills = document.querySelectorAll('#apiCategoryPills button');
+  pills.forEach(p => {
+    const isAct = p.textContent.startsWith(category === 'ALL' ? 'All' : category);
+    if (isAct) {
+      p.style.background = 'var(--accent)';
+      p.style.color = '#fff';
+      p.style.borderColor = 'var(--accent)';
+    } else {
+      p.style.background = 'var(--surface2)';
+      p.style.color = 'var(--text2)';
+      p.style.borderColor = 'var(--border)';
+    }
+  });
+
+  filterApiRoutes();
+}
+
+function filterApiRoutes() {
+  const search = (document.getElementById('apiRouteSearchInput')?.value || '').trim().toLowerCase();
+  const method = document.getElementById('apiRouteMethodFilter')?.value || 'ALL';
+  const category = document.getElementById('apiRouteCategoryFilter')?.value || _activeApiCategory || 'ALL';
+  _activeApiCategory = category;
+
+  const filtered = _allApiRoutes.filter(r => {
+    // Method filter
+    if (method !== 'ALL' && !r.methods.includes(method)) return false;
+    // Category filter
+    if (category !== 'ALL' && r.category !== category) return false;
+    // Search query
+    if (search) {
+      const inRule = (r.rule || '').toLowerCase().includes(search);
+      const inSummary = (r.summary || '').toLowerCase().includes(search);
+      const inEndpoint = (r.endpoint || '').toLowerCase().includes(search);
+      const inCat = (r.category || '').toLowerCase().includes(search);
+      const inMethods = r.methods.some(m => m.toLowerCase().includes(search));
+      if (!inRule && !inSummary && !inEndpoint && !inCat && !inMethods) return false;
+    }
+    return true;
+  });
+
+  const countBadge = document.getElementById('apiRouteCountBadge');
+  if (countBadge) countBadge.textContent = `${filtered.length} of ${_allApiRoutes.length} Routes`;
+
+  renderApiRoutes(filtered);
+}
+
+function renderApiRoutes(routes) {
+  const tbody = document.getElementById('apiRoutesTableBody');
+  if (!tbody) return;
+
+  if (routes.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text2);">No matching API routes found</td></tr>';
+    return;
+  }
+
+  const methodColors = {
+    'GET': { bg: 'rgba(2,132,199,0.15)', color: '#38bdf8', border: 'rgba(2,132,199,0.4)' },
+    'POST': { bg: 'rgba(22,163,74,0.15)', color: '#4ade80', border: 'rgba(22,163,74,0.4)' },
+    'PUT': { bg: 'rgba(217,119,6,0.15)', color: '#fbbf24', border: 'rgba(217,119,6,0.4)' },
+    'PATCH': { bg: 'rgba(147,51,234,0.15)', color: '#c084fc', border: 'rgba(147,51,234,0.4)' },
+    'DELETE': { bg: 'rgba(220,38,38,0.15)', color: '#f87171', border: 'rgba(220,38,38,0.4)' }
+  };
+
+  tbody.innerHTML = routes.map((r) => {
+    // Badges for all methods
+    const methodBadges = r.methods.map(m => {
+      const c = methodColors[m] || { bg: 'rgba(255,255,255,0.1)', color: '#e4e6f0', border: 'var(--border)' };
+      return `<span style="display:inline-block; font-size:0.72rem; font-weight:700; padding:2px 6px; border-radius:4px; margin-right:3px; background:${c.bg}; color:${c.color}; border:1px solid ${c.border};">${m}</span>`;
+    }).join('');
+
+    // Safe direct open for GET routes without mandatory parameter placeholders
+    const isDirectGet = r.methods.includes('GET') && !r.rule.includes('<') && r.rule !== '/api/trade_result';
+    const openBtn = isDirectGet
+      ? `<a href="${r.rule}" target="_blank" class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem; text-decoration:none; margin-right:4px;" title="Open GET endpoint in new browser tab">↗ Open</a>`
+      : '';
+
+    const copyBtn = `<button class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem;" onclick="copyRouteText('${r.rule}', this)" title="Copy route path">📋 Copy</button>`;
+
+    return `
+      <tr>
+        <td style="white-space:nowrap; vertical-align:middle;">${methodBadges}</td>
+        <td style="font-family:Consolas, monospace; font-size:0.84rem; font-weight:600; color:#93c5fd; vertical-align:middle;">
+          ${r.rule}
+        </td>
+        <td style="vertical-align:middle;">
+          <span style="font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:10px; background:var(--surface2); color:var(--text2); border:1px solid var(--border); white-space:nowrap;">
+            ${r.category || 'General'}
+          </span>
+        </td>
+        <td style="font-size:0.83rem; color:var(--text); vertical-align:middle;">
+          ${r.summary || r.endpoint}
+        </td>
+        <td style="text-align:center; white-space:nowrap; vertical-align:middle;">
+          ${openBtn}${copyBtn}
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function copyRouteText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.style.color = '';
+    }, 1200);
+  }).catch(() => {
+    prompt('Copy endpoint URL:', text);
+  });
 }
 
 </script>
