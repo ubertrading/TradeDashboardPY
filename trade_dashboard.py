@@ -2506,6 +2506,7 @@ def _render_metatrader_html_statement(stmt):
     tot_closed_swap = 0.0
     tot_closed_tax = 0.0
     tot_closed_comm = 0.0
+    tot_deposit_withdraw = 0.0
 
     for idx, d in enumerate(closed_deals):
         tkt = d.get("ticket") or d.get("order") or ""
@@ -2524,16 +2525,16 @@ def _render_metatrader_html_statement(stmt):
         pnl = float(d.get("profit", 0.0) or 0.0)
         comment = d.get("comment", "")
 
-        tot_closed_pnl += pnl
-        tot_closed_swap += swap
-        tot_closed_tax += tax
-        tot_closed_comm += comm
-
         bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
 
-        if stype == "balance" or "deposit" in comment.lower() or "deposit" in stype:
+        if stype == "balance" or "deposit" in comment.lower() or "deposit" in stype or "withdrawal" in stype or "withdrawal" in comment.lower():
+            tot_deposit_withdraw += pnl
             closed_rows.append(f'<tr align=right><td title="{comment or "Deposit"}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>balance</td><td colspan=10 align=left>Deposit</td><td class=mspt>{_mspt(pnl)}</td></tr>')
         else:
+            tot_closed_pnl += pnl
+            tot_closed_swap += swap
+            tot_closed_tax += tax
+            tot_closed_comm += comm
             closed_rows.append(
                 f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>{c_time}</td><td style="mso-number-format:0\\.00000;">{_mspr(c_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
             )
@@ -2590,7 +2591,12 @@ def _render_metatrader_html_statement(stmt):
 
     tot_open_net = tot_open_pnl + tot_open_swap + tot_open_tax + tot_open_comm
 
-    deposit_withdrawal = float(stmt.get("deposit_withdrawal", balance - tot_closed_net) if stmt.get("deposit_withdrawal") is not None else (balance - tot_closed_net))
+    if stmt.get("deposit_withdrawal") is not None:
+        deposit_withdrawal = float(stmt["deposit_withdrawal"])
+    elif tot_deposit_withdraw != 0.0:
+        deposit_withdrawal = tot_deposit_withdraw
+    else:
+        deposit_withdrawal = balance - tot_closed_net
 
     html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
 <html>
@@ -2699,8 +2705,10 @@ def _render_metatrader_html_statement(stmt):
     return html_content
 
 
-def _render_summary_index_html(date_str, summary_rows):
-    """Render an HTML index dashboard for all account statements generated on date_str."""
+def _render_summary_index_html(summary_rows, generated_str=None):
+    """Render an HTML index dashboard for all account statements directly in stmts/."""
+    if not generated_str:
+        generated_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows_html = []
     tot_balance = 0.0
     tot_equity = 0.0
@@ -2714,8 +2722,8 @@ def _render_summary_index_html(date_str, summary_rows):
         grp = r.get("group_label", "")
         bal = r.get("balance") or 0.0
         eq = r.get("equity") or 0.0
-        pnl = r.get("day_pnl") or 0.0
-        swap = r.get("day_swap") or 0.0
+        pnl = r.get("closed_pnl") if r.get("closed_pnl") is not None else (r.get("day_pnl") or 0.0)
+        swap = r.get("closed_swap") if r.get("closed_swap") is not None else (r.get("day_swap") or 0.0)
         open_cnt = r.get("open_count") or 0
 
         tot_balance += bal
@@ -2745,7 +2753,7 @@ def _render_summary_index_html(date_str, summary_rows):
 <html>
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>Account Statements Index - {date_str}</title>
+<title>Account Statements Index</title>
 <style type="text/css">
 body, td, th, p {{ font-family: Tahoma, Arial, Helvetica, sans-serif; font-size: 12px; }}
 body {{ background-color: #FFFFFF; color: #000000; margin: 20px; }}
@@ -2763,8 +2771,8 @@ tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
 </style>
 </head>
 <body>
-<h2 style="color: #2C3E50; margin-bottom: 5px;">MetaTrader Daily Statements Index ({date_str})</h2>
-<p style="color: #666; margin-top: 0;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Total Accounts: {len(summary_rows)}</p>
+<h2 style="color: #2C3E50; margin-bottom: 5px;">MetaTrader Account Statements Index</h2>
+<p style="color: #666; margin-top: 0;">Generated on {generated_str}. Total Accounts: {len(summary_rows)}</p>
 
 <table>
   <thead>
@@ -2774,8 +2782,8 @@ tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
       <th>Balance</th>
       <th>Equity</th>
       <th>Open Positions</th>
-      <th>Day Closed P/L</th>
-      <th>Day Swap</th>
+      <th>Closed Trade P/L</th>
+      <th>Closed Swap</th>
       <th>Report Link</th>
     </tr>
   </thead>
@@ -2797,27 +2805,27 @@ tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
     return html_content
 
 
-def _save_daily_statements(date_str=None):
-    """Save full account statements for all connected accounts to stmts/YYYY-MM-DD/.
+def _save_full_statements(date_str=None):
+    """Save full all-time account statements for all connected accounts directly to stmts/.
 
     Each statement file contains:
       - Account ID, date, balance, equity, margin, free_margin, leverage
       - Open positions (ticket, symbol, side, lots, open_price, open_time, profit, swap, tp, sl)
-      - Today's closed trade PnL from broker deal history (pnl, swap, fees, deal_count)
+      - All-time closed trade transactions from broker deal history (deals, pnl, swap, fees, deal_count)
       - Lots and PnL breakdown by symbol
 
-    A summary.json is also written in the same directory with totals across all accounts.
+    Outputs directly to stmts/:
+      - stmts/<account_id>.html (native MetaTrader 4/5 compliant report)
+      - stmts/<account_id>.json (complete raw data backup)
+      - stmts/index.html (dashboard index table)
+      - stmts/summary.json (summary across all accounts)
     """
     try:
-        if date_str is None:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-        day_dir = os.path.join(_STMTS_DIR, date_str)
-        os.makedirs(day_dir, exist_ok=True)
-
-        # Date range for today's deal history: midnight → now (UTC)
-        today_start = datetime.strptime(date_str, "%Y-%m-%d")
-        day_from_ts = today_start.timestamp()
-        day_to_ts   = day_from_ts + 86400  # +24 h
+        os.makedirs(_STMTS_DIR, exist_ok=True)
+        now_dt = datetime.now()
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        generated_ts = now_dt.timestamp()
+        day_to_ts = int(generated_ts) + 86400  # all deals up to now
 
         all_accounts = {}
 
@@ -2831,17 +2839,16 @@ def _save_daily_statements(date_str=None):
                 all_accounts[acct_id] = dict(info)
 
         if not all_accounts:
-            logger.info("[STMTS] No accounts found — skipping statement save for %s", date_str)
+            logger.info("[STMTS] No accounts found — skipping statement save")
             return
 
         summary_rows = []
-        generated_ts = time.time()
 
         for acct_id, info in all_accounts.items():
             try:
                 stmt = {
                     "account_id":  acct_id,
-                    "date":        date_str,
+                    "date":        now_str,
                     "generated_ts": generated_ts,
                     "balance":     info.get("balance"),
                     "equity":      info.get("equity"),
@@ -2853,6 +2860,14 @@ def _save_daily_statements(date_str=None):
                         manual_accounts.get(acct_id, {}).get("group_label") or
                         info.get("group_label", "")
                     ),
+                    "account_name": (
+                        info.get("account_name") or
+                        info.get("name") or
+                        manual_accounts.get(acct_id, {}).get("group_label") or
+                        acct_id
+                    ),
+                    "currency":    info.get("currency") or "USD",
+                    "company":     info.get("company") or info.get("broker") or info.get("server") or "Swissquote Bank SA",
                 }
 
                 # ── Open positions ──────────────────────────────────────────
@@ -2860,14 +2875,16 @@ def _save_daily_statements(date_str=None):
                 pos_val = info.get("position_details") or []
                 pos_dict = info.get("positions") or {}  # bridge uses dict form
                 if isinstance(pos_val, list) and pos_val:
-                    # position_details list (bridge & mt_direct connector format)
                     for p in pos_val:
                         open_positions.append({
                             "ticket":     p.get("ticket"),
                             "symbol":     p.get("symbol", ""),
+                            "side":       p.get("side") or ("buy" if p.get("type") == 0 else "sell"),
                             "comment":    p.get("comment", ""),
                             "open_price": p.get("open_price"),
+                            "market_price": p.get("market_price", p.get("open_price")),
                             "open_epoch": p.get("open_epoch"),
+                            "open_time":  p.get("open_time"),
                             "profit":     p.get("profit"),
                             "swap":       p.get("swap"),
                             "lots":       p.get("lots"),
@@ -2875,14 +2892,14 @@ def _save_daily_statements(date_str=None):
                             "sl":         p.get("sl"),
                         })
                 elif isinstance(pos_dict, dict) and pos_dict:
-                    # Bridge positions dict keyed by ticket
                     for ticket, p in pos_dict.items():
                         open_positions.append({
                             "ticket":     ticket,
                             "symbol":     p.get("symbol", ""),
-                            "side":       "buy" if p.get("type") == 0 else "sell",
+                            "side":       p.get("side") or ("buy" if p.get("type") == 0 else "sell"),
                             "lots":       p.get("lots"),
                             "open_price": p.get("open_price"),
+                            "market_price": p.get("market_price", p.get("open_price")),
                             "open_time":  p.get("open_time"),
                             "profit":     p.get("profit"),
                             "swap":       p.get("swap"),
@@ -2894,7 +2911,7 @@ def _save_daily_statements(date_str=None):
                 stmt["lots_by_instrument"]  = info.get("lots_by_instrument", {})
                 stmt["swap_by_instrument"]  = info.get("swap_by_instrument", {})
 
-                # ── Closed deal history (all connectors) ────────────────────
+                # ── Full closed deal history (from inception: from_ts=0) ────
                 deal_hist = None
                 acct_obj  = None
                 # Try MT Direct first
@@ -2918,21 +2935,29 @@ def _save_daily_statements(date_str=None):
                         logger.warning("[STMTS] deal_history failed for %s: %s", acct_id, _dh_err)
 
                 if deal_hist:
-                    stmt["day_pnl"]        = deal_hist.get("pnl")
-                    stmt["day_swap"]       = deal_hist.get("swap")
-                    stmt["day_fees"]       = deal_hist.get("fees")
-                    stmt["day_deal_count"] = deal_hist.get("deal_count")
-                    stmt["day_by_symbol"]  = deal_hist.get("by_symbol", {})
-                    stmt["deals"]          = deal_hist.get("deals", [])
+                    stmt["closed_pnl"]        = deal_hist.get("pnl")
+                    stmt["closed_swap"]       = deal_hist.get("swap")
+                    stmt["closed_fees"]       = deal_hist.get("fees")
+                    stmt["closed_deal_count"] = deal_hist.get("deal_count")
+                    stmt["by_symbol"]         = deal_hist.get("by_symbol", {})
+                    stmt["deals"]             = deal_hist.get("deals", [])
+                    # Backward-compat keys
+                    stmt["day_pnl"]           = stmt["closed_pnl"]
+                    stmt["day_swap"]          = stmt["closed_swap"]
+                    stmt["day_fees"]          = stmt["closed_fees"]
+                    stmt["day_deal_count"]    = stmt["closed_deal_count"]
+                    stmt["day_by_symbol"]     = stmt["by_symbol"]
                 else:
+                    stmt["closed_pnl"] = stmt["closed_swap"] = stmt["closed_fees"] = stmt["closed_deal_count"] = None
+                    stmt["by_symbol"] = {}
+                    stmt["deals"] = []
                     stmt["day_pnl"] = stmt["day_swap"] = stmt["day_fees"] = stmt["day_deal_count"] = None
                     stmt["day_by_symbol"] = {}
-                    stmt["deals"] = []
 
-                # ── Write per-account HTML Statement and JSON backup ─────────
+                # ── Write per-account HTML Statement and JSON backup in stmts/ ──
                 safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
-                html_path = os.path.join(day_dir, f"{safe_id}.html")
-                json_path = os.path.join(day_dir, f"{safe_id}.json")
+                html_path = os.path.join(_STMTS_DIR, f"{safe_id}.html")
+                json_path = os.path.join(_STMTS_DIR, f"{safe_id}.json")
 
                 html_content = _render_metatrader_html_statement(stmt)
                 with open(html_path, "w", encoding="utf-8") as _fhtml:
@@ -2942,54 +2967,62 @@ def _save_daily_statements(date_str=None):
                     json.dump(stmt, _fjson, indent=2, default=str)
 
                 summary_rows.append({
-                    "account_id":   acct_id,
-                    "group_label":  stmt["group_label"],
-                    "balance":      stmt["balance"],
-                    "equity":       stmt["equity"],
-                    "open_count":   stmt["open_position_count"],
-                    "day_pnl":      stmt["day_pnl"],
-                    "day_swap":     stmt["day_swap"],
-                    "day_fees":     stmt["day_fees"],
-                    "day_deal_count": stmt["day_deal_count"],
+                    "account_id":        acct_id,
+                    "group_label":       stmt["group_label"],
+                    "balance":           stmt["balance"],
+                    "equity":            stmt["equity"],
+                    "open_count":        stmt["open_position_count"],
+                    "closed_pnl":        stmt["closed_pnl"],
+                    "closed_swap":       stmt["closed_swap"],
+                    "closed_fees":       stmt["closed_fees"],
+                    "closed_deal_count": stmt["closed_deal_count"],
+                    "day_pnl":           stmt["closed_pnl"],
+                    "day_swap":          stmt["closed_swap"],
+                    "day_fees":          stmt["closed_fees"],
+                    "day_deal_count":    stmt["closed_deal_count"],
                 })
 
             except Exception as _acct_err:
                 logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err)
 
-        # ── Write summary.json and index.html ───────────────────────────────
+        # ── Write summary.json and index.html directly in stmts/ ────────────
         summary = {
-            "date":          date_str,
+            "generated_at":  now_str,
             "generated_ts":  generated_ts,
             "account_count": len(summary_rows),
             "accounts":      summary_rows,
         }
-        summary_path = os.path.join(day_dir, "summary.json")
+        summary_path = os.path.join(_STMTS_DIR, "summary.json")
         with open(summary_path, "w", encoding="utf-8") as _f:
             json.dump(summary, _f, indent=2, default=str)
 
-        index_path = os.path.join(day_dir, "index.html")
-        index_html = _render_summary_index_html(date_str, summary_rows)
+        index_path = os.path.join(_STMTS_DIR, "index.html")
+        index_html = _render_summary_index_html(summary_rows, now_str)
         with open(index_path, "w", encoding="utf-8") as _findex:
             _findex.write(index_html)
 
-        logger.info("[STMTS] Saved daily HTML statements for %s: %d accounts → %s",
-                    date_str, len(summary_rows), day_dir)
+        logger.info("[STMTS] Saved full HTML statements for %d accounts → %s",
+                    len(summary_rows), _STMTS_DIR)
 
     except Exception as e:
-        logger.error("[STMTS] Statement save error for %s: %s", date_str, e, exc_info=True)
+        logger.error("[STMTS] Full statement save error: %s", e, exc_info=True)
+
+
+# Backwards-compatibility alias
+_save_daily_statements = _save_full_statements
 
 
 def _daily_statements_loop():
-    """Background thread: save account statements once per day at midnight."""
+    """Background thread: save full account statements once per day at midnight."""
     import time as _time
     # Initial run after a short delay so connections can settle on startup
     _time.sleep(15)
-    _save_daily_statements()
+    _save_full_statements()
     while True:
         now      = datetime.now()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
         _time.sleep((tomorrow - now).total_seconds())
-        _save_daily_statements()
+        _save_full_statements()
 
 
 threading.Thread(target=_daily_statements_loop, daemon=True, name="DailyStatements").start()
@@ -13623,90 +13656,62 @@ def delete_fee(fee_id):
     return jsonify({"error": "Fee not found"}), 404
 
 
-# ─── Daily Statements API ────────────────────────────────────────────────────
+## ─── Full Account Statements API ───────────────────────────────────────────────
 
 @app.route('/statements', methods=['GET'])
 def list_statements():
-    """List available statement directories (one per date) with account counts."""
+    """Serve the master statements index.html, or return JSON listing if ?format=json."""
     try:
-        result = []
+        index_path = os.path.join(_STMTS_DIR, "index.html")
+        if os.path.exists(index_path) and request.args.get("format") != "json":
+            return send_from_directory(_STMTS_DIR, "index.html")
+
+        # JSON listing of available statements in stmts/
+        html_files = []
+        json_files = []
         if os.path.isdir(_STMTS_DIR):
-            for entry in sorted(os.listdir(_STMTS_DIR), reverse=True):
-                day_dir = os.path.join(_STMTS_DIR, entry)
-                if not os.path.isdir(day_dir):
-                    continue
-                summary_path = os.path.join(day_dir, "summary.json")
-                if os.path.exists(summary_path):
-                    try:
-                        with open(summary_path, "r", encoding="utf-8") as _f:
-                            s = json.load(_f)
-                        result.append({
-                            "date":          entry,
-                            "account_count": s.get("account_count", 0),
-                            "generated_ts":  s.get("generated_ts"),
-                        })
-                    except Exception:
-                        result.append({"date": entry, "account_count": None})
-                else:
-                    # Count JSON files (excluding summary.json)
-                    cnt = len([n for n in os.listdir(day_dir)
-                               if n.endswith(".json") and n != "summary.json"])
-                    result.append({"date": entry, "account_count": cnt})
-        return jsonify({"dates": result})
+            for entry in sorted(os.listdir(_STMTS_DIR)):
+                if entry.endswith(".html") and entry != "index.html":
+                    html_files.append(entry)
+                elif entry.endswith(".json") and entry != "summary.json":
+                    json_files.append(entry)
+        return jsonify({
+            "index_url": "/statements",
+            "statements_html": html_files,
+            "statements_json": json_files,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/statements/generate', methods=['POST'])
 def generate_statements():
-    """Trigger on-demand statement generation.
-    Optional body: {"date": "YYYY-MM-DD"}  — defaults to today.
-    """
+    """Trigger on-demand full statement generation."""
     try:
-        data = request.get_json(force=True, silent=True) or {}
-        date_str = (data.get("date") or "").strip()
-        if date_str:
-            # Validate format
-            try:
-                datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
-        else:
-            date_str = None  # _save_daily_statements will use today
-
         def _run():
-            _save_daily_statements(date_str)
+            _save_full_statements()
 
         threading.Thread(target=_run, daemon=True, name="StmtsOnDemand").start()
-        return jsonify({"ok": True, "date": date_str or datetime.now().strftime("%Y-%m-%d")})
+        return jsonify({"ok": True, "status": "generating", "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/statements/<date_str>/<filename>', methods=['GET'])
-def get_statement_file(date_str, filename):
-    """Serve a specific HTML or JSON statement file for date_str."""
+@app.route('/statements/<path:filename>', methods=['GET'])
+def get_statement_file(filename):
+    """Serve any HTML/JSON statement file or legacy date directory under stmts/."""
     try:
-        day_dir = os.path.join(_STMTS_DIR, date_str)
-        if not os.path.isdir(day_dir):
-            return jsonify({"error": "Statement date directory not found"}), 404
-        return send_from_directory(day_dir, filename)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/statements/<date_str>', methods=['GET'])
-def view_statement_date_index(date_str):
-    """Serve index.html for a given statement date."""
-    try:
-        day_dir = os.path.join(_STMTS_DIR, date_str)
-        if not os.path.isdir(day_dir):
-            return jsonify({"error": "Statement date directory not found"}), 404
-        index_path = os.path.join(day_dir, "index.html")
-        if os.path.exists(index_path):
-            return send_from_directory(day_dir, "index.html")
-        files = os.listdir(day_dir)
-        return jsonify({"date": date_str, "files": files})
+        target = os.path.join(_STMTS_DIR, filename)
+        # Direct file in stmts/ or subfolder
+        if os.path.isfile(target):
+            return send_from_directory(os.path.dirname(target), os.path.basename(target))
+        # Directory (e.g. legacy /statements/2026-09-13)
+        if os.path.isdir(target):
+            sub_index = os.path.join(target, "index.html")
+            if os.path.exists(sub_index):
+                return send_from_directory(target, "index.html")
+            return jsonify({"files": os.listdir(target)})
+        return jsonify({"error": f"Statement file '{filename}' not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
