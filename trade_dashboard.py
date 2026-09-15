@@ -14294,6 +14294,106 @@ def pnl_request_status(request_id):
             "pnl_per_lot": round(net_val / hedge_lots, 2) if hedge_lots > 0 else 0.0,
         }
 
+    # ── Resolve per-account currency codes ──────────────────────────────────
+    # Build a snapshot of all known account info dicts so we can call
+    # _detect_denomination for each account in the PnL request.
+    account_currencies = {}
+    try:
+        _snap_fix    = fix_manager.get_status()       if fix_manager            else {}
+        _snap_mt     = mt_direct_manager.get_status() if mt_direct_manager      else {}
+        _snap_ifx    = iforex_manager.get_status()    if ('iforex_manager' in globals() and iforex_manager) else {}
+        _snap_manual = dict(manual_accounts)
+        _snap_ea     = dict(ea_account_info)
+        _snap_manual_cur = dashboard_settings.get("account_currencies", {})
+        for _acc in accounts_list:
+            # Gather the info dict for this account, prioritising richer sources
+            _info = (
+                _snap_mt.get(_acc)     or
+                _snap_fix.get(_acc)    or
+                _snap_ifx.get(_acc)    or
+                _snap_ea.get(_acc)     or
+                _snap_manual.get(_acc) or
+                {}
+            )
+            # Apply manual currency override if present
+            if _acc in _snap_manual_cur:
+                _info = dict(_info)
+                _info["account_currency"] = _snap_manual_cur[_acc]
+            elif _info.get("label") and _info.get("label") in _snap_manual_cur:
+                _info = dict(_info)
+                _info["account_currency"] = _snap_manual_cur[_info["label"]]
+            cur_code, _ = _detect_denomination(_acc, _info)
+            account_currencies[_acc] = cur_code
+    except Exception as _ce:
+        app.logger.warning("[PnL] Failed to resolve account currencies: %s", _ce)
+
+    # ── Resolve live FX cross-rates for normalization ──────────────────────────
+    # Determine which currency pairs are needed (all combos of unique currencies
+    # present among non-skipped accounts).  Try every connected source in turn.
+    fx_rates = {}
+    try:
+        _unique_curs = list(set(account_currencies.values()))
+        if len(_unique_curs) > 1:
+            # Build set of needed symbol strings (e.g. EURUSD, GBPUSD, EURGBP …)
+            _needed = set()
+            for _i, _c1 in enumerate(_unique_curs):
+                for _c2 in _unique_curs[_i+1:]:
+                    _needed.add((_c1, _c2))
+                    _needed.add((_c2, _c1))
+
+            def _try_get_rate(symbol):
+                """Return mid-price for symbol from any connected source, or None."""
+                # 1. FIX / OpenAPI accounts (fastest – in-memory _bid/_ask)
+                if fix_manager:
+                    for _fa in fix_manager.accounts.values():
+                        if not getattr(_fa, "connected", False):
+                            continue
+                        try:
+                            q = _fa.get_quote_direct(symbol)
+                            if q and q.get("bid") and q.get("ask"):
+                                return round((q["bid"] + q["ask"]) / 2.0, 7), True
+                        except Exception:
+                            pass
+                # 2. MT Direct accounts
+                if mt_direct_manager:
+                    for _ma in mt_direct_manager.accounts.values():
+                        if not getattr(_ma, "connected", False):
+                            continue
+                        try:
+                            q = _ma.get_quote_direct(symbol)
+                            if q and q.get("bid") and q.get("ask"):
+                                return round((q["bid"] + q["ask"]) / 2.0, 7), True
+                        except Exception:
+                            pass
+                # 3. iForex
+                try:
+                    if "iforex_manager" in globals() and iforex_manager:
+                        for _ia in iforex_manager.accounts.values():
+                            if not getattr(_ia, "connected", False):
+                                continue
+                            q = getattr(_ia, "get_quote", lambda s, **kw: None)(symbol, allow_live=True)
+                            if q and len(q) >= 2 and q[0] > 0 and q[1] > 0:
+                                return round((q[0] + q[1]) / 2.0, 7), True
+                except Exception:
+                    pass
+                return None, False
+
+            for (_ca, _cb) in _needed:
+                sym = f"{_ca}{_cb}"
+                mid, live = _try_get_rate(sym)
+                if mid is None:
+                    # Try inverse
+                    sym_inv = f"{_cb}{_ca}"
+                    mid_inv, live = _try_get_rate(sym_inv)
+                    if mid_inv and mid_inv > 0:
+                        mid  = round(1.0 / mid_inv, 7)
+                    else:
+                        mid  = None
+                if mid is not None:
+                    fx_rates[sym] = {"mid": mid, "live": live}
+    except Exception as _fxe:
+        app.logger.warning("[PnL] Failed to resolve FX rates: %s", _fxe)
+
     return jsonify({
         "id": request_id,
         "name": req.get("name"),
@@ -14309,6 +14409,8 @@ def pnl_request_status(request_id):
         "fee_keywords": req.get("fee_keywords", []),
         "created_ts": req.get("created_ts"),
         "current_states": req.get("current_states", {}),
+        "account_currencies": account_currencies,
+        "fx_rates": fx_rates,
     })
 
 
@@ -24389,13 +24491,38 @@ function exportPnlHtmlReport() {
   const fromDate = data.from_date || '';
   const toDate = data.to_date || '';
   const accounts = data.accounts || [];
-  const results = data.results || {};
-  const totals = data.totals || {};
+  const results  = data.results  || {};
+  const totals   = data.totals   || {};
+  const acctCurs = data.account_currencies || {};
+  const liveRates = data.fx_rates || {};
   const fmt = v => (v || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const clrStyle = v => v > 0 ? 'color:#00e676;' : v < 0 ? 'color:#ff5252;' : '';
   const isSkipped = a => results[a] && (results[a].source === 'skipped_offline' || results[a].source === 'server_error');
 
-  // Header
+  // Currency helpers
+  const SYM_MAP_EXP = {
+    USD:'$', EUR:'\u20ac', GBP:'\u00a3', JPY:'\u00a5', CHF:'Fr\u00a0',
+    CAD:'CA$', AUD:'A$', NZD:'NZ$', SEK:'kr\u00a0', NOK:'kr\u00a0',
+    DKK:'kr\u00a0', SGD:'S$', HKD:'HK$', MXN:'MX$', ZAR:'R\u00a0',
+    TRY:'\u20ba', PLN:'z\u0142\u00a0', HUF:'Ft\u00a0', CZK:'K\u010d\u00a0', RUB:'\u20bd',
+    CNH:'\u00a5', CNY:'\u00a5',
+  };
+  const eSym  = cur => SYM_MAP_EXP[cur] || (cur ? cur + '\u00a0' : '');
+  const aCur  = a   => ((acctCurs[a] || 'USD')).toUpperCase();
+  const aSym  = a   => eSym(aCur(a));
+  const activeCursExp = [...new Set(accounts.filter(a => !isSkipped(a)).map(aCur))];
+  const isMixedExp    = activeCursExp.length > 1;
+
+  function getExpRate(from, to) {
+    if (from === to) return 1.0;
+    const d  = liveRates[from + to];
+    if (d) return d.mid;
+    const i2 = liveRates[to + from];
+    if (i2 && i2.mid > 0) return 1.0 / i2.mid;
+    return 1.0;
+  }
+
+  // Header — currency code under each account name
   let tableHeader = '<tr><th>Metric</th>';
   accounts.forEach(a => {
     if (isSkipped(a)) {
@@ -24403,7 +24530,8 @@ function exportPnlHtmlReport() {
       const color = results[a].source === 'server_error' ? '#ff5252' : '#ffa726';
       tableHeader += `<th>${a}<br><span style="font-size:0.65rem;color:${color};font-weight:700;">${label}</span></th>`;
     } else {
-      tableHeader += `<th>${a}</th>`;
+      const cur = aCur(a);
+      tableHeader += `<th>${a}<br><span style="font-size:0.68rem;color:#8b8fa3;font-weight:400;">${eSym(cur)}\u00a0${cur}</span></th>`;
     }
   });
   tableHeader += '<th style="font-weight:700;">Total</th></tr>';
@@ -24426,20 +24554,20 @@ function exportPnlHtmlReport() {
     tableBody += `<tr><td style="font-weight:600;">${m.label}</td>`;
     accounts.forEach(a => {
       if (isSkipped(a)) {
-        tableBody += '<td style="color:#8b8fa3;text-align:center;">—</td>';
+        tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td>';
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          const u_pnl = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-          const u_swap = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
-          v = u_pnl - u_swap; // Deduct swap from unrealized PnL so it is not double counted
+          const up = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
+          const us = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
+          v = up - us;
         } else if (m.key === 'unrealized_swap') {
           v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
           v = results[a] ? results[a][m.key] || 0 : 0;
         }
         totalVal += v;
-        tableBody += `<td style="${clrStyle(v)}">${fmt(v)}</td>`;
+        tableBody += `<td style="${clrStyle(v)}">${aSym(a)}${fmt(v)}</td>`;
       }
     });
     let tv = 0;
@@ -24449,35 +24577,75 @@ function exportPnlHtmlReport() {
       const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
       tv = totals[tKey] || totalVal;
     }
-    tableBody += `<td style="font-weight:700;${clrStyle(tv)}">${fmt(tv)}</td></tr>`;
+    if (isMixedExp) {
+      tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td></tr>';
+    } else {
+      tableBody += `<td style="font-weight:700;${clrStyle(tv)}">${eSym(activeCursExp[0]||'USD')}${fmt(tv)}</td></tr>`;
+    }
   });
 
   // Net PnL row
+  const acctNetExp = {};
+  accounts.forEach(a => {
+    if (isSkipped(a)) return;
+    let v = results[a] ? results[a].net || 0 : 0;
+    if (includeUnrealized)
+      v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+    acctNetExp[a] = v;
+  });
+
   tableBody += '<tr style="border-top:2px solid #6c5ce7;font-weight:700;background:#1e212f;"><td>Net PnL</td>';
-  let netTotal = 0;
   accounts.forEach(a => {
     if (isSkipped(a)) {
-      tableBody += '<td style="color:#8b8fa3;text-align:center;">—</td>';
+      tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td>';
     } else {
-      let v = results[a] ? results[a].net || 0 : 0;
-      if (includeUnrealized) {
-        v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-      }
-      netTotal += v;
-      tableBody += `<td style="${clrStyle(v)}font-size:1.05rem;">${fmt(v)}</td>`;
+      const v = acctNetExp[a] || 0;
+      tableBody += `<td style="${clrStyle(v)}font-size:1.05rem;">${aSym(a)}${fmt(v)}</td>`;
     }
   });
-  let nt = totals.net_pnl || netTotal;
-  if (includeUnrealized) {
-    let totUnrealized = 0;
+
+  if (isMixedExp) {
+    tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td></tr>';
+    // Separator row
+    tableBody += `<tr style="background:#16192a;"><td colspan="${accounts.length+1}" style="font-size:0.75rem;color:#8b8fa3;padding:6px 12px;border-top:1px dashed #6c5ce7;">\u{1F4B1}\u00a0Normalized totals (converted using live mid-market rates)</td></tr>`;
+    // One normalized row per currency
+    const nativeSumsExp = {};
     accounts.forEach(a => {
-      if (!isSkipped(a)) {
-        totUnrealized += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-      }
+      if (isSkipped(a)) return;
+      const c = aCur(a);
+      nativeSumsExp[c] = (nativeSumsExp[c] || 0) + (acctNetExp[a] || 0);
     });
-    nt += totUnrealized;
+    Object.keys(nativeSumsExp).sort().forEach(targetCur => {
+      const tsym = eSym(targetCur);
+      tableBody += `<tr style="font-weight:700;background:#1c1f30;">`;
+      tableBody += `<td style="font-size:0.82rem;color:#8b8fa3;">Net PnL <span style="color:#a29bfe;">(\u2248 ${tsym}${targetCur})</span></td>`;
+      accounts.forEach(a => {
+        if (isSkipped(a)) {
+          tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td>';
+        } else {
+          const from = aCur(a);
+          const raw  = acctNetExp[a] || 0;
+          const conv = raw * getExpRate(from, targetCur);
+          const approx = from !== targetCur ? '\u2248\u00a0' : '';
+          tableBody += `<td style="${clrStyle(conv)}font-size:1.0rem;">${approx}${tsym}${fmt(conv)}</td>`;
+        }
+      });
+      // Total
+      let sum = 0;
+      accounts.forEach(a => {
+        if (!isSkipped(a)) sum += (acctNetExp[a]||0) * getExpRate(aCur(a), targetCur);
+      });
+      tableBody += `<td style="font-weight:700;${clrStyle(sum)}font-size:1.05rem;">\u2248\u00a0${tsym}${fmt(sum)}</td></tr>`;
+    });
+  } else {
+    let nt = totals.net_pnl || 0;
+    if (includeUnrealized)
+      accounts.forEach(a => {
+        if (!isSkipped(a))
+          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+      });
+    tableBody += `<td style="font-weight:700;${clrStyle(nt)}font-size:1.05rem;">${eSym(activeCursExp[0]||'USD')}${fmt(nt)}</td></tr>`;
   }
-  tableBody += `<td style="font-weight:700;${clrStyle(nt)}font-size:1.05rem;">${fmt(nt)}</td></tr>`;
 
   // Symbol Breakdown table
   const bySym = data.totals_by_symbol || {};
@@ -24717,108 +24885,305 @@ async function pollPnlStatus() {
 
 function renderPnlResults(data) {
   _pnlLastData = data;  // cache for pair breakdown popup
-  
-  const fromDate = data.from_date || '';
-  const toDate = data.to_date || '';
-  const name = data.name || _pnlCurrentName || '';
-  document.getElementById('pnlModalTitle').innerHTML = '📊 PnL Report — ' + name + 
-    (fromDate && toDate ? ' <span style="font-size:0.85rem;color:var(--text2);margin-left:12px;font-weight:400;">(Period: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong>)</span>' : '');
 
-  const results = data.results || {};
-  const totals = data.totals || {};
-  const accounts = data.accounts || [];
-  const fmt = v => (v || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const fromDate = data.from_date || '';
+  const toDate   = data.to_date   || '';
+  const name     = data.name || _pnlCurrentName || '';
+  document.getElementById('pnlModalTitle').innerHTML =
+    '\u{1F4CA} PnL Report \u2014 ' + name +
+    (fromDate && toDate
+      ? ' <span style="font-size:0.85rem;color:var(--text2);margin-left:12px;font-weight:400;">' +
+        '(Period: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong>)</span>'
+      : '');
+
+  const results       = data.results       || {};
+  const totals        = data.totals        || {};
+  const accounts      = data.accounts      || [];
+  const acctCurs      = data.account_currencies || {};
+  const liveRates     = data.fx_rates      || {};   // {EURUSD:{mid:1.082,live:true}, ...}
+  const fmt = v => (v || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
   const clr = v => v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--text)';
-  // Detect offline accounts
-  const isSkipped = a => results[a] && (results[a].source === 'skipped_offline' || results[a].source === 'server_error');
-  // Header
-  let hdr = '<th>Metric</th>';
+  const isSkipped = a => results[a] &&
+      (results[a].source === 'skipped_offline' || results[a].source === 'server_error');
+
+  // ── Currency helpers ───────────────────────────────────────────────────────
+  const SYM_MAP = {
+    USD:'$', EUR:'\u20ac', GBP:'\u00a3', JPY:'\u00a5', CHF:'Fr\u00a0',
+    CAD:'CA$', AUD:'A$', NZD:'NZ$', SEK:'kr\u00a0', NOK:'kr\u00a0',
+    DKK:'kr\u00a0', SGD:'S$', HKD:'HK$', MXN:'MX$', ZAR:'R\u00a0',
+    TRY:'\u20ba', PLN:'z\u0142\u00a0', HUF:'Ft\u00a0', CZK:'K\u010d\u00a0', RUB:'\u20bd',
+    CNH:'\u00a5', CNY:'\u00a5',
+  };
+  const curSym = cur => SYM_MAP[cur] || (cur ? cur + '\u00a0' : '');
+  const acctCur = a  => ((acctCurs[a] || 'USD')).toUpperCase();
+  const acctSym = a  => curSym(acctCur(a));
+
+  // Unique currencies among active (non-skipped) accounts
+  const activeCurs = [...new Set(accounts.filter(a => !isSkipped(a)).map(acctCur))];
+  const isMixed    = activeCurs.length > 1;
+
+  // ── Build FX rate table from live data (mid prices) ─────────────────────
+  // getRate(from, to) returns conversion factor and liveness flag
+  function getRate(from, to) {
+    if (from === to) return {rate: 1.0, live: true};
+    const direct  = liveRates[from + to];
+    if (direct)  return {rate: direct.mid, live: direct.live};
+    const inverse = liveRates[to + from];
+    if (inverse && inverse.mid > 0) return {rate: 1.0 / inverse.mid, live: inverse.live};
+    // Fallback: route via USD
+    const aToUsd  = from === 'USD' ? {mid:1.0,live:false} : liveRates[from + 'USD'] || (liveRates['USD' + from] ? {mid:1.0/liveRates['USD'+from].mid, live:liveRates['USD'+from].live} : null);
+    const bToUsd  = to   === 'USD' ? {mid:1.0,live:false} : liveRates[to   + 'USD'] || (liveRates['USD' + to]   ? {mid:1.0/liveRates['USD'+to  ].mid, live:liveRates['USD'+to  ].live} : null);
+    if (aToUsd && bToUsd && bToUsd.mid > 0)
+      return {rate: aToUsd.mid / bToUsd.mid, live: aToUsd.live && bToUsd.live};
+    // No rate found – use stored/manual override
+    const manEl = document.getElementById('pnlFxRate_' + from + to);
+    const man   = manEl ? parseFloat(manEl.value) : 0;
+    return {rate: man > 0 ? man : 1.0, live: false};
+  }
+
+  // ── Column header ─────────────────────────────────────────────────────────
+  let hdr = '<th>METRIC</th>';
   accounts.forEach(a => {
+    const cur = acctCur(a);
     if (isSkipped(a)) {
-      const label = results[a].source === 'server_error' ? 'ERROR' : 'OFFLINE';
+      const lbl   = results[a].source === 'server_error' ? 'ERROR' : 'OFFLINE';
       const color = results[a].source === 'server_error' ? 'var(--red)' : 'var(--orange)';
-      hdr += '<th style="color:var(--text2);">' + a + '<br><span style="font-size:0.65rem;color:' + color + ';font-weight:700;">' + label + '</span></th>';
+      hdr += '<th style="color:var(--text2);">' + a +
+             '<br><span style="font-size:0.65rem;color:' + color + ';font-weight:700;">' + lbl + '</span></th>';
     } else {
-      hdr += '<th>' + a + '</th>';
+      hdr += '<th>' + a +
+             '<br><span style="font-size:0.72rem;color:var(--text2);font-weight:400;">' +
+             curSym(cur) + '\u00a0' + cur + '</span></th>';
     }
   });
-  hdr += '<th style="font-weight:700;">Total</th>';
+  hdr += '<th style="font-weight:700;">TOTAL</th>';
   document.getElementById('pnlResultsHeader').innerHTML = hdr;
+
   const includeUnrealized = document.getElementById('pnlIncludeUnrealized').checked;
 
-  // Rows
+  // ── Metric rows ───────────────────────────────────────────────────────────
   const metrics = [
-    {key: 'pnl', label: 'Realized PnL'},
-    {key: 'swap', label: 'Realized Swap'},
-    {key: 'fees', label: 'Fees'},
+    {key:'pnl',  label:'Realized PnL'},
+    {key:'swap', label:'Realized Swap'},
+    {key:'fees', label:'Fees'},
   ];
   if (includeUnrealized) {
-    metrics.push({key: 'unrealized', label: 'Unrealized PnL'});
-    metrics.push({key: 'unrealized_swap', label: 'Unrealized Swap'});
+    metrics.push({key:'unrealized',      label:'Unrealized PnL'});
+    metrics.push({key:'unrealized_swap', label:'Unrealized Swap'});
   }
+
   let tbody = '';
   metrics.forEach(m => {
     let totalVal = 0;
     tbody += '<tr><td style="font-weight:600;">' + m.label + '</td>';
     accounts.forEach(a => {
       if (isSkipped(a)) {
-        tbody += '<td style="color:var(--text2);text-align:center;" title="Account was offline">—</td>';
+        tbody += '<td style="color:var(--text2);text-align:center;" title="Account offline">\u2014</td>';
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          const u_pnl = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-          const u_swap = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
-          v = u_pnl - u_swap; // Deduct swap from unrealized PnL
+          const up = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
+          const us = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
+          v = up - us;
         } else if (m.key === 'unrealized_swap') {
           v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
           v = results[a] ? results[a][m.key] || 0 : 0;
         }
         totalVal += v;
-        tbody += '<td style="color:' + clr(v) + ';">' + fmt(v) + '</td>';
+        tbody += '<td style="color:' + clr(v) + ';">' + acctSym(a) + fmt(v) + '</td>';
       }
     });
-    let tv = 0;
-    if (m.key === 'unrealized' || m.key === 'unrealized_swap') {
-      tv = totalVal;
+    // Total column: only meaningful when same currency
+    if (isMixed) {
+      tbody += '<td style="color:var(--text2);text-align:center;"' +
+               ' title="Mixed currencies \u2014 see normalized rows below">\u2014</td></tr>';
     } else {
       const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
-      tv = totals[tKey] || totalVal;
+      let tv = (m.key === 'unrealized' || m.key === 'unrealized_swap')
+               ? totalVal : (totals[tKey] || totalVal);
+      tbody += '<td style="font-weight:700;color:' + clr(tv) + ';">' +
+               curSym(activeCurs[0] || 'USD') + fmt(tv) + '</td></tr>';
     }
-    tbody += '<td style="font-weight:700;color:' + clr(tv) + ';">' + fmt(tv) + '</td></tr>';
   });
-  // Net PnL row — total cell always clickable to open pair breakdown popup
+
+  // ── Net PnL — collect per-account values ─────────────────────────────────
+  const acctNet = {};
+  accounts.forEach(a => {
+    if (isSkipped(a)) return;
+    let v = results[a] ? results[a].net || 0 : 0;
+    if (includeUnrealized)
+      v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+    acctNet[a] = v;
+  });
+
   tbody += '<tr style="border-top:2px solid var(--accent);font-weight:700;"><td>Net PnL</td>';
-  let netTotal = 0;
   accounts.forEach(a => {
     if (isSkipped(a)) {
-      tbody += '<td style="color:var(--text2);text-align:center;" title="Account was offline">—</td>';
+      tbody += '<td style="color:var(--text2);text-align:center;">\u2014</td>';
     } else {
-      let v = results[a] ? results[a].net || 0 : 0;
-      if (includeUnrealized) {
-        v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-      }
-      netTotal += v;
-      tbody += '<td style="color:' + clr(v) + ';font-size:1.05rem;">' + fmt(v) + '</td>';
+      const v = acctNet[a] || 0;
+      tbody += '<td style="color:' + clr(v) + ';font-size:1.05rem;">' + acctSym(a) + fmt(v) + '</td>';
     }
   });
-  let nt = totals.net_pnl || netTotal;
-  if (includeUnrealized) {
-    let totUnrealized = 0;
+
+  if (isMixed) {
+    // ── Mixed-currency mode ───────────────────────────────────────────────
+    tbody += '<td style="color:var(--text2);text-align:center;" title="See normalized rows below">\u2014</td></tr>';
+
+    // Native sums per currency
+    const nativeSums = {};
     accounts.forEach(a => {
-      if (!isSkipped(a)) {
-        totUnrealized += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
-      }
+      if (isSkipped(a)) return;
+      const c = acctCur(a);
+      nativeSums[c] = (nativeSums[c] || 0) + (acctNet[a] || 0);
     });
-    nt += totUnrealized;
+
+    // ── Live rate banner ─────────────────────────────────────────────────
+    let rateBannerCells = '';
+    const neededPairs = [];
+    const sortedCurs = Object.keys(nativeSums).sort();
+    for (let i = 0; i < sortedCurs.length; i++)
+      for (let j = i + 1; j < sortedCurs.length; j++) {
+        const c1 = sortedCurs[i], c2 = sortedCurs[j];
+        neededPairs.push([c1, c2]);
+      }
+
+    let rateHtml = '<span style="font-size:0.75rem;color:var(--text2);">\u{1F4B1}\u00a0FX rates used for normalization:</span> ';
+    neededPairs.forEach(([c1, c2]) => {
+      const r = getRate(c1, c2);
+      const dot = r.live
+        ? '<span title="Live price" style="color:var(--green);">\u25cf</span>'
+        : '<span title="No live price \u2014 enter manually" style="color:var(--orange);">\u25cf</span>';
+      const pairId = 'pnlFxRate_' + c1 + c2;
+      rateHtml +=
+        dot + '\u00a0' + c1 + '/' + c2 + ':\u00a0' +
+        '<input id="' + pairId + '" type="number" step="0.0001" min="0.001" max="9999"' +
+        ' value="' + (r.live ? r.rate.toFixed(5) : (parseFloat(localStorage.getItem('tradeDash_pnlFxRate_'+c1+c2)||0) > 0 ? parseFloat(localStorage.getItem('tradeDash_pnlFxRate_'+c1+c2)).toFixed(5) : '')) + '"' +
+        ' placeholder="e.g. 1.0850"' +
+        ' style="width:88px;background:var(--surface);color:var(--text);border:1px solid var(--border);' +
+        'border-radius:4px;padding:2px 5px;font-size:0.78rem;"' +
+        ' oninput="localStorage.setItem(\'tradeDash_pnlFxRate_\'+\''+c1+c2+'\'\',this.value);_recalcPnlNormRows()" title="Mid-market rate ' + c1 + '\u2192' + c2 + '">' +
+        '\u00a0\u00a0 ';
+    });
+
+    tbody +=
+      '<tr style="background:rgba(108,92,231,0.06);">' +
+      '<td colspan="' + (accounts.length + 1) + '" style="padding:7px 12px;border-top:1px dashed var(--accent);">' +
+      rateHtml + '</td></tr>';
+
+    // ── One normalized row per target currency ────────────────────────────
+    sortedCurs.forEach(targetCur => {
+      const tsym = curSym(targetCur);
+      tbody +=
+        '<tr class="pnl-norm-row" data-target="' + targetCur + '"' +
+        ' style="font-weight:700;background:rgba(108,92,231,0.09);">' +
+        '<td style="font-size:0.82rem;font-weight:600;color:var(--text2);">' +
+        'Net PnL\u00a0<span style="color:var(--accent);">(\u2248 ' + tsym + targetCur + ')</span></td>';
+
+      accounts.forEach(a => {
+        if (isSkipped(a)) {
+          tbody += '<td style="color:var(--text2);text-align:center;">\u2014</td>';
+        } else {
+          const fromCur = acctCur(a);
+          const rawV    = acctNet[a] || 0;
+          tbody +=
+            '<td class="pnl-norm-cell"' +
+            ' data-raw="' + rawV + '" data-from="' + fromCur + '" data-to="' + targetCur + '"' +
+            ' style="font-size:1.0rem;">' +
+            '<span class="pnl-norm-val" style="color:' + clr(rawV) + ';">' +
+            (rawV < 0 ? '-' : '') + tsym + (Math.abs(rawV)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) + '</span></td>';
+        }
+      });
+
+      tbody +=
+        '<td class="pnl-norm-total" data-target="' + targetCur + '"' +
+        ' style="font-size:1.1rem;cursor:pointer;border-bottom:2px dotted var(--accent);"' +
+        ' onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair">' +
+        '<span style="color:var(--text2);">' + tsym + '\u2026</span></td></tr>';
+    });
+
+  } else {
+    // ── Same currency: single total ───────────────────────────────────────
+    let nt = totals.net_pnl || 0;
+    if (includeUnrealized)
+      accounts.forEach(a => {
+        if (!isSkipped(a))
+          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+      });
+    const mainSym = curSym(activeCurs[0] || 'USD');
+    tbody +=
+      '<td style="color:' + clr(nt) + ';font-size:1.1rem;cursor:pointer;border-bottom:2px dotted currentColor;"' +
+      ' onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair">' +
+      mainSym + fmt(nt) + ' \uD83D\uDCC8</td></tr>';
   }
-  tbody += '<td style="color:' + clr(nt) + ';font-size:1.1rem;cursor:pointer;border-bottom:2px dotted currentColor;" '
-         + 'onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair">'
-         + fmt(nt) + ' 📊</td></tr>';
+
   document.getElementById('pnlResultsBody').innerHTML = tbody;
   document.getElementById('pnlResults').style.display = '';
+
+  if (isMixed) _recalcPnlNormRows();
 }
 
+// ── PnL normalization recalculator ────────────────────────────────────────────
+// Called whenever an FX rate input is changed.
+function _recalcPnlNormRows() {
+  const SYM_MAP = {
+    USD:'$', EUR:'\u20ac', GBP:'\u00a3', JPY:'\u00a5', CHF:'Fr\u00a0',
+    CAD:'CA$', AUD:'A$', NZD:'NZ$', SEK:'kr\u00a0', NOK:'kr\u00a0',
+    DKK:'kr\u00a0', SGD:'S$', HKD:'HK$', MXN:'MX$', ZAR:'R\u00a0',
+    TRY:'\u20ba', PLN:'z\u0142\u00a0', HUF:'Ft\u00a0', CZK:'K\u010d\u00a0', RUB:'\u20bd',
+    CNH:'\u00a5', CNY:'\u00a5',
+  };
+
+  function readRate(from, to) {
+    if (from === to) return 1.0;
+    const el = document.getElementById('pnlFxRate_' + from + to);
+    if (el && parseFloat(el.value) > 0) return parseFloat(el.value);
+    const el2 = document.getElementById('pnlFxRate_' + to + from);
+    if (el2 && parseFloat(el2.value) > 0) return 1.0 / parseFloat(el2.value);
+    return 1.0;
+  }
+
+  const clrV = v => v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--text)';
+  // fmtAbs: formats absolute value with 2dp. Sign and symbol are prepended separately.
+  const fmtAbs = v => (Math.abs(v)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  // fmtCur(value, sym): '-$1,234.56' style (sign before symbol)
+  const fmtCur = (v, sym) => (v < 0 ? '-' : '') + sym + fmtAbs(v);
+
+  // Update per-account cells
+  document.querySelectorAll('.pnl-norm-cell').forEach(td => {
+    const raw  = parseFloat(td.dataset.raw)  || 0;
+    const from = td.dataset.from;
+    const to   = td.dataset.to;
+    const rate = readRate(from, to);
+    if (rate <= 0) return;  // no valid rate entered yet — leave cell as-is
+    const conv = raw * rate;
+    const sym  = SYM_MAP[to] || (to + '\u00a0');
+    const approx = from !== to ? '\u2248\u00a0' : '';
+    const span = td.querySelector('.pnl-norm-val');
+    if (span) { span.style.color = clrV(conv); span.textContent = approx + fmtCur(conv, sym); }
+  });
+
+  // Update total cells
+  document.querySelectorAll('.pnl-norm-total').forEach(td => {
+    const tgt = td.dataset.target;
+    let sum = 0;
+    let allRatesKnown = true;
+    document.querySelectorAll('.pnl-norm-cell[data-to="' + tgt + '"]').forEach(c => {
+      const r = readRate(c.dataset.from, tgt);
+      if (r <= 0) { allRatesKnown = false; return; }
+      sum += (parseFloat(c.dataset.raw) || 0) * r;
+    });
+    const sym = SYM_MAP[tgt] || (tgt + '\u00a0');
+    if (!allRatesKnown) {
+      td.innerHTML = '<span style="color:var(--orange);font-size:0.85rem;">enter rate above</span>';
+    } else {
+      td.innerHTML = '<span style="color:' + clrV(sum) + ';font-size:1.1rem;">\u2248\u00a0' +
+                     fmtCur(sum, sym) + '</span> \uD83D\uDCC8';
+      td.style.color = clrV(sum);
+    }
+  });
+}
 // ─── PnL Pair Breakdown Popup ─────────────────────────────────────────────
 function openPairBreakdown() {
   const data = _pnlLastData;
