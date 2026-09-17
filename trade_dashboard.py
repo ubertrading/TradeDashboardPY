@@ -8058,6 +8058,8 @@ def _should_issue_command(session, account):
                                 bid = q_bid
                                 ask = q_ask
                                 stored_spread = sq.get("spread")
+                                # Sync to GUI cache — ensures display shows what engine evaluated
+                                _direct_quote_cache[(acc, instrument)] = {"bid": bid, "ask": ask, "ts": time.time()}
                     except Exception:
                         pass
                         
@@ -11351,18 +11353,42 @@ def api_status():
                 elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
                     direct_acct = iforex_manager.accounts.get(acc)
                 got_direct = False
-                cached = _direct_quote_cache.get((acc, side_pair))
-                if cached and (time.time() - cached.get("ts", 0)) < 5.0:
-                    q_bid, q_ask = cached["bid"], cached["ask"]
-                    sc[f"curr_bid_{sn}"] = q_bid
-                    sc[f"curr_ask_{sn}"] = q_ask
-                    mult = 1000 if "JPY" in side_pair.upper() else 100000
-                    sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
-                    got_direct = True
+                # Always fetch a live quote for spread display — do NOT rely on the shared
+                # _direct_quote_cache here, because the engine keeps refreshing it faster than
+                # any TTL, causing the GUI to always recycle a stale snapshot.
+                # Bridge (mt_bridge_client) has its own 1s HTTP cache so MT5 isn't hammered.
+                # CLR (mt_direct_connector) GetQuote() is a fast native call.
                 if not got_direct and direct_acct and side_pair:
-                    if hasattr(direct_acct, 'get_quote') and not hasattr(direct_acct, 'get_symbol_info'):
+                    mult = 1000 if "JPY" in side_pair.upper() else 100000
+                    # Priority 1: get_quote_direct — same live source the engine uses; always reflects
+                    # what the spread gate will actually evaluate, never a polled/periodic cache.
+                    if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
                         try:
-                            # Non-blocking quote lookup for status polling
+                            dq = direct_acct.get_quote_direct(side_pair)
+                            if dq and dq.get("bid") and dq.get("ask"):
+                                q_bid, q_ask = dq["bid"], dq["ask"]
+                                sc[f"curr_bid_{sn}"] = q_bid
+                                sc[f"curr_ask_{sn}"] = q_ask
+                                sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
+                                got_direct = True
+                        except Exception:
+                            pass
+                    # Priority 2: get_symbol_info — polled symbol cache or bridge HTTP (may be stale)
+                    if not got_direct and hasattr(direct_acct, 'get_symbol_info'):
+                        try:
+                            sym_quote = direct_acct.get_symbol_info(side_pair)
+                            if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
+                                q_bid, q_ask = sym_quote["bid"], sym_quote["ask"]
+                                sc[f"curr_bid_{sn}"] = q_bid
+                                sc[f"curr_ask_{sn}"] = q_ask
+                                # Always compute from bid/ask to stay in consistent pip units
+                                sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
+                                got_direct = True
+                        except Exception:
+                            pass
+                    # Priority 3: get_quote for connectors that have neither of the above
+                    if not got_direct and hasattr(direct_acct, 'get_quote'):
+                        try:
                             if hasattr(direct_acct, 'fetch_quote_live'):
                                 q = direct_acct.get_quote(side_pair, allow_live=False)
                             else:
@@ -11371,28 +11397,7 @@ def api_status():
                                 q_bid, q_ask = q[0], q[1]
                                 sc[f"curr_bid_{sn}"] = q_bid
                                 sc[f"curr_ask_{sn}"] = q_ask
-                                mult = 1000 if "JPY" in side_pair.upper() else 100000
                                 sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
-                                got_direct = True
-                        except Exception:
-                            pass
-                    if not got_direct:
-                        try:
-                            sym_quote = direct_acct.get_symbol_info(side_pair)
-                            if sym_quote and sym_quote.get("bid") and sym_quote.get("ask"):
-                                sc[f"curr_spread_{sn}"] = sym_quote.get("spread")
-                                sc[f"curr_bid_{sn}"] = sym_quote.get("bid")
-                                sc[f"curr_ask_{sn}"] = sym_quote.get("ask")
-                                got_direct = True
-                        except Exception:
-                            pass
-                    if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
-                        try:
-                            dq = direct_acct.get_quote_direct(side_pair)
-                            if dq and dq.get("bid") and dq.get("ask"):
-                                sc[f"curr_spread_{sn}"] = dq.get("spread")
-                                sc[f"curr_bid_{sn}"] = dq.get("bid")
-                                sc[f"curr_ask_{sn}"] = dq.get("ask")
                                 got_direct = True
                         except Exception:
                             pass
@@ -11421,25 +11426,21 @@ def api_status():
                 sc[f"ea_symbol_{sn}"] = side_pair
             else:
                 got_quote = False
-                cached_fix = _direct_quote_cache.get((acc, side_pair))
-                if cached_fix and (time.time() - cached_fix.get("ts", 0)) < 5.0:
-                    sc[f"curr_bid_{sn}"] = cached_fix["bid"]
-                    sc[f"curr_ask_{sn}"] = cached_fix["ask"]
-                    mult = 1000 if "JPY" in side_pair.upper() else 100000
-                    sc[f"curr_spread_{sn}"] = round((cached_fix["ask"] - cached_fix["bid"]) * mult, 1)
-                    got_quote = True
+                # Same as direct path: always fetch live, don't recycle a cached snapshot.
                 if not got_quote:
                     fix_acct = fix_manager.accounts.get(acc) if fix_manager else None
                     if fix_acct and hasattr(fix_acct, 'get_symbol_info') and side_pair:
                         try:
                             sq = fix_acct.get_symbol_info(side_pair)
                             if sq and sq.get("bid") and sq.get("ask"):
-                                sc[f"curr_spread_{sn}"] = sq.get("spread")
-                                sc[f"curr_bid_{sn}"] = sq.get("bid")
-                                sc[f"curr_ask_{sn}"] = sq.get("ask")
+                                q_bid, q_ask = sq["bid"], sq["ask"]
+                                mult = 1000 if "JPY" in side_pair.upper() else 100000
+                                sc[f"curr_bid_{sn}"] = q_bid
+                                sc[f"curr_ask_{sn}"] = q_ask
+                                sc[f"curr_spread_{sn}"] = round((q_ask - q_bid) * mult, 1)
                                 _direct_quote_cache[(acc, side_pair)] = {
-                                    "bid": sq.get("bid"),
-                                    "ask": sq.get("ask"),
+                                    "bid": q_bid,
+                                    "ask": q_ask,
                                     "ts": time.time()
                                 }
                                 got_quote = True
@@ -11493,6 +11494,7 @@ def api_status():
                 cfg = acct.config or {}
 
                 oldest_epoch = None
+                sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
                 acct_info = _snap_ea_account_info.get(acct_id, {})
                 positions = acct_info.get("position_details") or acct_info.get("positions", [])
                 open_tickets = set(acct_info.get("open_tickets", []))
@@ -11501,14 +11503,24 @@ def api_status():
                         if not isinstance(pos, dict):
                             continue
                         oe = pos.get("open_epoch")
-                        if oe and (oldest_epoch is None or oe < oldest_epoch):
-                            oldest_epoch = oe
+                        sym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
+                        if oe:
+                            if oldest_epoch is None or oe < oldest_epoch:
+                                oldest_epoch = oe
+                            if sym:
+                                if sym not in sym_epochs:
+                                    sym_epochs[sym] = {"oldest_epoch": oe, "count": 1}
+                                else:
+                                    sym_epochs[sym]["count"] += 1
+                                    if oe < sym_epochs[sym]["oldest_epoch"]:
+                                        sym_epochs[sym]["oldest_epoch"] = oe
                 if oldest_epoch is None and open_tickets:
                     for sid, sess in list(_snap_sessions.items()):
                         if sess.get("status") not in ("active", "paused", "partial_close"):
                             continue
                         if acct_id not in sess.get("sides", {}):
                             continue
+                        sess_sym = (sess.get("sides", {}).get(acct_id, {}).get("pair") or sess.get("pair", "")).strip().upper()
                         for f in sess.get("fills", []):
                             if f.get("account") != acct_id:
                                 continue
@@ -11516,12 +11528,31 @@ def api_status():
                             if ft and ft not in open_tickets:
                                 continue
                             fe = f.get("ts_epoch") or f.get("open_epoch")
-                            if fe and (oldest_epoch is None or fe < oldest_epoch):
-                                oldest_epoch = fe
+                            if fe:
+                                if oldest_epoch is None or fe < oldest_epoch:
+                                    oldest_epoch = fe
+                                if sess_sym:
+                                    if sess_sym not in sym_epochs:
+                                        sym_epochs[sess_sym] = {"oldest_epoch": fe, "count": 1}
+                                    else:
+                                        sym_epochs[sess_sym]["count"] += 1
+                                        if fe < sym_epochs[sess_sym]["oldest_epoch"]:
+                                            sym_epochs[sess_sym]["oldest_epoch"] = fe
                 if oldest_epoch:
                     entry["oldest_position_age"] = _count_rollover_days(oldest_epoch, day_schedule=cfg)
                 else:
                     entry.pop("oldest_position_age", None)
+
+                if sym_epochs:
+                    age_by_sym = {}
+                    for s_name, s_data in sym_epochs.items():
+                        age_by_sym[s_name] = {
+                            "age": _count_rollover_days(s_data["oldest_epoch"], day_schedule=cfg),
+                            "count": s_data["count"]
+                        }
+                    entry["position_age_by_symbol"] = age_by_sym
+                else:
+                    entry.pop("position_age_by_symbol", None)
 
                 if cfg.get("cycle_reminder_enabled"):
                     entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
@@ -18994,6 +19025,45 @@ function showConfirmModal(msg, onConfirm, confirmLabel) {
   newBtn.onclick = () => { modal.classList.remove('active'); modal.style.display = ''; onConfirm(); };
 }
 
+function _getSessionSideAge(session, sideNum, acc) {
+  if (!session) return null;
+  const fills = session.fills || [];
+  const closeFills = session.close_fills || [];
+  const closedTickets = new Set(closeFills.map(cf => String(cf.ticket)));
+  const dismissedTickets = new Set((session.dismissed_tickets || []).map(t => String(t)));
+  const openFills = fills.filter(f => f.account === acc && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
+  
+  // Find oldest epoch among open fills
+  let oldestEpoch = null;
+  openFills.forEach(f => {
+    const ep = f.open_epoch || f.ts_epoch;
+    if (ep && (oldestEpoch === null || ep < oldestEpoch)) {
+      oldestEpoch = ep;
+    }
+  });
+
+  // Fallback to live position_details for this symbol
+  if (oldestEpoch === null) {
+    const allDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
+    let acctInfo = null;
+    for (const d of allDicts) {
+      if (d && d[acc]) { acctInfo = d[acc]; break; }
+    }
+    const sideInfo = (session.sides && session.sides[acc]) || {};
+    const sidePair = (sideInfo.pair || session.pair || '').toUpperCase().trim();
+    if (acctInfo && acctInfo.position_age_by_symbol && acctInfo.position_age_by_symbol[sidePair]) {
+      return acctInfo.position_age_by_symbol[sidePair].age;
+    }
+  }
+
+  if (oldestEpoch) {
+    // 86400 seconds per day estimate
+    const days = Math.floor((Date.now() / 1000 - oldestEpoch) / 86400);
+    return Math.max(0, days);
+  }
+  return null;
+}
+
 function renderStrategies(strats, sessions) {
   strategies_cache = strats;
   const tbody = document.getElementById('strategiesBody');
@@ -19013,13 +19083,23 @@ function renderStrategies(strats, sessions) {
         });
       }
     });
-    // Positions: show per-side counts (acc1 / acc2) reflecting live broker state
+    // Positions & Ages: show per-side counts (acc1 / acc2) reflecting live broker state
     let side1Pos = 0, side2Pos = 0;
+    let maxSide1Age = null, maxSide2Age = null;
     instrSessions.forEach(s => {
       if (s.status === 'completed') return;
+      const accs = Object.keys(s.sides || {});
+      const side1Acc = st.account1 || (accs.find(a => s.sides[a].side_number === 1) || accs[0]);
+      const side2Acc = st.account2 || (accs.find(a => s.sides[a].side_number === 2) || accs[1]);
+      
+      const s1Age = side1Acc ? _getSessionSideAge(s, 1, side1Acc) : null;
+      const s2Age = side2Acc ? _getSessionSideAge(s, 2, side2Acc) : null;
+      if (s1Age != null && (maxSide1Age === null || s1Age > maxSide1Age)) maxSide1Age = s1Age;
+      if (s2Age != null && (maxSide2Age === null || s2Age > maxSide2Age)) maxSide2Age = s2Age;
+
       if (s.filled) {
-        const a1 = st.account1 || Object.keys(s.filled)[0];
-        const a2 = st.account2 || Object.keys(s.filled)[1];
+        const a1 = side1Acc;
+        const a2 = side2Acc;
         const maxPos = s.total_positions || Infinity;
         if (a1) {
           const f1 = s.filled[a1] || 0;
@@ -19036,6 +19116,17 @@ function renderStrategies(strats, sessions) {
       }
     });
     const posDisplay = side1Pos + ' / ' + side2Pos;
+
+    let ageDisplay = '';
+    if (maxSide1Age !== null || maxSide2Age !== null) {
+      const s1AgeStr = maxSide1Age !== null ? maxSide1Age + 'd' : '-';
+      const s2AgeStr = maxSide2Age !== null ? maxSide2Age + 'd' : '-';
+      const s1Clr = maxSide1Age != null ? (maxSide1Age >= 7 ? 'var(--red)' : (maxSide1Age >= 3 ? 'var(--orange)' : 'var(--text2)')) : 'var(--text2)';
+      const s2Clr = maxSide2Age != null ? (maxSide2Age >= 7 ? 'var(--red)' : (maxSide2Age >= 3 ? 'var(--orange)' : 'var(--text2)')) : 'var(--text2)';
+      const tip = `Side 1 longest age: ${s1AgeStr}\nSide 2 longest age: ${s2AgeStr}`;
+      ageDisplay = `<div style="font-size:0.7rem;margin-top:2px;" title="${tip}">Age: <span style="color:${s1Clr};font-weight:600;">${s1AgeStr}</span> / <span style="color:${s2Clr};font-weight:600;">${s2AgeStr}</span></div>`;
+    }
+
     // Enabled checkbox
     const enabledChecked = st.enabled ? 'checked' : '';
     // Running status badge + start/stop button
@@ -19052,7 +19143,7 @@ function renderStrategies(strats, sessions) {
       <td title="${st.account2}">${getAccountLabel(st.account2)}</td>
       <td>Hedge</td>
       <td>${totalErrors > 0 ? '<span style="color:var(--red);font-weight:600">' + totalErrors + '</span>' : '0'}</td>
-      <td>${posDisplay}</td>
+      <td>${posDisplay}${ageDisplay}</td>
       <td><label style="cursor:pointer;"><input type="checkbox" ${enabledChecked} onchange="toggleStrategyEnabled('${st.id}', this.checked)" style="width:16px;height:16px;cursor:pointer;"></label></td>
       <td>${statusBadge}</td>
       <td>
@@ -19852,6 +19943,12 @@ function renderSide(session, sideNum) {
       const srLabel = srCount > 0
         ? `<br><span style="font-size:0.68rem;color:var(--orange);cursor:pointer;text-decoration:underline dotted" title="Click to clear spread rejects (${srCount} skipped)" onclick="event.stopPropagation();fetch('/api/sessions/${session.id}/clear_errors',{method:'POST'}).then(()=>refreshData()).then(()=>renderInstrumentsTable())">⏳ spread (${srCount}) ✕</span>`
         : '';
+      
+      // Calculate side age
+      const sideAge = _getSessionSideAge(session, sideNum, acc);
+      const ageColor = sideAge != null ? (sideAge >= 7 ? 'var(--red)' : (sideAge >= 3 ? 'var(--orange)' : 'var(--text2)')) : '';
+      const ageHtml = sideAge != null ? ` <span style="font-size:0.72rem;color:${ageColor};font-weight:600;cursor:pointer;text-decoration:underline dotted;" onclick="event.stopPropagation();showAccountAgeBreakdown('${acc}')" title="Oldest open position: ${sideAge}d (click for breakdown)">[${sideAge}d]</span>` : '';
+
       let count;
       if (action === 'close') {
         const matchMode = session.match_mode || 'ticket';
@@ -19859,7 +19956,7 @@ function renderSide(session, sideNum) {
           const closedLots = (session.closed_lots && session.closed_lots[acc]) || 0;
           const filledLots = (session.filled_lots && session.filled_lots[acc]) || 0;
           const groupLabel = info.group ? ` | ${info.group}` : '';
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closedLots}/${filledLots} lots closed</span>${errLabel}${srLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closedLots}/${filledLots} lots closed</span>${ageHtml}${errLabel}${srLabel}`;
         }
         const filled = (session.filled && session.filled[acc]) || 0;
         const closed = (session.closed && session.closed[acc]) || 0;
@@ -19868,9 +19965,9 @@ function renderSide(session, sideNum) {
           const startClosed = (session.close_start_closed && session.close_start_closed[acc]) || 0;
           const done = Math.max(0, closed - startClosed);
           const target = session.close_count;
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${done}/${target} closed</span>${errLabel}${srLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${done}/${target} closed</span>${ageHtml}${errLabel}${srLabel}`;
         } else {
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closed}/${filled} closed</span>${errLabel}${srLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${closed}/${filled} closed</span>${ageHtml}${errLabel}${srLabel}`;
         }
       } else if (action.startsWith('cycle_')) {
         // Derive cycling account using side_number, not Object.keys() order
@@ -19878,7 +19975,7 @@ function renderSide(session, sideNum) {
         if (info.side_number === cycleSideNum) {
           const progress = session.cycle_progress || {};
           const groupLabel = info.group ? ` | ${info.group}` : '';
-          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--orange)">CYCLING${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${progress.cycled||0} cycled (${progress.phase||'-'})</span>${errLabel}${srLabel}`;
+          return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--orange)">CYCLING${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${progress.cycled||0} cycled (${progress.phase||'-'})</span>${ageHtml}${errLabel}${srLabel}`;
         }
         // Non-cycling side: show net open positions
         let filled = (session.filled && session.filled[acc]) || 0;
@@ -19899,7 +19996,7 @@ function renderSide(session, sideNum) {
         count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}${srLabel}`;
+        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${ageHtml}${errLabel}${srLabel}`;
 
       } else {
         let filled = (session.filled && session.filled[acc]) || 0;
@@ -19917,7 +20014,7 @@ function renderSide(session, sideNum) {
         count = Math.min(Math.max(0, filled - closed - totalPendingReopens), session.total_positions);
         
         const groupLabel = info.group ? ` | ${info.group}` : '';
-        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${errLabel}${srLabel}`;
+        return `<strong title="${acc}">${getAccountLabel(acc)}</strong><br><span style="font-size:0.75rem;color:var(--text2)">${info.action.toUpperCase()}${groupLabel}</span>${extras}<br><span style="font-size:0.75rem">${count}/${session.total_positions} filled</span>${ageHtml}${errLabel}${srLabel}`;
       }
     }
   }
@@ -21862,6 +21959,11 @@ function _currencySymbol(info) {
   const cur = (info && (info.denomination || info.account_currency || '')).toUpperCase();
   return sym_map[cur] || (cur ? cur + '\u00a0' : '');
 }
+function _fmtCcy(sym, val) {
+  const s = String(val);
+  if (s !== '-' && s.startsWith('-')) return '-' + sym + s.slice(1);
+  return sym + s;
+}
 function _denomTip(info) {
   const cur = (info && (info.denomination || info.account_currency || '')).toUpperCase() || 'USD';
   const src = (info && info.denomination_source) || '';
@@ -21931,7 +22033,22 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     if (maxD != null && maxD > 0 && d >= maxD) color = 'var(--red)';
     else if (remD != null && remD > 0 && d >= remD) color = 'var(--orange)';
     const style = color ? `font-weight:600;color:${color};font-size:0.82rem;` : 'font-size:0.82rem;';
-    return `<td style="${style}" title="${d} rollover days (remind: ${remD||'-'} / max: ${maxD||'-'})">${d}</td>`;
+    
+    // Build breakdown tooltip & check if breakdown data exists
+    const symBreakdown = (acctInfo && acctInfo.position_age_by_symbol) || {};
+    const symKeys = Object.keys(symBreakdown);
+    let title = `${d} rollover days (remind: ${remD||'-'} / max: ${maxD||'-'})`;
+    if (symKeys.length > 0) {
+      title += '\n\nInstruments breakdown:';
+      symKeys.forEach(sym => {
+        title += `\n• ${sym}: ${symBreakdown[sym].age}d (${symBreakdown[sym].count} pos)`;
+      });
+    }
+
+    if (symKeys.length > 0) {
+      return `<td style="${style}"><a href="#" onclick="showAccountAgeBreakdown('${id}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="${title}">${d}</a></td>`;
+    }
+    return `<td style="${style}" title="${title}">${d}</td>`;
   }
 
   // Margin alert threshold cell — editable inline
@@ -22047,7 +22164,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${_currencySymbol(info)}${optEqVal}</td>
         <td style="${shiftColor}">${shiftVal}</td>
         ${_intendedLotsCell(id, info.group_label)}
-        <td style="${pnl1Style}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnl1}</td>
+        <td style="${pnl1Style}" title="${_denomTip(info)}">${_fmtCcy(_currencySymbol(info), pnl1)}</td>
         <td>${lev}</td>
         <td>${pos1}</td>
         ${_lotsCell(id, lots1, lots1Style)}
@@ -22127,7 +22244,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${_currencySymbol(info)}${optEqMt}</td>
         <td style="${shiftMtColor}">${shiftMt}</td>
         ${_intendedLotsCell(displayName, info.group_label)}
-        <td style="${pnlMtStyle}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnlMt}</td>
+        <td style="${pnlMtStyle}" title="${_denomTip(info)}">${_fmtCcy(_currencySymbol(info), pnlMt)}</td>
         <td>${lev}</td>
         <td>${posMt}</td>
         ${_lotsCell(id, lotsMt, lotsMtStyle)}
@@ -22205,7 +22322,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
         <td>${_currencySymbol(info)}${optEqIfx}</td>
         <td style="${shiftIfxColor}">${shiftIfx}</td>
         ${_intendedLotsCell(displayName, info.group_label)}
-        <td style="${pnlIfxStyle}" title="${_denomTip(info)}">${_currencySymbol(info)}${pnlIfx}</td>
+        <td style="${pnlIfxStyle}" title="${_denomTip(info)}">${_fmtCcy(_currencySymbol(info), pnlIfx)}</td>
         <td>${lev}</td>
         <td>${posIfx}</td>
         ${_lotsCell(id, lotsIfx, lotsIfxStyle)}
@@ -22578,6 +22695,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let sumOptEq = 0, sumShift = 0;
     let hasOptEq = false, hasShift = false;
     const memberIds = [];
+    const groupAgeBySymbol = {};
     let connectedCount = 0;  // Count of connected accounts in this group
     const groupDenoms = new Set();
 
@@ -22682,6 +22800,18 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           if (maxAge === null || numAge > maxAge) maxAge = numAge;
         }
       }
+      // Aggregate symbol breakdown for group
+      const mSymAges = info.position_age_by_symbol || {};
+      Object.entries(mSymAges).forEach(([sym, sData]) => {
+        if (!groupAgeBySymbol[sym]) {
+          groupAgeBySymbol[sym] = { age: sData.age, count: sData.count || 0 };
+        } else {
+          groupAgeBySymbol[sym].count += (sData.count || 0);
+          if (sData.age > groupAgeBySymbol[sym].age) {
+            groupAgeBySymbol[sym].age = sData.age;
+          }
+        }
+      });
       // Pips to Margin Call — track minimum (most dangerous) in group
       const mPtmc = info.pips_to_mc != null ? parseFloat(info.pips_to_mc) : null;
       if (mPtmc !== null) {
@@ -22771,6 +22901,19 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       ? `<td style="${sdColor};font-size:0.78rem"><a href="#" onclick="showGroupSwapBreakdown('${prefix}', '${groupMemberIdsStr}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument swap breakdown for this group">${fSwapDelta}</a></td>`
       : `<td style="${sdColor};font-size:0.78rem">${fSwapDelta}</td>`;
 
+    // Group Age tooltip & cell
+    const groupSymKeys = Object.keys(groupAgeBySymbol);
+    let groupAgeTip = maxAge != null ? `${maxAge} rollover days (highest in group)` : '';
+    if (groupSymKeys.length > 0) {
+      groupAgeTip += '\n\nInstruments breakdown:';
+      groupSymKeys.forEach(sym => {
+        groupAgeTip += `\n• ${sym}: ${groupAgeBySymbol[sym].age}d (${groupAgeBySymbol[sym].count} pos)`;
+      });
+    }
+    const groupAgeCell = (maxAge !== null && groupSymKeys.length > 0)
+      ? `<td style="${ageStyle}"><a href="#" onclick="showGroupAgeBreakdown('${prefix}', '${groupMemberIdsStr}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="${groupAgeTip}">${ageStr}</a></td>`
+      : `<td style="${ageStyle}" title="${groupAgeTip}">${ageStr}</td>`;
+
     let grpSym = '', grpTip = '';
     if (groupDenoms.size === 1) {
       const c = Array.from(groupDenoms)[0];
@@ -22795,7 +22938,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
         const _d = minPtmc >= 10000 ? (minPtmc/1000).toFixed(1)+'k' : minPtmc.toLocaleString(undefined,{maximumFractionDigits:0});
         return `<td style="color:${_c};font-weight:${_w};font-size:0.82rem;" title="~${minPtmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips runway (worst in group)">${_d}</td>`;
       })()}
-      <td style="${ageStyle}" title="${maxAge != null ? maxAge + ' rollover days (highest in group)' : ''}">${ageStr}</td>
+      ${groupAgeCell}
       <td title="${grpTip}">${grpSym}${fBal}</td>
       <td title="${grpTip}">${grpSym}${fEq}</td>
       <td>${grpSym}${fOptEq}</td>
@@ -23042,6 +23185,99 @@ function _renderSwapBreakdownModal(title, data) {
     const existing = document.getElementById('swapBreakdownModal');
     if (existing) existing.remove();
     document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function showAccountAgeBreakdown(accountId) {
+  const allDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
+  let acctInfo = null;
+  for (const d of allDicts) {
+    if (d && d[accountId]) { acctInfo = d[accountId]; break; }
+  }
+  const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
+  const entries = Object.entries(bySym).map(([sym, data]) => ({
+    symbol: sym,
+    age: data.age,
+    count: data.count || 1
+  })).sort((a, b) => b.age - a.age);
+
+  if (!entries.length) {
+    alert('No position age breakdown available for ' + accountId);
+    return;
+  }
+  _renderAgeBreakdownModal('Position Age Breakdown — ' + accountId, entries);
+}
+
+function showGroupAgeBreakdown(groupName, commaSeparatedIds) {
+  const ids = (commaSeparatedIds || '').split(',').map(s => decodeURIComponent(s.trim())).filter(Boolean);
+  const allDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
+  const groupSymMap = {};
+
+  ids.forEach(id => {
+    let acctInfo = null;
+    for (const d of allDicts) {
+      if (d && d[id]) { acctInfo = d[id]; break; }
+    }
+    const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
+    Object.entries(bySym).forEach(([sym, data]) => {
+      if (!groupSymMap[sym]) {
+        groupSymMap[sym] = { age: data.age, count: data.count || 1 };
+      } else {
+        groupSymMap[sym].count += (data.count || 1);
+        if (data.age > groupSymMap[sym].age) {
+          groupSymMap[sym].age = data.age;
+        }
+      }
+    });
+  });
+
+  const entries = Object.entries(groupSymMap).map(([sym, data]) => ({
+    symbol: sym,
+    age: data.age,
+    count: data.count
+  })).sort((a, b) => b.age - a.age);
+
+  if (!entries.length) {
+    alert('No position age breakdown available for group ' + groupName);
+    return;
+  }
+  _renderAgeBreakdownModal('Position Age Breakdown — Group: ' + groupName, entries);
+}
+
+function _renderAgeBreakdownModal(title, data) {
+  let html = `<div class="modal-overlay active" id="ageBreakdownModal" onclick="if(event.target===this)this.remove()">
+    <div class="modal" style="min-width:340px;max-width:500px;">
+      <h3 style="margin:0 0 12px;font-size:1rem;">${title}</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+        <thead><tr style="border-bottom:1px solid var(--border);text-align:right;">
+          <th style="text-align:left;padding:4px 8px;">Instrument</th>
+          <th style="padding:4px 8px;">Open Positions</th>
+          <th style="padding:4px 8px;color:var(--orange)">Oldest Age</th>
+        </tr></thead><tbody>`;
+  let totalPos = 0;
+  let maxAge = 0;
+  data.forEach(r => {
+    totalPos += (r.count || 0);
+    if (r.age > maxAge) maxAge = r.age;
+    const ageColor = r.age >= 7 ? 'var(--red)' : (r.age >= 3 ? 'var(--orange)' : 'var(--text)');
+    html += `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:4px 8px;font-weight:600;">${r.symbol}</td>
+      <td style="padding:4px 8px;text-align:right;">${r.count}</td>
+      <td style="padding:4px 8px;text-align:right;color:${ageColor};font-weight:600;">${r.age}d</td>
+    </tr>`;
+  });
+  html += `<tr style="border-top:2px solid var(--accent);font-weight:700;">
+    <td style="padding:4px 8px;">TOTAL / MAX</td>
+    <td style="padding:4px 8px;text-align:right;">${totalPos}</td>
+    <td style="padding:4px 8px;text-align:right;color:var(--orange);">${maxAge}d</td>
+  </tr></tbody></table>
+  <div style="text-align:right;margin-top:12px;">
+    <button class="btn" onclick="document.getElementById('ageBreakdownModal').remove()">Close</button>
+  </div>
+    </div>
+  </div>`;
+  const existing = document.getElementById('ageBreakdownModal');
+  if (existing) existing.remove();
+  document.body.insertAdjacentHTML('beforeend', html);
 }
 
 function showAddAccountModal() {
