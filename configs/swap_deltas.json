@@ -1,30 +1,28 @@
 {
   "pre": {
-    "DEMO-MT5-52769010": 0.0,
+    "DEMO-MT5-52769010": -342.55,
     "73201770": 0.0,
-    "DEMO-MT4-1218954455": 0.0,
+    "DEMO-MT4-1218954455": 203.52,
     "2110248": 0.0
   },
   "pre_by_instrument": {
     "DEMO-MT5-52769010": {
-      "USDCHF": 0.0
+      "USDCHF": -342.55
     },
     "DEMO-MT4-1218954455": {
-      "USDCHF": 0.0
+      "USDCHF": 203.52
     }
   },
   "delta": {
-    "DEMO-MT5-52769010": -205.16,
-    "DEMO-MT4-1218954455": 122.04
+    "DEMO-MT5-52769010": -69.29
   },
   "delta_by_instrument": {
     "DEMO-MT5-52769010": {
-      "USDCHF": -205.16
-    },
-    "DEMO-MT4-1218954455": {
-      "USDCHF": 122.04
+      "USDCHF": -69.29
     }
   },
-  "snapshot_date": "2026-09-09",
-  "snapshot_ts": 1788987480.000479
+  "storage_fees": {},
+  "storage_fees_by_instrument": {},
+  "snapshot_date": "2026-09-14",
+  "snapshot_ts": 1789419480.0003014
 }

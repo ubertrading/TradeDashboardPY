@@ -776,6 +776,28 @@ class MT4DirectAccount:
                     info[prop] = int(val) if prop == "leverage" else float(val)
             except Exception:
                 pass
+
+        # ── Statement identity fields ───────────────────────────────────────
+        # login: the numeric broker account number (from connection config)
+        try:
+            info["login"] = str(self.config["login"])
+        except Exception:
+            pass
+
+        # account_name: the account holder name returned by the MT4 DLL (AccountName)
+        try:
+            acct_name_raw = getattr(self._client, "AccountName", None)
+            if acct_name_raw is not None:
+                info["account_name"] = str(acct_name_raw).strip()
+        except Exception:
+            pass
+
+        # server: the broker server hostname from the connection config
+        try:
+            info["server"] = str(self.config.get("server", ""))
+        except Exception:
+            pass
+
         # Extract account currency: prefer Account.currency (ConGroup struct on MT4 Server API),
         # then fall back to AccountName (which may be a 3-letter code like "EUR" or a composite like "1299147.2201EUR")
         try:
@@ -795,6 +817,7 @@ class MT4DirectAccount:
             pass
 
         info["last_update"] = time.time()
+
 
         # Push symbol quotes — prefer C# QuoteBuffer (real-time),
         # fall back to GetQuote / SymbolsInfo polling
@@ -930,16 +953,6 @@ class MT4DirectAccount:
                                 "swap_long": float(getattr(sym, 'SwapLong', 0)),
                                 "swap_short": float(getattr(sym, 'SwapShort', 0)),
                             }
-                            # Bid/Ask may not exist on SymbolInfo — only add if available
-                            try:
-                                bid_val = float(sym.Bid)
-                                ask_val = float(sym.Ask)
-                                if bid_val > 0 and ask_val > 0:
-                                    pip_mult = 1000 if "JPY" in sym_name else 100000
-                                    spd = round((ask_val - bid_val) * pip_mult, 1)
-                                    entry.update({"bid": bid_val, "ask": ask_val, "spread": spd})
-                            except (AttributeError, TypeError):
-                                pass
                             new_cache[sym_name] = entry
                         except Exception:
                             continue

@@ -2468,8 +2468,14 @@ os.makedirs(_STMTS_DIR, exist_ok=True)
 def _render_metatrader_html_statement(stmt):
     """Render an authentic MetaTrader-formatted HTML account statement matching native MT4 Statement.htm layout."""
     acct_id = str(stmt.get("account_id", ""))
+    # Account number shown on statement = broker login (numeric), falling back to account_id
+    acct_number = str(stmt.get("account_number") or stmt.get("login") or acct_id)
+    # Name on account = AccountName from MT4 DLL, falling back to group_label / account_id
     acct_name = str(stmt.get("account_name") or stmt.get("group_label") or acct_id)
-    company_name = str(stmt.get("company") or stmt.get("broker") or stmt.get("server") or "Swissquote Bank SA")
+    # Company/broker = server hostname (strip port); no hardcoded broker fallback
+    company_name = str(stmt.get("company") or stmt.get("broker") or
+                       (stmt.get("server", "").split(":")[0] if stmt.get("server") else None) or
+                       acct_id)
     date_str = str(stmt.get("date") or datetime.now().strftime("%Y %B %d, %H:%M"))
     if " " not in date_str and "-" in date_str:
         try:
@@ -2601,7 +2607,7 @@ def _render_metatrader_html_statement(stmt):
     html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
 <html>
   <head>
-    <title>Statement: {acct_id} - {acct_name}</title>
+    <title>Statement: {acct_number} - {acct_name}</title>
     <style type="text/css" media="screen">
     <!--
     td {{ font: 8pt Tahoma,Arial; }}
@@ -2626,7 +2632,7 @@ def _render_metatrader_html_statement(stmt):
 
 <table cellspacing=1 cellpadding=3 border=0>
 <tr align=left>
-    <td colspan=2><b>Account: {acct_id}</b></td>
+    <td colspan=2><b>Account: {acct_number}</b></td>
     <td colspan=5><b>Name: {acct_name}</b></td>
     <td colspan=2><b>Currency: {currency}</b></td>
     <td colspan=2><b>Leverage: 1:{leverage}</b></td>
@@ -2860,14 +2866,26 @@ def _save_full_statements(date_str=None):
                         manual_accounts.get(acct_id, {}).get("group_label") or
                         info.get("group_label", "")
                     ),
+                    # account number shown on the statement = broker login (numeric)
+                    "account_number": (
+                        info.get("login") or
+                        acct_id
+                    ),
+                    # name on the account = AccountName from MT4 DLL
                     "account_name": (
                         info.get("account_name") or
                         info.get("name") or
                         manual_accounts.get(acct_id, {}).get("group_label") or
                         acct_id
                     ),
-                    "currency":    info.get("currency") or "USD",
-                    "company":     info.get("company") or info.get("broker") or info.get("server") or "Swissquote Bank SA",
+                    "currency":    info.get("currency") or info.get("account_currency") or "USD",
+                    # company/broker = server hostname; strip port if present
+                    "company": (
+                        info.get("company") or
+                        info.get("broker") or
+                        (info.get("server", "").split(":")[0] if info.get("server") else None) or
+                        acct_id
+                    ),
                 }
 
                 # ── Open positions ──────────────────────────────────────────
@@ -7793,13 +7811,21 @@ def _should_issue_command(session, account):
         # None/blank = disabled — do NOT open (user must set a value to trade).
         # Any number including 0 is a valid threshold.
         diff_to_open = session.get("diff_to_open")
-        if diff_to_open is None:
-            # print(f"[OPEN-BLOCK] {account} diff_to_open is None")
+        if diff_to_open is None or diff_to_open == "":
             return False  # Blank = don't trade
-        curr_diff_val, _ = _calc_curr_diff(session, "open")
-        if curr_diff_val is None or curr_diff_val < diff_to_open:
-            # print(f"[OPEN-BLOCK] {account} curr_diff_val={curr_diff_val} < diff_to_open={diff_to_open}")
+        try:
+            diff_to_open = float(diff_to_open)
+        except (ValueError, TypeError):
             return False
+
+        curr_diff_val, diff_reason = _calc_curr_diff(session, "open")
+        if curr_diff_val is None:
+            print(f"[OPEN-DIFF-GATE] {account}: BLOCKED — curr_diff=None ({diff_reason}) min_diff={diff_to_open}")
+            return False
+        if curr_diff_val < diff_to_open:
+            print(f"[OPEN-DIFF-GATE] {account}: BLOCKED — curr_diff={curr_diff_val} < min_diff={diff_to_open}")
+            return False
+        print(f"[OPEN-DIFF-GATE] {account}: PASSED — curr_diff={curr_diff_val} >= min_diff={diff_to_open}")
 
         # ── Execution Filters (open) ──
         # Quote rapidity: block if tick rate too high (fast market)
@@ -9068,11 +9094,19 @@ def _calc_curr_diff(session, direction):
     diff_value is a number or None. reason_string explains why it's None.
     """
     sides = session.get("sides", {})
-    accounts = list(sides.keys())
-    if len(accounts) != 2:
-        return (None, "need 2 sides")
+    acc1 = None
+    acc2 = None
+    for acc, sinfo in sides.items():
+        if sinfo.get("side_number") == 1:
+            acc1 = acc
+        elif sinfo.get("side_number") == 2:
+            acc2 = acc
+    if not acc1 or not acc2:
+        accounts = list(sides.keys())
+        if len(accounts) != 2:
+            return (None, "need 2 sides")
+        acc1, acc2 = accounts[0], accounts[1]
 
-    acc1, acc2 = accounts[0], accounts[1]
     info1 = ea_account_info.get(acc1) or {}
     info2 = ea_account_info.get(acc2) or {}
     conn1 = info1.get("conn_type", "")
@@ -9111,9 +9145,9 @@ def _calc_curr_diff(session, direction):
         elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
             iforex_acct = iforex_manager.accounts.get(acc)
 
-        # Check direct quote cache first if fresh (< 2.0s) to avoid redundant broker calls
+        # Check direct quote cache first if fresh (< 1.5s) to avoid redundant broker calls
         cached = _direct_quote_cache.get((acc, pair_i))
-        if cached and (time.time() - cached.get("ts", 0)) < 2.0:
+        if cached and (time.time() - cached.get("ts", 0)) < 1.5:
             q_bid, q_ask = cached["bid"], cached["ask"]
             got_quote = True
             quote_src = "direct_cache_fresh"
@@ -9127,34 +9161,26 @@ def _calc_curr_diff(session, direction):
                 quote_src = "iforex_direct"
                 _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
 
-        # 1. Direct quote lookup
+        # 1. Direct quote lookup — query live price via get_quote_direct
         if not got_quote and direct_acct and pair_i:
             try:
-                if hasattr(direct_acct, 'get_symbol_info'):
-                    sym_info = direct_acct.get_symbol_info(pair_i)
-                    if sym_info and sym_info.get("bid") and sym_info.get("ask"):
-                        q_bid, q_ask = sym_info["bid"], sym_info["ask"]
-                        got_quote = True
-                        quote_src = "symbol_cache"
-                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
-
-                if not got_quote and hasattr(direct_acct, 'get_quote_direct'):
+                if hasattr(direct_acct, 'get_quote_direct'):
                     dq = direct_acct.get_quote_direct(pair_i)
                     if dq and dq.get("bid") and dq.get("ask"):
                         q_bid, q_ask = dq["bid"], dq["ask"]
                         got_quote = True
                         quote_src = "get_quote_direct"
                         _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
+
+                if not got_quote and hasattr(direct_acct, 'get_symbol_info'):
+                    sym_info = direct_acct.get_symbol_info(pair_i)
+                    if sym_info and sym_info.get("bid") and sym_info.get("ask"):
+                        q_bid, q_ask = sym_info["bid"], sym_info["ask"]
+                        got_quote = True
+                        quote_src = "symbol_cache"
+                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
             except Exception:
                 pass
-
-        # 2. Direct quote cache lookup (<30s)
-        if not got_quote:
-            cached = _direct_quote_cache.get((acc, pair_i))
-            if cached and (time.time() - cached.get("ts", 0)) < 30:
-                q_bid, q_ask = cached["bid"], cached["ask"]
-                got_quote = True
-                quote_src = "direct_cache"
 
         # 3. Fallback to ea_account_info (info dict)
         if not got_quote and info:
@@ -15093,7 +15119,7 @@ body {
   background: rgba(0,0,0,0.6); z-index: 1000;
   justify-content: center; align-items: center;
 }
-.modal-overlay.active { display: flex; }
+.modal-overlay.active { display: flex !important; }
 /* Edit instrument modal needs higher z-index to appear above Edit Strategy */
 #editModal { z-index: 1010; }
 #newInstrumentModal { z-index: 1010; }
@@ -18331,8 +18357,11 @@ function renderOpenedDeals() {
     if (accs.length < 2) return;
     const fills = s.fills || [];
     const closeFills = s.close_fills || [];
-    const side1 = s.sides[accs[0]];
-    const side2 = s.sides[accs[1]];
+    // Use side_number to determine side1/side2 — do not rely on key insertion order
+    const side1Acc = accs.find(a => s.sides[a].side_number === 1) || accs[0];
+    const side2Acc = accs.find(a => s.sides[a].side_number === 2) || accs[1];
+    const side1 = s.sides[side1Acc];
+    const side2 = s.sides[side2Acc];
     const pair1 = side1.pair || s.pair;
     const pair2 = side2.pair || s.pair;
     // Build set of closed ticket IDs (as strings for comparison)
@@ -18340,8 +18369,8 @@ function renderOpenedDeals() {
     // Also exclude tickets manually dismissed from monitor (without closing)
     const dismissedTickets = new Set((s.dismissed_tickets || []).map(t => String(t)));
     // Separate fills by account, filtering out closed and dismissed tickets
-    const fills1 = fills.filter(f => f.account === accs[0] && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
-    const fills2 = fills.filter(f => f.account === accs[1] && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
+    const fills1 = fills.filter(f => f.account === side1Acc && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
+    const fills2 = fills.filter(f => f.account === side2Acc && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
     const totalPairs = Math.max(fills1.length, fills2.length);
     if (totalPairs <= 0) return;
     // If we have filled counts but fewer fill detail records, pad with empty placeholders
@@ -18438,11 +18467,11 @@ function renderOpenedDeals() {
         sessionId: s.id,
         ticket1: f1 ? f1.ticket : null,
         ticket2: f2 ? f2.ticket : null,
-        acc1: accs[0],
-        acc2: accs[1],
+        acc1: side1Acc,
+        acc2: side2Acc,
         pairLabel: s.pair,
-        session1: getAccountLabel(accs[0]),
-        session2: getAccountLabel(accs[1]),
+        session1: getAccountLabel(side1Acc),
+        session2: getAccountLabel(side2Acc),
         symbol1: pair1,
         symbol2: pair2,
         side1Action: (side1.action || 'sell').toUpperCase(),
@@ -18881,6 +18910,22 @@ function initAcctCombo(comboId, inputId, hiddenId, listId, items) {
 }
 
 
+function openModalOverlay(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.style.display = '';
+    el.classList.add('active');
+  }
+}
+
+function closeModalOverlay(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.classList.remove('active');
+    el.style.display = '';
+  }
+}
+
 function showNewStrategyModal() {
   document.getElementById('sStratName').value = '';
   // Build account list
@@ -18898,10 +18943,10 @@ function showNewStrategyModal() {
     }
   });
 
-  document.getElementById('newStrategyModal').classList.add('active');
+  openModalOverlay('newStrategyModal');
 }
 function closeNewStrategyModal() {
-  document.getElementById('newStrategyModal').classList.remove('active');
+  closeModalOverlay('newStrategyModal');
 }
 
 async function createStrategy() {
@@ -18939,13 +18984,14 @@ function showConfirmModal(msg, onConfirm, confirmLabel) {
   document.body.appendChild(modal);
   document.getElementById('confirmModalMsg').textContent = msg;
   const yesBtn = document.getElementById('confirmModalYes');
+  modal.style.display = '';
   modal.classList.add('active');
   // Clone+replace to remove old listeners
   const newBtn = yesBtn.cloneNode(true);
   yesBtn.parentNode.replaceChild(newBtn, yesBtn);
   newBtn.id = 'confirmModalYes';
   newBtn.textContent = confirmLabel || 'Delete';
-  newBtn.onclick = () => { modal.classList.remove('active'); onConfirm(); };
+  newBtn.onclick = () => { modal.classList.remove('active'); modal.style.display = ''; onConfirm(); };
 }
 
 function renderStrategies(strats, sessions) {
@@ -19064,11 +19110,11 @@ function editStrategy(stratId) {
   updateRunningControls(strat.running || false);
   document.getElementById('editStrategyTitle').textContent = 'Edit Strategy — ' + strat.name;
   renderInstrumentsTable();
-  document.getElementById('editStrategyModal').classList.add('active');
+  openModalOverlay('editStrategyModal');
 }
 function closeEditStrategyModal() {
   currentStrategyId = null;
-  document.getElementById('editStrategyModal').classList.remove('active');
+  closeModalOverlay('editStrategyModal');
 }
 // ─── Strategy Log Tab ───────────────────────────────────────────────────────
 let _lastEventLogCache = [];
@@ -19357,11 +19403,11 @@ function showImportModal() {
   document.getElementById('importStatusArea').style.display = 'none';
   document.getElementById('importStartBtn').disabled = false;
   document.getElementById('importStartBtn').textContent = 'Import';
-  document.getElementById('importPositionsModal').classList.add('active');
+  openModalOverlay('importPositionsModal');
 }
 
 function closeImportModal() {
-  document.getElementById('importPositionsModal').classList.remove('active');
+  closeModalOverlay('importPositionsModal');
   if (importPollTimer) { clearInterval(importPollTimer); importPollTimer = null; }
   importRequestId = null;
 }
@@ -19559,10 +19605,10 @@ function showNewInstrumentModal() {
   const defaultComment = _sn(strat.account1) + '-' + _sn(strat.account2);
   document.getElementById('fSide1Comment').value = defaultComment;
   document.getElementById('fSide2Comment').value = defaultComment;
-  document.getElementById('newInstrumentModal').classList.add('active');
+  openModalOverlay('newInstrumentModal');
 }
 function closeNewInstrumentModal() {
-  document.getElementById('newInstrumentModal').classList.remove('active');
+  closeModalOverlay('newInstrumentModal');
 }
 
 function buildSessionPayload() {
@@ -19736,7 +19782,7 @@ function editSession(id) {
     }
   }
 
-  document.getElementById('editModal').classList.add('active');
+  openModalOverlay('editModal');
 }
 
 async function saveEdit() {
@@ -19774,7 +19820,7 @@ async function saveEdit() {
   renderInstrumentsTable();
 }
 
-function closeModal() { document.getElementById('editModal').classList.remove('active'); }
+function closeModal() { closeModalOverlay('editModal'); }
 
 function badgeClass(status) {
   const m = { draft:'badge-draft', active:'badge-active', paused:'badge-paused', completed:'badge-completed', partial_close:'badge-partial_close' };
@@ -20060,7 +20106,7 @@ function confirmSetMode(id, selectEl, prevMode) {
   // If modal is dismissed, revert dropdown
   const cancelBtn = document.getElementById('confirmModalNo');
   const origClick = cancelBtn.onclick;
-  cancelBtn.onclick = () => { selectEl.value = prevMode; document.getElementById('confirmModal').classList.remove('active'); };
+  cancelBtn.onclick = () => { selectEl.value = prevMode; closeModalOverlay('confirmModal'); };
 }
 
 async function setSessionMode(id, mode) {
@@ -22228,7 +22274,7 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
 
       rows.push(`<tr>
         <td><input type="checkbox" ${isHidden ? 'checked' : ''} onchange="toggleAccountHidden('${name}', this.checked)" title="Hide this account"></td>
-        <td><strong>${name}</strong></td>
+        <td><a href="#" onclick="editEAAccount('${name}');return false;" style="color:inherit;text-decoration:none;font-weight:700;cursor:pointer;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'" title="Click to edit account">${name}</a></td>
         <td><input class="inl" style="width:80px;" value="${info.group_label || ''}" onchange="saveGroupLabel('${name}', this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td title="${connText}" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${connDot}</td>
         ${_nopEqCell(normNopEqM)}
@@ -23002,10 +23048,10 @@ function showAddAccountModal() {
   document.getElementById('aAcctName').value = '';
   document.getElementById('aGroupLabel').value = '';
   if (document.getElementById('aCurrency')) document.getElementById('aCurrency').value = '';
-  document.getElementById('addAccountModal').classList.add('active');
+  openModalOverlay('addAccountModal');
 }
 function closeAddAccountModal() {
-  document.getElementById('addAccountModal').classList.remove('active');
+  closeModalOverlay('addAccountModal');
 }
 async function addAccount() {
   const name = document.getElementById('aAcctName').value.trim();
@@ -23465,12 +23511,12 @@ async function editFixAccount(id) {
     document.getElementById('efxStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
     if (document.getElementById('efxCurrency')) document.getElementById('efxCurrency').value = cfg.account_currency || '';
     if (document.getElementById('efxSwapFree')) document.getElementById('efxSwapFree').checked = !!cfg.swapfree;
-    document.getElementById('editFixAccountModal').classList.add('active');
+    openModalOverlay('editFixAccountModal');
     toggleFixFields('efx');
   } catch(e) { alert('Failed to load config: ' + e); }
 }
 function closeEditFixAccountModal() {
-  document.getElementById('editFixAccountModal').classList.remove('active');
+  closeModalOverlay('editFixAccountModal');
 }
 async function saveFixAccountEdit() {
   const id = document.getElementById('efxAcctId').value;
@@ -23552,10 +23598,10 @@ async function showAddFixAccountModal() {
   if (document.getElementById('fxCurrency')) document.getElementById('fxCurrency').value = '';
   if (document.getElementById('fxSwapFree')) document.getElementById('fxSwapFree').checked = false;
   setDayScheduleInputs('fx', DEFAULT_DAY_SCHEDULE);
-  document.getElementById('addFixAccountModal').classList.add('active');
+  openModalOverlay('addFixAccountModal');
 }
 function closeAddFixAccountModal() {
-  document.getElementById('addFixAccountModal').classList.remove('active');
+  closeModalOverlay('addFixAccountModal');
 }
 async function addFixAccount(autoConnect = true) {
   const id = document.getElementById('fxAcctId').value.trim();
@@ -23673,10 +23719,10 @@ function editEAAccount(name) {
     document.getElementById('eeaSwapFree').checked = !!(info.swapfree || eaInfo.swapfree || mtInfo?.swapfree);
   }
   toggleEADirectFields();
-  document.getElementById('editEAAccountModal').classList.add('active');
+  openModalOverlay('editEAAccountModal');
 }
 function closeEditEAAccountModal() {
-  document.getElementById('editEAAccountModal').classList.remove('active');
+  closeModalOverlay('editEAAccountModal');
 }
 async function saveEAAccountEdit() {
   const name = document.getElementById('eeaAcctName').value;
@@ -23757,10 +23803,10 @@ function showAddMTDirectModal() {
   document.getElementById('mtdStopOutLevel').value = '';
   if (document.getElementById('mtdCurrency')) document.getElementById('mtdCurrency').value = '';
   if (document.getElementById('mtdSwapFree')) document.getElementById('mtdSwapFree').checked = false;
-  document.getElementById('addMTDirectModal').classList.add('active');
+  openModalOverlay('addMTDirectModal');
 }
 function closeAddMTDirectModal() {
-  document.getElementById('addMTDirectModal').classList.remove('active');
+  closeModalOverlay('addMTDirectModal');
 }
 async function addMTDirectAccount(autoConnect = true) {
   const id = document.getElementById('mtdAcctId').value.trim();
@@ -23865,11 +23911,11 @@ async function editMTDirect(id) {
     document.getElementById('emtdStopOutLevel').value = cfg.stop_out_level != null ? cfg.stop_out_level : '';
     if (document.getElementById('emtdCurrency')) document.getElementById('emtdCurrency').value = cfg.account_currency || '';
     if (document.getElementById('emtdSwapFree')) document.getElementById('emtdSwapFree').checked = !!cfg.swapfree;
-    document.getElementById('editMTDirectModal').classList.add('active');
+    openModalOverlay('editMTDirectModal');
   } catch(e) { alert('Failed to load MT Direct config: ' + e); }
 }
 function closeEditMTDirectModal() {
-  document.getElementById('editMTDirectModal').classList.remove('active');
+  closeModalOverlay('editMTDirectModal');
 }
 async function saveMTDirectEdit() {
   const id = document.getElementById('emtdAcctId').value;
@@ -23957,7 +24003,7 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
           modal.style.position = 'relative';
           modal.style.background = 'transparent';
           modal.style.padding = '0';
-          modal.style.display = 'block';
+          modal.style.setProperty('display', 'block', 'important');
           modal.classList.add('active');
           const innerModal = modal.querySelector('.modal');
           if (innerModal) {
@@ -24010,6 +24056,7 @@ document.addEventListener('keydown', function(e) {
     document.querySelectorAll('.modal-overlay.active, .modal.active, [class*="modal"].active').forEach(function(el) {
       if (popoutParam && el.id === 'editStrategyModal') return;
       el.classList.remove('active');
+      el.style.display = '';
       closedInnerModal = true;
     });
 
@@ -24035,7 +24082,7 @@ document.addEventListener('keydown', function(e) {
       }
     }
 
-    // 2. Display-based modals (PnL, reporting, breakdowns, confirmation)
+    // 2. Display-based modals (PnL, reporting, breakdowns)
     ['pnlModal', 'rptModal', 'pairBreakdownModal', 'confirmModal'].forEach(function(id) {
       const el = document.getElementById(id);
       if (el) {
@@ -24043,7 +24090,7 @@ document.addEventListener('keydown', function(e) {
           closedInnerModal = true;
         }
         el.classList.remove('active');
-        el.style.display = 'none';
+        el.style.display = el.classList.contains('modal-overlay') ? '' : 'none';
       }
     });
 
@@ -24080,14 +24127,18 @@ document.addEventListener('keydown', function(e) {
 
 // Close modals on click outside
 ['editModal', 'newStrategyModal', 'editStrategyModal', 'newInstrumentModal', 
- 'addAccountModal', 'addFixAccountModal', 'addMTDirectModal', 'addIForexModal', 'editEAAccountModal', 
+ 'addAccountModal', 'addFixAccountModal', 'addMTDirectModal', 'addIForexModal', 'confirmModal', 'editEAAccountModal', 
  'editMTDirectModal', 'editFixAccountModal', 'editIForexModal', 'importPositionsModal'].forEach(function(id) {
   const el = document.getElementById(id);
   if (el) {
     el.addEventListener('click', function(e) {
       if (e.target === this) {
-        this.classList.remove('active');
-        this.style.display = 'none';
+        if (typeof closeModalOverlay === 'function') {
+          closeModalOverlay(id);
+        } else {
+          this.classList.remove('active');
+          this.style.display = '';
+        }
       }
     });
   }
@@ -24115,11 +24166,11 @@ function showAddIForexModal() {
   if (document.getElementById('ifxCycleMaxDays')) document.getElementById('ifxCycleMaxDays').value = '';
   if (document.getElementById('ifxAutoCycle')) document.getElementById('ifxAutoCycle').checked = false;
   setDayScheduleInputs('ifx', DEFAULT_DAY_SCHEDULE);
-  document.getElementById('addIForexModal').classList.add('active');
+  openModalOverlay('addIForexModal');
 }
 
 function closeAddIForexModal() {
-  document.getElementById('addIForexModal').classList.remove('active');
+  closeModalOverlay('addIForexModal');
 }
 
 async function autoExtractIForexAddModal() {
@@ -24260,12 +24311,12 @@ async function editIForexAccount(id) {
     } else {
       setDayScheduleInputs('eifx', DEFAULT_DAY_SCHEDULE);
     }
-    document.getElementById('editIForexModal').classList.add('active');
+    openModalOverlay('editIForexModal');
   } catch(e) { alert('Failed to load iFOREX config: ' + e); }
 }
 
 function closeEditIForexModal() {
-  document.getElementById('editIForexModal').classList.remove('active');
+  closeModalOverlay('editIForexModal');
 }
 
 async function saveIForexEdit() {
@@ -25895,7 +25946,7 @@ function copyApiTesterCurl(btn) {
     <p id="confirmModalMsg" style="font-size:1rem;margin-bottom:20px;"></p>
     <div class="btn-group" style="justify-content:center;gap:12px;">
       <button class="btn btn-danger" id="confirmModalYes" style="min-width:80px;">Delete</button>
-      <button class="btn" id="confirmModalNo" style="min-width:80px;background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="document.getElementById('confirmModal').classList.remove('active')">Cancel</button>
+      <button class="btn" id="confirmModalNo" style="min-width:80px;background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="closeModalOverlay('confirmModal')">Cancel</button>
     </div>
   </div>
 </div>

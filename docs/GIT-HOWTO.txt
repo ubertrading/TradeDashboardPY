@@ -1,0 +1,137 @@
+STANDARD WORKFLOW FOR ANY CHANGES
+git status                          # see what changed
+git diff --stat                     # quick sanity check of changes
+git add <file1> <file2>             # stage specific files (or git add . for everything)
+git commit -m "your message here"   # commit with a description
+git push origin master              # push to remote
+
+---
+if to remove last commit
+git reset --soft HEAD~1   (removes the commit, but keeps all your modified files in your staging area)
+or git reset --hard HEAD~1 (Discard Your Changes Permanently This completely deletes the last commit and permanently wipes out all code changes made in that commit)
+git reset
+git push --force
+
+-------------------------------
+1. Saving Changes (Committing)
+Whenever you finish a logical block of work, you save a snapshot to your repository with a description of what you changed:
+
+Open your terminal in this directory.
+Stage all the files you modified:
+bash
+git add .
+Commit the changes with a clear description:
+bash
+git commit -m "Fixed disbalance alert triggering early"
+2. Viewing History
+If you want to see a list of your past changes to find something to revert:
+
+bash
+git log --oneline
+This will output a list of your commits, looking something like this: e4b3a21 Fixed disbalance alert triggering early a1b2c3d Added subgroup logic to hedge alerts f9e8d7c Initial commit of codebase
+
+3. Reverting Changes
+Once you've found the change you want to undo in your git log (e.g., e4b3a21), you have a few options depending on what you want to achieve:
+
+To undo uncommitted changes: (If you broke something but haven't run git commit yet)
+bash
+git restore trade_dashboard.py
+To cleanly revert a specific past change: (This is the safest method. It creates a new commit that perfectly un-does the changes made in the target commit without destroying your history).
+bash
+git revert e4b3a21
+To completely wipe out the very last commit: (Warning: Destructive, removes history)
+bash
+git reset --hard HEAD~1
+
+------------------------------
+what do i do to initialize it?
+
+Initialising the Git repository (you’ve already run git init)
+Stage all files – this puts every new/changed file into the next commit.
+
+bash
+git add .
+Create the first commit – give it a clear message so you can identify this baseline later.
+
+bash
+git commit -m "Initial commit of TradeDashboard codebase"
+Verify the commit – you should now see one commit in the log.
+
+bash
+git log --oneline
+You’ll see something like:
+
+a1b2c3d Initial commit of TradeDashboard codebase
+(Optional – add a remote repository if you want to push to GitHub, GitLab, etc.)
+
+bash
+git remote add origin <your‑repo‑url>
+git push -u origin master   # first push
+That’s it! Once the initial commit is made, every subsequent change can be tracked by repeating the add → commit steps with a descriptive message, and you can always revert or view history with git log, git revert <commit>, or git checkout <commit>.
+
+-----------------------------------
+How do i have a local repo but then replicate it all to remote repo like github.com for example?
+
+Below is a quick‑step checklist you can run from a PowerShell window while you stay in the repository folder (d:\Documents\dev\TradeDashboard\TradeDashboardPY).
+
+1️⃣ Create a remote repository (GitHub)
+Log in to https://github.com.
+
+Click New → Create a new repository.
+
+Give it a name, e.g. TradeDashboard (or any name you like).
+Leave “Initialize this repository with a README” unchecked – you already have a local repo.
+Click Create repository.
+After creation GitHub shows you a URL, e.g.:
+
+https://github.com/your‑username/TradeDashboard.git
+Copy that URL – you’ll need it in the next step.
+
+2️⃣ Add the remote to your local repo
+powershell
+# Inside the repo folder (you should already be there)
+cd D:\Documents\dev\TradeDashboard\TradeDashboardPY
+# Add the remote; replace the URL with the one you copied
+git remote add origin https://github.com/your-username/TradeDashboard.git
+You can verify the remote with:
+
+powershell
+git remote -v
+You should see something like:
+
+origin  https://github.com/your-username/TradeDashboard.git (fetch)
+origin  https://github.com/your-username/TradeDashboard.git (push)
+3️⃣ Push your local history to GitHub
+Because this is the first push, tell Git to set the upstream branch master (or main if you prefer that name).
+
+powershell
+git push -u origin master
+What happens:
+-u records origin/master as the default upstream for the local master branch, so later you can just run git push or git pull without extra arguments.
+All your commits (including the “Initial commit” you just renamed) are uploaded.
+Authentication note
+On Windows, Git will prompt you for credentials. For GitHub it’s recommended to use a Personal Access Token (PAT) instead of your password:
+
+In GitHub, go to Settings → Developer settings → Personal access tokens → Generate new token.
+Give it the repo scope, copy the token, and paste it when Git asks for a password.
+Git will cache the token (or you can use the Windows Credential Manager).
+4️⃣ Verify on GitHub
+Refresh the repository page on GitHub. You should see all files, the .gitignore, and the commit history (e.g., “Initial commit”).
+
+5️⃣ Typical workflow after the first push
+Action	Command	What it does
+Make changes	edit files in your editor	–
+Stage them	git add .	queues all modified files
+Commit	git commit -m "Your description"	records a snapshot
+Push to remote	git push	sends the new commit(s) to GitHub
+Pull updates (if you work on another machine)	git pull	fetches & merges remote changes
+TL;DR single‑line version
+powershell
+# 1. create repo on GitHub → copy its HTTPS URL
+# 2. add remote and push
+cd D:\Documents\dev\TradeDashboard\TradeDashboardPY
+git remote add origin https://github.com/your-username/TradeDashboard.git
+git push -u origin master
+That’s all you need to mirror your local repository to GitHub and keep it synchronized. 🎉
+
+------------------------------------
