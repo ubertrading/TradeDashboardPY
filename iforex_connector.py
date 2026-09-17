@@ -973,8 +973,18 @@ class IForexAccount:
         return False
 
     def _sync_account_balance_http(self):
-        """Query latest balance from /webpl4/api/accountingactions/GetData."""
+        """Query latest balance from /webpl4/api/accountingactions/GetData.
+
+        NOTE: actions[0][9] is the running balance *after the last accounting entry*
+        (i.e. a historical ledger figure), NOT the live current balance.  It is only
+        used as a last-resort fallback when the browser-scraped summary hasn't
+        populated a balance yet.  A valid browser-scraped balance must never be
+        overwritten by this stale ledger value.
+        """
         if not self.connected and (time.time() - self._last_401_ts) < 15:
+            return
+        # Only update if we don't already have a live browser-scraped balance.
+        if self._account_summary.get("balance", 0.0) > 0:
             return
         try:
             url = f"{self.base_url}/api/accountingactions/GetData"
@@ -1078,7 +1088,14 @@ class IForexAccount:
         info["lots_by_instrument"] = _lbi
         info["total_lots"] = round(tot_lots, 2)
         info["profit"] = round(tot_open_pl, 2)
-        info["equity"] = round(bal + tot_open_pl, 2)
+        # Prefer the browser-scraped equity (accSummaryEquity DOM value) — it is the
+        # authoritative figure shown on the iForex platform.  Fall back to
+        # balance + floating P/L only when no scraped equity is available.
+        scraped_equity = summ.get("equity")
+        if scraped_equity and float(scraped_equity) > 0:
+            info["equity"] = round(float(scraped_equity), 2)
+        else:
+            info["equity"] = round(bal + tot_open_pl, 2)
         info["position_details"] = [
             {
                 "ticket": str(o.get("Ticket") or o.get("ticket")),
