@@ -613,6 +613,9 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                             continue
 
                 order_rate = float(d.get("orderRate", 0.0) or 0.0)
+                raw_pl = float(d.get("plNumeric", 0.0) or 0.0)
+                if "JPY" in sym.upper() and order_rate > 50 and abs(raw_pl) > 100:
+                    raw_pl = round(raw_pl / order_rate, 2)
                 out.append({
                     "Ticket": t,
                     "ticket": t,
@@ -625,7 +628,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                     "Amount": amt,
                     "OpenPrice": order_rate,
                     "open_price": order_rate,
-                    "Profit": float(d.get("plNumeric", 0.0) or 0.0),
+                    "Profit": raw_pl,
                     "OpenTime": open_time_str,
                     "open_time": open_time_str,
                     "open_epoch": open_epoch,

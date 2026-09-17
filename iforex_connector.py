@@ -111,6 +111,29 @@ def notional_to_lots(symbol: str, amount: float) -> float:
     return round(amount, 4)
 
 
+def parse_symbol_currencies(symbol: str) -> Tuple[str, str]:
+    """
+    Returns (base_currency, quote_currency) for a trading symbol.
+    e.g. 'USD/JPY' -> ('USD', 'JPY')
+         'EURUSD'  -> ('EUR', 'USD')
+         'GOLD'    -> ('XAU', 'USD')
+         'OIL'     -> ('OIL', 'USD')
+    """
+    sym = str(symbol or "").strip().upper()
+    if "/" in sym:
+        parts = sym.split("/")
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip()
+    clean = sym.replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+    if any(k in clean for k in ("GOLD", "XAU")):
+        return "XAU", "USD"
+    if any(k in clean for k in ("OIL", "WTI", "BRENT")):
+        return "OIL", "USD"
+    if len(clean) >= 6:
+        return clean[:3], clean[3:6]
+    return clean, "USD"
+
+
 # ─── Account Class ──────────────────────────────────────────────────────────
 class IForexAccount:
     def __init__(self, config: Dict[str, Any], dashboard_data: Dict[str, Any]):
@@ -176,6 +199,15 @@ class IForexAccount:
                             t = o.get("Ticket") or o.get("ticket")
                             if t:
                                 self._seen_ticket_ids.add(str(t))
+                            # Heal legacy stored unadjusted JPY profit (e.g. -1500 JPY stored as USD)
+                            sym = o.get("Symbol") or o.get("symbol") or ""
+                            _, quote_c = parse_symbol_currencies(sym)
+                            op = float(o.get("OpenPrice") or o.get("open_price") or 0.0)
+                            p = float(o.get("Profit") or o.get("profit") or 0.0)
+                            if quote_c == "JPY" and op > 50 and abs(p) > 100:
+                                p = round(p / op, 2)
+                                o["Profit"] = p
+                                o["profit"] = p
                     logger.info("[%s] Restored %d persisted open position(s) from %s",
                                 self.account_id, len(data), self.positions_file)
             except Exception as ex:
@@ -379,6 +411,123 @@ class IForexAccount:
         if allow_live:
             return self.fetch_quote_live(symbol)
         return None
+
+    def get_quote_to_usd_rate(self, quote_currency: str, current_pair_symbol: str = "", current_price: float = 0.0) -> float:
+        """
+        Get conversion multiplier from quote_currency to USD such that:
+        pnl_usd = pnl_quote * rate.
+        """
+        quote = str(quote_currency or "USD").upper().strip()
+        if quote in ("USD", ""):
+            return 1.0
+
+        clean_pair = str(current_pair_symbol or "").upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+
+        # 1. Fast path: if the current pair itself is USD/{quote} (e.g. USDJPY, USDCHF, USDCAD)
+        # current_price is in units of quote currency per 1 USD (e.g. 155.98 JPY / 1 USD).
+        # Therefore, 1 quote unit = 1.0 / current_price USD.
+        if current_price > 0:
+            if clean_pair == f"USD{quote}":
+                return 1.0 / current_price
+            elif clean_pair == f"{quote}USD":
+                return current_price
+
+        # 2. Try quote from cached rates for {quote}USD (e.g. EURUSD, GBPUSD, AUDUSD, NZDUSD)
+        q = self.get_quote(f"{quote}USD", allow_live=False) or self.get_quote(f"{quote}/USD", allow_live=False)
+        if q and q[0] > 0:
+            return float(q[0])
+
+        # 3. Try quote from cached rates for USD{quote} (e.g. USDJPY, USDCHF, USDCAD)
+        q = self.get_quote(f"USD{quote}", allow_live=False) or self.get_quote(f"USD/{quote}", allow_live=False)
+        if q and q[1] > 0:
+            return 1.0 / float(q[1])
+
+        # 4. Check self._quotes_cache with relaxed matching
+        with self._lock:
+            for k, v in self._quotes_cache.items():
+                k_clean = k.upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+                if k_clean == f"{quote}USD":
+                    rate = v.get("bid") or v.get("ask")
+                    if rate and rate > 0:
+                        return float(rate)
+                elif k_clean == f"USD{quote}":
+                    rate = v.get("ask") or v.get("bid")
+                    if rate and rate > 0:
+                        return 1.0 / float(rate)
+
+        # 5. Check dashboard's ea_account_info for any connected account that has this pair's quote
+        try:
+            ea_info = self.dd.get("ea_account_info", {})
+            for ainfo in ea_info.values():
+                syms = ainfo.get("symbols", {})
+                for k, v in syms.items():
+                    k_clean = str(k).upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+                    if k_clean == f"{quote}USD":
+                        r = v.get("bid") or v.get("ask")
+                        if r and r > 0:
+                            return float(r)
+                    elif k_clean == f"USD{quote}":
+                        r = v.get("ask") or v.get("bid")
+                        if r and r > 0:
+                            return 1.0 / float(r)
+                acct_sym = str(ainfo.get("symbol") or "").upper().replace("/", "").replace(" ", "").replace("-", "").replace(".", "")
+                if acct_sym == f"{quote}USD":
+                    r = ainfo.get("bid") or ainfo.get("ask")
+                    if r and r > 0:
+                        return float(r)
+                elif acct_sym == f"USD{quote}":
+                    r = ainfo.get("ask") or ainfo.get("bid")
+                    if r and r > 0:
+                        return 1.0 / float(r)
+        except Exception:
+            pass
+
+        # 6. Sanity fallback for standard currencies to prevent catastrophic 150x explosion
+        if quote == "JPY":
+            return 1.0 / 155.0
+        elif quote == "CHF":
+            return 1.0 / 0.81
+        elif quote == "CAD":
+            return 1.0 / 1.35
+        elif quote == "GBP":
+            return 1.30
+        elif quote == "EUR":
+            return 1.08
+        elif quote == "AUD":
+            return 0.65
+        elif quote == "NZD":
+            return 0.60
+
+        return 1.0
+
+    def get_usd_to_acct_rate(self, acct_cur: str) -> float:
+        """Get multiplier from USD to account currency: pnl_acct = pnl_usd * rate."""
+        acct = str(acct_cur or "USD").upper().strip()
+        if acct in ("USD", ""):
+            return 1.0
+        rate_acct_to_usd = self.get_quote_to_usd_rate(acct)
+        if rate_acct_to_usd > 0:
+            return 1.0 / rate_acct_to_usd
+        return 1.0
+
+    def convert_pnl_to_account_currency(self, pnl_quote: float, quote_currency: str,
+                                        pair_symbol: str = "", pair_price: float = 0.0) -> float:
+        """Convert raw PnL from quote currency into the account's denomination currency."""
+        acct_cur = (self.config.get("account_currency") or
+                    getattr(self, "_account_summary", {}).get("account_currency") or "USD").upper().strip()
+        quote = str(quote_currency or "USD").upper().strip()
+
+        if quote == acct_cur:
+            return pnl_quote
+
+        rate_to_usd = self.get_quote_to_usd_rate(quote, current_pair_symbol=pair_symbol, current_price=pair_price)
+        pnl_usd = pnl_quote * rate_to_usd
+
+        if acct_cur == "USD":
+            return pnl_usd
+
+        usd_to_acct = self.get_usd_to_acct_rate(acct_cur)
+        return pnl_usd * usd_to_acct
 
     def get_deal_margin_details(self, symbol_or_id: Any) -> Optional[Dict[str, Any]]:
         """Query margin requirements for an instrument."""
@@ -877,17 +1026,6 @@ class IForexAccount:
         info["open_tickets"] = tickets
         info["positions"] = len(tickets)
         info["pos_details"] = orders
-        info["position_details"] = [
-            {
-                "ticket": str(o.get("Ticket") or o.get("ticket")),
-                "symbol": o.get("Symbol") or o.get("symbol") or "EURUSD",
-                "type": str(o.get("Type") or o.get("direction") or "buy"),
-                "lots": float(o.get("Lots") or o.get("lots") or 0.01),
-                "open_price": float(o.get("OpenPrice") or o.get("open_price") or 0.0),
-                "profit": float(o.get("Profit") or o.get("profit") or 0.0)
-            }
-            for o in orders if o.get("Ticket") or o.get("ticket")
-        ]
 
         # Calculate lots & floating P/L
         _lbi = {}
@@ -909,23 +1047,49 @@ class IForexAccount:
                 _lbi[sym]["sell"] = round(_lbi[sym]["sell"] + lots, 2)
                 tot_lots -= lots
             
-            # Estimate open profit from cached quote
+            # Estimate open profit from cached quote with currency conversion to account currency
             q = self.get_quote(sym, allow_live=False)
+            _, quote_c = parse_symbol_currencies(sym)
+            amt_units = lot_to_notional(sym, lots)
+
             if q and (o.get("OpenPrice") or o.get("open_price")):
                 op = float(o.get("OpenPrice") or o.get("open_price"))
                 cur_p = q[0] if direction in ("buy", "0", "op_buy") else q[1]
-                amt_units = lot_to_notional(sym, lots)
                 if direction in ("buy", "0", "op_buy"):
-                    pnl = (cur_p - op) * amt_units
+                    pnl_quote = (cur_p - op) * amt_units
                 else:
-                    pnl = (op - cur_p) * amt_units
-                o["Profit"] = round(pnl, 2)
-                tot_open_pl += pnl
+                    pnl_quote = (op - cur_p) * amt_units
+                pnl_acct = self.convert_pnl_to_account_currency(
+                    pnl_quote, quote_c, pair_symbol=sym, pair_price=cur_p
+                )
+                o["Profit"] = round(pnl_acct, 2)
+                o["profit"] = round(pnl_acct, 2)
+                tot_open_pl += pnl_acct
+            else:
+                # Quote temporarily not cached; use last known profit (with sanity heal if in JPY)
+                p = float(o.get("Profit") or o.get("profit") or 0.0)
+                op = float(o.get("OpenPrice") or o.get("open_price") or 0.0)
+                if quote_c == "JPY" and op > 50 and abs(p) > 100:
+                    p = round(p / op, 2)
+                    o["Profit"] = p
+                    o["profit"] = p
+                tot_open_pl += p
 
         info["lots_by_instrument"] = _lbi
         info["total_lots"] = round(tot_lots, 2)
         info["profit"] = round(tot_open_pl, 2)
         info["equity"] = round(bal + tot_open_pl, 2)
+        info["position_details"] = [
+            {
+                "ticket": str(o.get("Ticket") or o.get("ticket")),
+                "symbol": o.get("Symbol") or o.get("symbol") or "EURUSD",
+                "type": str(o.get("Type") or o.get("direction") or "buy"),
+                "lots": float(o.get("Lots") or o.get("lots") or 0.01),
+                "open_price": float(o.get("OpenPrice") or o.get("open_price") or 0.0),
+                "profit": float(o.get("Profit") or o.get("profit") or 0.0)
+            }
+            for o in orders if o.get("Ticket") or o.get("ticket")
+        ]
         info.setdefault("leverage", int(self.config.get("leverage", 400)))
 
         # Margin: prefer live value from browser-scraped account summary (accSummaryUsedMargin),
@@ -987,6 +1151,16 @@ class IForexAccount:
                         pair = (sides[self.account_id].get("pair") or sess.get("pair", "")).strip()
                         if pair:
                             active_pairs.add(pair)
+                
+                # Also poll all instruments from currently open positions and their conversion pairs
+                for o in self._get_open_orders():
+                    p = o.get("Symbol") or o.get("symbol")
+                    if p:
+                        p_str = str(p).strip()
+                        active_pairs.add(p_str)
+                        _, qc = parse_symbol_currencies(p_str)
+                        if qc and qc != "USD":
+                            active_pairs.add(f"USD/{qc}")
                 
                 if not active_pairs:
                     active_pairs.add("EUR/USD")
