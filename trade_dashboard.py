@@ -199,18 +199,38 @@ sessions = {}           # session_id -> session dict
 
 # Redirect print() and stderr to logger so all console output and exceptions are captured in dashboard.log
 class _StreamToLogger:
+    _guard = threading.local()          # per-thread re-entrancy flag
+
     def __init__(self, log_fn, prefix=""):
         self.log_fn = log_fn
         self.prefix = prefix
+
     def write(self, msg):
         stripped = msg.rstrip()
-        if stripped:
+        if not stripped:
+            return
+        # Prevent infinite recursion: if we're already inside a logging call
+        # on this thread (e.g. handleError() writing to sys.stderr), fall back
+        # to raw stderr to avoid native stack overflow → silent TerminateProcess
+        if getattr(self._guard, 'active', False):
+            _raw_stderr.write(msg)
+            return
+        self._guard.active = True
+        try:
             if self.prefix:
                 self.log_fn("%s %s", self.prefix, stripped)
             else:
                 self.log_fn("%s", stripped)
+        except Exception:
+            _raw_stderr.write(msg)       # last resort: raw stderr
+        finally:
+            self._guard.active = False
+
     def flush(self):
-        pass
+        try:
+            _raw_stderr.flush()
+        except Exception:
+            pass
 
 sys.stdout = _StreamToLogger(root_logger.info)
 sys.stderr = _StreamToLogger(root_logger.error, prefix="[STDERR]")
@@ -296,6 +316,38 @@ def get_account_label(acct_id: str) -> str:
     if man.get("label") or man.get("group_label"):
         return man.get("label") or man.get("group_label")
     return acct_id
+
+def _get_account_config(acct_id: str) -> dict:
+    """Return the configuration dict for an account key (or label/account_number)."""
+    if not acct_id:
+        return {}
+    if mt_direct_manager:
+        acct = mt_direct_manager.accounts.get(acct_id)
+        if acct and acct.config:
+            return acct.config
+        for aid, a in mt_direct_manager.accounts.items():
+            if getattr(a, 'label', None) == acct_id or str(getattr(a, 'account_number', '')) == str(acct_id) or str(a.config.get('login', '')) == str(acct_id):
+                return a.config
+    if 'iforex_manager' in globals() and iforex_manager:
+        acct = iforex_manager.accounts.get(acct_id)
+        if acct and acct.config:
+            return acct.config
+        for aid, a in iforex_manager.accounts.items():
+            if getattr(a, 'label', None) == acct_id or str(getattr(a, 'account_number', '')) == str(acct_id):
+                return a.config
+    if fix_manager:
+        acct = fix_manager.accounts.get(acct_id)
+        if acct and acct.config:
+            return acct.config
+        for aid, a in fix_manager.accounts.items():
+            if getattr(a, 'label', None) == acct_id or str(getattr(a, 'account_number', '')) == str(acct_id):
+                return a.config
+    if acct_id in manual_accounts:
+        return manual_accounts[acct_id] or {}
+    for aid, man in manual_accounts.items():
+        if man.get("label") == acct_id or str(man.get("account_number", "")) == str(acct_id):
+            return man
+    return {}
 
 def _normalize_day_schedule(raw):
     """Normalize day schedule input to a 7-element list of float counts [MON..SUN].
@@ -11520,6 +11572,58 @@ def api_status():
                         sc[f"curr_bid_{sn}"] = None
                         sc[f"curr_ask_{sn}"] = None
                 sc[f"ea_symbol_{sn}"] = side_pair
+
+        # Compute broker/swap schedule aware side ages for each account in session
+        side_ages = {}
+        fills_list = sc.get("fills", [])
+        close_fills_list = sc.get("close_fills", [])
+        closed_tks = {str(cf.get("ticket")) for cf in close_fills_list if cf.get("ticket") is not None}
+        dismissed_tks = {str(t) for t in sc.get("dismissed_tickets", [])}
+
+        for acc, side_info in sc.get("sides", {}).items():
+            oldest_epoch = None
+            for f in fills_list:
+                if f.get("account") != acc:
+                    continue
+                t = str(f.get("ticket")) if f.get("ticket") is not None else None
+                if t and (t in closed_tks or t in dismissed_tks):
+                    continue
+                ep = f.get("open_epoch") or f.get("ts_epoch")
+                if not ep:
+                    ep = _get_fill_open_epoch(f, acc)
+                if ep and (oldest_epoch is None or ep < oldest_epoch):
+                    oldest_epoch = ep
+
+            cfg = _get_account_config(acc)
+            if oldest_epoch is None:
+                # Fallback: check live positions for this account & symbol
+                side_sym = (side_info.get("pair") or sc.get("pair", "")).strip().upper()
+                ai = _snap_ea_account_info.get(acc, {})
+                live_pos = ai.get("position_details") or ai.get("positions", [])
+                if live_pos and isinstance(live_pos, list):
+                    for pos in live_pos:
+                        if not isinstance(pos, dict):
+                            continue
+                        psym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
+                        if psym == side_sym:
+                            oe = pos.get("open_epoch") or pos.get("ts_epoch")
+                            if not oe:
+                                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime")
+                                if oe_str:
+                                    try:
+                                        from iforex_connector import _parse_iforex_epoch
+                                        oe = _parse_iforex_epoch(oe_str)
+                                    except Exception:
+                                        oe = _parse_broker_timestamp(oe_str)
+                            if oe and (oldest_epoch is None or oe < oldest_epoch):
+                                oldest_epoch = oe
+
+            if oldest_epoch:
+                age = _count_rollover_days(oldest_epoch, day_schedule=cfg)
+                side_ages[acc] = int(age) if isinstance(age, (int, float)) and float(age).is_integer() else round(age, 1)
+
+        sc["side_ages"] = side_ages
+
         if not include_fills:
             sc.pop('fills', None)
             sc.pop('close_fills', None)
@@ -11554,15 +11658,14 @@ def api_status():
                 cfg = acct.config or {}
                 is_cycle_enabled = bool(cfg.get("cycle_reminder_enabled") or cfg.get("cycle_reminder"))
                 entry["cycle_reminder_enabled"] = is_cycle_enabled
-                if not is_cycle_enabled:
-                    entry.pop("oldest_position_age", None)
-                    entry.pop("position_age_by_symbol", None)
+                entry["day_schedule"] = cfg.get("day_schedule")
+                entry["day_schedule_template"] = cfg.get("day_schedule_template")
+                if is_cycle_enabled:
+                    entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
+                    entry["cycle_max_days"] = cfg.get("cycle_max_days")
+                else:
                     entry.pop("cycle_remind_days", None)
                     entry.pop("cycle_max_days", None)
-                    continue
-
-                entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
-                entry["cycle_max_days"] = cfg.get("cycle_max_days")
 
                 oldest_epoch = None
                 sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
@@ -19112,15 +19215,113 @@ function showConfirmModal(msg, onConfirm, confirmLabel) {
   newBtn.onclick = () => { modal.classList.remove('active'); modal.style.display = ''; onConfirm(); };
 }
 
+function _countRolloverDaysJS(openEpoch, nowEpoch, acctInfoOrSchedule) {
+  if (!openEpoch) return null;
+  if (!nowEpoch) nowEpoch = Date.now() / 1000;
+  if (openEpoch >= nowEpoch) return 0;
+
+  let sched = [1, 1, 1, 1, 1, 0, 0];
+  let raw = acctInfoOrSchedule;
+  if (raw && typeof raw === 'object') {
+    if (raw.day_schedule_template && raw.day_schedule_template !== 'custom' && cachedDayScheduleTemplates[raw.day_schedule_template]) {
+      sched = cachedDayScheduleTemplates[raw.day_schedule_template].map(Number);
+    } else if (Array.isArray(raw.day_schedule) && raw.day_schedule.length === 7) {
+      sched = raw.day_schedule.map(Number);
+    } else if (Array.isArray(raw) && raw.length === 7) {
+      sched = raw.map(Number);
+    }
+  } else if (typeof raw === 'string' && cachedDayScheduleTemplates[raw]) {
+    sched = cachedDayScheduleTemplates[raw].map(Number);
+  }
+
+  function getNYParts(sec) {
+    const d = new Date(sec * 1000);
+    const f = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: 'numeric', minute: 'numeric', second: 'numeric',
+      hour12: false
+    });
+    const p = {};
+    for (const part of f.formatToParts(d)) p[part.type] = part.value;
+    return {
+      year: parseInt(p.year, 10),
+      month: parseInt(p.month, 10),
+      day: parseInt(p.day, 10),
+      hour: parseInt(p.hour, 10) === 24 ? 0 : parseInt(p.hour, 10)
+    };
+  }
+
+  const openNY = getNYParts(openEpoch);
+  const nowNY = getNYParts(nowEpoch);
+
+  let cur = new Date(Date.UTC(openNY.year, openNY.month - 1, openNY.day));
+  if (openNY.hour >= 17) {
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+
+  const end = new Date(Date.UTC(nowNY.year, nowNY.month - 1, nowNY.day));
+  if (nowNY.hour < 17) {
+    end.setUTCDate(end.getUTCDate() - 1);
+  }
+
+  let totalDays = 0.0;
+  while (cur <= end) {
+    const utcDay = cur.getUTCDay();
+    const w = (utcDay + 6) % 7; // 0=Mon, ..., 6=Sun
+    totalDays += (sched[w] != null ? sched[w] : 1.0);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+
+  return Math.round(totalDays * 10) / 10;
+}
+
 function _getSessionSideAge(session, sideNum, acc) {
   if (!session) return null;
+
+  // 1. Primary: Use precalculated broker/rollover-aware side_ages from server
+  if (session.side_ages) {
+    if (session.side_ages[acc] != null) return session.side_ages[acc];
+    for (const [k, v] of Object.entries(session.side_ages)) {
+      if (v != null && (k === acc || getAccountLabel(k) === getAccountLabel(acc) || k.includes(acc) || acc.includes(k))) {
+        return v;
+      }
+    }
+  }
+
+  // Look up account info in caches
+  const allDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
+  let acctInfo = null;
+  for (const d of allDicts) {
+    if (d && d[acc]) { acctInfo = d[acc]; break; }
+  }
+  if (!acctInfo) {
+    for (const d of allDicts) {
+      if (!d) continue;
+      for (const [k, v] of Object.entries(d)) {
+        if (v && (v.label === acc || v.account_number === acc || k === acc)) {
+          acctInfo = v;
+          break;
+        }
+      }
+      if (acctInfo) break;
+    }
+  }
+
+  // 2. Secondary: Check live position_age_by_symbol from account status
+  const sideInfo = (session.sides && session.sides[acc]) || {};
+  const sidePair = (sideInfo.pair || session.pair || '').toUpperCase().trim();
+  if (acctInfo && acctInfo.position_age_by_symbol && acctInfo.position_age_by_symbol[sidePair] && acctInfo.position_age_by_symbol[sidePair].age != null) {
+    return acctInfo.position_age_by_symbol[sidePair].age;
+  }
+
+  // 3. Fallback: Find oldest epoch among open fills
   const fills = session.fills || [];
   const closeFills = session.close_fills || [];
   const closedTickets = new Set(closeFills.map(cf => String(cf.ticket)));
   const dismissedTickets = new Set((session.dismissed_tickets || []).map(t => String(t)));
-  const openFills = fills.filter(f => f.account === acc && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
-  
-  // Find oldest epoch among open fills
+  const openFills = fills.filter(f => (f.account === acc || getAccountLabel(f.account) === getAccountLabel(acc)) && !closedTickets.has(String(f.ticket)) && !dismissedTickets.has(String(f.ticket)));
+
   let oldestEpoch = null;
   openFills.forEach(f => {
     const ep = f.open_epoch || f.ts_epoch;
@@ -19129,24 +19330,8 @@ function _getSessionSideAge(session, sideNum, acc) {
     }
   });
 
-  // Fallback to live position_details for this symbol
-  if (oldestEpoch === null) {
-    const allDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
-    let acctInfo = null;
-    for (const d of allDicts) {
-      if (d && d[acc]) { acctInfo = d[acc]; break; }
-    }
-    const sideInfo = (session.sides && session.sides[acc]) || {};
-    const sidePair = (sideInfo.pair || session.pair || '').toUpperCase().trim();
-    if (acctInfo && acctInfo.position_age_by_symbol && acctInfo.position_age_by_symbol[sidePair]) {
-      return acctInfo.position_age_by_symbol[sidePair].age;
-    }
-  }
-
   if (oldestEpoch) {
-    // 86400 seconds per day estimate
-    const days = Math.floor((Date.now() / 1000 - oldestEpoch) / 86400);
-    return Math.max(0, days);
+    return _countRolloverDaysJS(oldestEpoch, null, acctInfo);
   }
   return null;
 }
@@ -19208,8 +19393,26 @@ function renderStrategies(strats, sessions) {
     if (maxSide1Age !== null || maxSide2Age !== null) {
       const s1AgeStr = maxSide1Age !== null ? maxSide1Age + 'd' : '-';
       const s2AgeStr = maxSide2Age !== null ? maxSide2Age + 'd' : '-';
-      const s1Clr = maxSide1Age != null ? (maxSide1Age >= 7 ? 'var(--red)' : (maxSide1Age >= 3 ? 'var(--orange)' : 'var(--text2)')) : 'var(--text2)';
-      const s2Clr = maxSide2Age != null ? (maxSide2Age >= 7 ? 'var(--red)' : (maxSide2Age >= 3 ? 'var(--orange)' : 'var(--text2)')) : 'var(--text2)';
+      // Look up account info to check if cycle reminder with remind/max_days is configured
+      // Only color-code age for accounts that have remind or max_days set, using their actual thresholds
+      const _acctDicts = [fix_accounts_cache, mt_direct_accounts_cache, iforex_accounts_cache, ea_heartbeats_cache, manual_accounts_cache];
+      function _findAcctInfo(accId) {
+        for (const d of _acctDicts) { if (d && d[accId]) return d[accId]; }
+        return null;
+      }
+      function _getAgeColor(age, accId) {
+        if (age == null) return 'var(--text2)';
+        const info = _findAcctInfo(accId);
+        if (!info) return 'var(--text2)';
+        if (!(info.cycle_reminder_enabled || info.cycle_reminder)) return 'var(--text2)';
+        const maxD = info.cycle_max_days;
+        const remD = info.cycle_remind_days;
+        if (maxD != null && maxD > 0 && age >= maxD) return 'var(--red)';
+        if (remD != null && remD > 0 && age >= remD) return 'var(--orange)';
+        return 'var(--text2)';
+      }
+      const s1Clr = _getAgeColor(maxSide1Age, st.account1);
+      const s2Clr = _getAgeColor(maxSide2Age, st.account2);
       const tip = `Side 1 longest age: ${s1AgeStr}\nSide 2 longest age: ${s2AgeStr}`;
       ageDisplay = `<div style="font-size:0.7rem;margin-top:2px;" title="${tip}">Age: <span style="color:${s1Clr};font-weight:600;">${s1AgeStr}</span> / <span style="color:${s2Clr};font-weight:600;">${s2AgeStr}</span></div>`;
     }
@@ -19463,7 +19666,8 @@ function renderInstrumentsTable() {
     cycle_progress: s.cycle_progress, execution_order: s.execution_order,
     max_spread_points: s.max_spread_points, sides: s.sides,
     diff_to_open: s.diff_to_open, diff_to_close: s.diff_to_close,
-    avoid_news: s.avoid_news, max_ticks_per_5s: s.max_ticks_per_5s
+    avoid_news: s.avoid_news, max_ticks_per_5s: s.max_ticks_per_5s,
+    side_ages: s.side_ages
   })));
   if (hashInput === _instrLastHash) return; // No changes — skip rebuild
   _instrLastHash = hashInput;
@@ -23335,6 +23539,7 @@ function showGroupAgeBreakdown(groupName, commaSeparatedIds) {
         }
         if (acctInfo) break;
       }
+    }
     const cReminders = window._latestCycleReminders || {};
     const isCycleEnabled = !!(acctInfo && (acctInfo.cycle_reminder_enabled || acctInfo.cycle_reminder)) ||
                            !!(cReminders[id] || (acctInfo && (cReminders[acctInfo.label] || cReminders[acctInfo.account_number])));
@@ -26786,6 +26991,28 @@ if __name__ == '__main__':
         signal.signal(signal.SIGTERM, _sig_handler)
     except Exception:
         pass
+
+    # Windows console control handler (catches close/logoff/shutdown that SIGINT/SIGTERM miss)
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            _kernel32 = ctypes.windll.kernel32
+
+            def _console_ctrl_handler(event):
+                # CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
+                if event in (2, 5, 6):
+                    app.logger.warning("Windows console event %d received — initiating graceful shutdown...", event)
+                    global _shutdown_requested
+                    _shutdown_requested = True
+                    # Return True to tell Windows we handled it; gives us ~5s before force-kill
+                    return True
+                return False
+
+            _handler_func_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+            _console_handler_ref = _handler_func_type(_console_ctrl_handler)
+            _kernel32.SetConsoleCtrlHandler(_console_handler_ref, True)
+        except Exception as e:
+            app.logger.warning("Could not register Windows console control handler: %s", e)
 
     while not _shutdown_requested:
         app.logger.info("Starting Trade Dashboard server on %s:%d", TRADE_HOST, TRADE_PORT)
