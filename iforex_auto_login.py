@@ -602,15 +602,27 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str
                 open_time_str = raw_time
                 open_epoch = None
                 if raw_time:
-                    for fmt in ("%d/%m/%y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%y %H:%M:%S"):
+                    try:
+                        from iforex_connector import _parse_iforex_epoch
+                        open_epoch = _parse_iforex_epoch(raw_time)
+                    except Exception:
+                        open_epoch = None
+                    if open_epoch is None:
+                        for fmt in ("%d/%m/%y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%y %H:%M:%S", "%d/%m/%y %H:%M", "%d/%m/%Y %H:%M"):
+                            try:
+                                from datetime import datetime, timezone
+                                dt = datetime.strptime(raw_time, fmt)
+                                open_epoch = dt.replace(tzinfo=timezone.utc).timestamp()
+                                open_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                                break
+                            except Exception:
+                                continue
+                    if open_epoch is not None and open_time_str == raw_time:
                         try:
                             from datetime import datetime, timezone
-                            dt = datetime.strptime(raw_time, fmt)
-                            open_epoch = dt.replace(tzinfo=timezone.utc).timestamp()
-                            open_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                            break
+                            open_time_str = datetime.fromtimestamp(open_epoch, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                         except Exception:
-                            continue
+                            pass
 
                 order_rate = float(d.get("orderRate", 0.0) or 0.0)
                 raw_pl = float(d.get("plNumeric", 0.0) or 0.0)

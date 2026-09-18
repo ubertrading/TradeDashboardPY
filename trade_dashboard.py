@@ -488,7 +488,10 @@ def _parse_broker_timestamp(ts_str, is_direct=True):
     s = re.sub(r'\.\d+(?=\s*$|\s*[a-zA-Z]+$)', '', s)
     _FORMATS = ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p",
                 "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M",
-                "%Y/%m/%d %H:%M:%S")
+                "%Y/%m/%d %H:%M:%S",
+                "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+                "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M",
+                "%d-%m-%Y %H:%M:%S")
     for fmt in _FORMATS:
         try:
             dt = datetime.strptime(s, fmt)
@@ -515,16 +518,16 @@ def _check_cycle_reminders():
     new_reminders = {}
 
     # Collect accounts from MT Direct, FIX, and iFOREX managers
-    all_accounts = {}  # acct_id -> config dict
+    all_accounts = {}  # acct_id -> (acct, config dict)
     if mt_direct_manager:
         for acct_id, acct in mt_direct_manager.accounts.items():
-            all_accounts[acct_id] = acct.config
+            all_accounts[acct_id] = (acct, acct.config)
     if fix_manager:
         for acct_id, acct in fix_manager.accounts.items():
-            all_accounts[acct_id] = acct.config
+            all_accounts[acct_id] = (acct, acct.config)
     if 'iforex_manager' in globals() and iforex_manager:
         for acct_id, acct in iforex_manager.accounts.items():
-            all_accounts[acct_id] = acct.config
+            all_accounts[acct_id] = (acct, acct.config)
 
     now_dt = datetime.now(NY_TZ)
     now_ts = now_dt.timestamp()
@@ -534,22 +537,39 @@ def _check_cycle_reminders():
     # Next rollover timestamp (tonight's 17:00 ET, or tomorrow's if already past)
     next_rollover_ts = _get_next_rollover_ts(now_dt)
 
-    for acct_id, cfg in all_accounts.items():
-        if not cfg.get("cycle_reminder_enabled"):
+    for acct_id, (acct, cfg) in all_accounts.items():
+        if not (cfg.get("cycle_reminder_enabled") or cfg.get("cycle_reminder")):
             continue
         remind_days, max_days = _get_cycle_reminder_thresholds(cfg)
         if remind_days is None or max_days is None:
             continue
-        # Get positions from ea_account_info
+        # Get positions from ea_account_info with alias fallbacks
         # MT Direct stores position_details (list of dicts), EA poll stores positions (list of dicts)
         acct_info = ea_account_info.get(acct_id, {})
+        if not acct_info:
+            for k in (getattr(acct, 'account_number', None), getattr(acct, 'label', None)):
+                if k and str(k) in ea_account_info:
+                    acct_info = ea_account_info[str(k)]
+                    break
         positions = acct_info.get("position_details") or acct_info.get("positions", [])
+        if not positions and hasattr(acct, '_open_orders') and acct._open_orders:
+            positions = list(acct._open_orders)
         if not positions or not isinstance(positions, list):
             continue
         # Find oldest position open time
         oldest_epoch = None
         for pos in positions:
+            if not isinstance(pos, dict):
+                continue
             oe = pos.get("open_epoch") or pos.get("ts_epoch")
+            if not oe:
+                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime")
+                if oe_str:
+                    try:
+                        from iforex_connector import _parse_iforex_epoch
+                        oe = _parse_iforex_epoch(oe_str)
+                    except Exception:
+                        oe = _parse_broker_timestamp(oe_str)
             if oe and (oldest_epoch is None or oe < oldest_epoch):
                 oldest_epoch = oe
         if oldest_epoch is None:
@@ -610,6 +630,10 @@ def _check_cycle_reminders():
             "wont_survive_weekend": wont_survive_weekend,
             "proj_monday_days": proj_monday_days
         }
+        if getattr(acct, 'label', None) and acct.label != acct_id:
+            new_reminders[acct.label] = new_reminders[acct_id]
+        if getattr(acct, 'account_number', None) and str(acct.account_number) != acct_id:
+            new_reminders[str(acct.account_number)] = new_reminders[acct_id]
 
         # ── Auto-Cycle Trigger ──────────────────────────────────────
         if is_critical and cfg.get("auto_cycle_enabled"):
@@ -11527,20 +11551,44 @@ def api_status():
             for acct_id, entry in accts.items():
                 entry["swapfree"] = _is_account_swapfree(acct_id, snap_manual=_snap_manual_accounts, snap_ea_info=_snap_ea_account_info)
                 acct = manager.accounts.get(acct_id)
-                if not acct or not hasattr(acct, 'config'):
-                    continue
                 cfg = acct.config or {}
+                is_cycle_enabled = bool(cfg.get("cycle_reminder_enabled") or cfg.get("cycle_reminder"))
+                entry["cycle_reminder_enabled"] = is_cycle_enabled
+                if not is_cycle_enabled:
+                    entry.pop("oldest_position_age", None)
+                    entry.pop("position_age_by_symbol", None)
+                    entry.pop("cycle_remind_days", None)
+                    entry.pop("cycle_max_days", None)
+                    continue
+
+                entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
+                entry["cycle_max_days"] = cfg.get("cycle_max_days")
 
                 oldest_epoch = None
                 sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
                 acct_info = _snap_ea_account_info.get(acct_id, {})
+                if not acct_info:
+                    for k in (getattr(acct, 'account_number', None), getattr(acct, 'label', None)):
+                        if k and str(k) in _snap_ea_account_info:
+                            acct_info = _snap_ea_account_info[str(k)]
+                            break
                 positions = acct_info.get("position_details") or acct_info.get("positions", [])
+                if not positions and hasattr(acct, '_open_orders') and acct._open_orders:
+                    positions = list(acct._open_orders)
                 open_tickets = set(acct_info.get("open_tickets", []))
                 if isinstance(positions, list):
                     for pos in positions:
                         if not isinstance(pos, dict):
                             continue
                         oe = pos.get("open_epoch")
+                        if not oe:
+                            oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime") or pos.get("ts_epoch")
+                            if oe_str:
+                                try:
+                                    from iforex_connector import _parse_iforex_epoch
+                                    oe = _parse_iforex_epoch(oe_str)
+                                except Exception:
+                                    oe = _parse_broker_timestamp(oe_str)
                         sym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
                         if oe:
                             if oldest_epoch is None or oe < oldest_epoch:
@@ -11556,11 +11604,13 @@ def api_status():
                     for sid, sess in list(_snap_sessions.items()):
                         if sess.get("status") not in ("active", "paused", "partial_close"):
                             continue
-                        if acct_id not in sess.get("sides", {}):
+                        sess_sides = sess.get("sides", {})
+                        if acct_id not in sess_sides and getattr(acct, 'label', None) not in sess_sides and str(getattr(acct, 'account_number', '')) not in sess_sides:
                             continue
-                        sess_sym = (sess.get("sides", {}).get(acct_id, {}).get("pair") or sess.get("pair", "")).strip().upper()
+                        match_key = acct_id if acct_id in sess_sides else (acct.label if getattr(acct, 'label', None) in sess_sides else str(acct.account_number))
+                        sess_sym = (sess_sides.get(match_key, {}).get("pair") or sess.get("pair", "")).strip().upper()
                         for f in sess.get("fills", []):
-                            if f.get("account") != acct_id:
+                            if f.get("account") not in (acct_id, getattr(acct, 'label', None), str(getattr(acct, 'account_number', ''))):
                                 continue
                             ft = f.get("ticket")
                             if ft and ft not in open_tickets:
@@ -11578,7 +11628,7 @@ def api_status():
                                             sym_epochs[sess_sym]["oldest_epoch"] = fe
                 if oldest_epoch:
                     entry["oldest_position_age"] = _count_rollover_days(oldest_epoch, day_schedule=cfg)
-                else:
+                elif entry.get("oldest_position_age") is None:
                     entry.pop("oldest_position_age", None)
 
                 if sym_epochs:
@@ -11589,15 +11639,9 @@ def api_status():
                             "count": s_data["count"]
                         }
                     entry["position_age_by_symbol"] = age_by_sym
-                else:
+                elif entry.get("position_age_by_symbol") is None:
                     entry.pop("position_age_by_symbol", None)
 
-                if cfg.get("cycle_reminder_enabled"):
-                    entry["cycle_remind_days"] = cfg.get("cycle_reminder_days")
-                    entry["cycle_max_days"] = cfg.get("cycle_max_days")
-                else:
-                    entry.pop("cycle_remind_days", None)
-                    entry.pop("cycle_max_days", None)
         except Exception as e:
             print(f"[CYCLE-AGE] Error enriching age for accounts: {e}")
 
@@ -12809,10 +12853,15 @@ def update_iforex_account(account_id):
         data = request.get_json(force=True)
         for key in ['label', 'group_label', 'account_number', 'username', 'password', 'cookie', 'security_token',
                      'base_url', 'leverage', 'swapfree', 'stop_out_level',
-                     'cycle_reminder', 'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
+                     'cycle_reminder', 'cycle_reminder_enabled', 'cycle_reminder_days', 'cycle_max_days', 'auto_cycle_enabled',
                      'day_schedule_template', 'alert_email', 'alert_telegram', 'account_currency']:
             if key in data:
                 acct.config[key] = data[key]
+        # Keep cycle_reminder and cycle_reminder_enabled in sync
+        if 'cycle_reminder' in data:
+            acct.config['cycle_reminder_enabled'] = bool(data['cycle_reminder'])
+        if 'cycle_reminder_enabled' in data:
+            acct.config['cycle_reminder'] = bool(data['cycle_reminder_enabled'])
         if 'day_schedule' in data:
             acct.config['day_schedule'] = _normalize_day_schedule(data['day_schedule'])
         if "label" in data:
@@ -22052,21 +22101,25 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     return `<td style="${style}"><a href="#" onclick="showAccountLotsBreakdown('${id}');return false;" style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;" title="Click to see per-instrument breakdown">${lotsVal}</a></td>`;
   }
   function _ageCell(acctInfo, id) {
-    // Try direct account info first (MT Direct embeds age in get_status)
+    // Age should ONLY show on accounts that have Cycle Reminder checked
+    const isCycleEnabled = !!(acctInfo && (acctInfo.cycle_reminder_enabled || acctInfo.cycle_reminder)) ||
+                           !!(cycleReminders[id] || (acctInfo && (cycleReminders[acctInfo.label] || cycleReminders[acctInfo.account_number])));
+    if (!isCycleEnabled) {
+      return '<td></td>';
+    }
+
+    // Try direct account info first (MT Direct / iFOREX embeds age in get_status)
     let d = acctInfo && acctInfo.oldest_position_age;
     let maxD = acctInfo && acctInfo.cycle_max_days;
     let remD = acctInfo && acctInfo.cycle_remind_days;
-    // Fall back to cycle_reminders data
-    if (d == null && cycleReminders[id]) {
-      d = cycleReminders[id].days_held;
-      maxD = cycleReminders[id].max_days;
-      remD = cycleReminders[id].remind_days;
+    // Fall back to cycle_reminders data (with alias lookups)
+    const rData = cycleReminders[id] || (acctInfo && (cycleReminders[acctInfo.label] || cycleReminders[acctInfo.account_number]));
+    if (d == null && rData) {
+      d = rData.days_held;
+      maxD = rData.max_days;
+      remD = rData.remind_days;
     }
     if (d == null) return '<td></td>';
-    // Age should only show if Remind or Max Days is populated
-    if ((remD == null || remD === 0 || remD === '') && (maxD == null || maxD === 0 || maxD === '')) {
-      return '<td></td>';
-    }
     let color = '';
     if (maxD != null && maxD > 0 && d >= maxD) color = 'var(--red)';
     else if (remD != null && remD > 0 && d >= remD) color = 'var(--orange)';
@@ -22823,33 +22876,33 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
       // Î” Swap
       const sd = swapDelta[m.id];
       if (sd != null) { sumSwapDelta += sd; hasSwapDelta = true; }
-      // Age — from direct info or cycle_reminders
-      let age = info.oldest_position_age;
-      let maxD = info.cycle_max_days;
-      let remD = info.cycle_remind_days;
-      if (age == null && cycleReminders[m.id]) {
-        age = cycleReminders[m.id].days_held;
-        maxD = cycleReminders[m.id].max_days;
-        remD = cycleReminders[m.id].remind_days;
-      }
-      if (age != null && !((remD == null || remD === 0 || remD === '') && (maxD == null || maxD === 0 || maxD === ''))) {
-        let numAge = Number(age);
-        if (!isNaN(numAge)) {
-          if (maxAge === null || numAge > maxAge) maxAge = numAge;
+      // Age — only for accounts with Cycle Reminder enabled
+      const rData = cycleReminders[m.id] || (info && (cycleReminders[info.label] || cycleReminders[info.account_number]));
+      const isCycleEnabled = !!(info && (info.cycle_reminder_enabled || info.cycle_reminder)) || !!rData;
+      if (isCycleEnabled) {
+        let age = info.oldest_position_age;
+        if (age == null && rData) {
+          age = rData.days_held;
         }
-      }
-      // Aggregate symbol breakdown for group
-      const mSymAges = info.position_age_by_symbol || {};
-      Object.entries(mSymAges).forEach(([sym, sData]) => {
-        if (!groupAgeBySymbol[sym]) {
-          groupAgeBySymbol[sym] = { age: sData.age, count: sData.count || 0 };
-        } else {
-          groupAgeBySymbol[sym].count += (sData.count || 0);
-          if (sData.age > groupAgeBySymbol[sym].age) {
-            groupAgeBySymbol[sym].age = sData.age;
+        if (age != null) {
+          let numAge = Number(age);
+          if (!isNaN(numAge)) {
+            if (maxAge === null || numAge > maxAge) maxAge = numAge;
           }
         }
-      });
+        // Aggregate symbol breakdown for group (only cycle-enabled members)
+        const mSymAges = info.position_age_by_symbol || {};
+        Object.entries(mSymAges).forEach(([sym, sData]) => {
+          if (!groupAgeBySymbol[sym]) {
+            groupAgeBySymbol[sym] = { age: sData.age, count: sData.count || 0 };
+          } else {
+            groupAgeBySymbol[sym].count += (sData.count || 0);
+            if (sData.age > groupAgeBySymbol[sym].age) {
+              groupAgeBySymbol[sym].age = sData.age;
+            }
+          }
+        });
+      }
       // Pips to Margin Call — track minimum (most dangerous) in group
       const mPtmc = info.pips_to_mc != null ? parseFloat(info.pips_to_mc) : null;
       if (mPtmc !== null) {
@@ -22902,16 +22955,20 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     let ageStyle = 'font-size:0.82rem;';
     if (maxAge !== null) {
       ageStr = String(maxAge);
-      // Check if any member is critical/warning based on their OWN thresholds
+      // Check if any member is critical/warning based on their OWN thresholds (only cycle-enabled members)
       let isRed = false, isOrange = false;
       for (const m of members) {
-        let d = m.info.oldest_position_age;
-        let md = m.info.cycle_max_days;
-        let rd = m.info.cycle_remind_days;
-        if (d == null && cycleReminders[m.id]) {
-          d = cycleReminders[m.id].days_held;
-          md = md != null ? md : cycleReminders[m.id].max_days;
-          rd = rd != null ? rd : cycleReminders[m.id].remind_days;
+        const mInfo = m.info || {};
+        const mRData = cycleReminders[m.id] || (mInfo && (cycleReminders[mInfo.label] || cycleReminders[mInfo.account_number]));
+        const mCycleEnabled = !!(mInfo && (mInfo.cycle_reminder_enabled || mInfo.cycle_reminder)) || !!mRData;
+        if (!mCycleEnabled) continue;
+        let d = mInfo.oldest_position_age;
+        let md = mInfo.cycle_max_days;
+        let rd = mInfo.cycle_remind_days;
+        if (d == null && mRData) {
+          d = mRData.days_held;
+          md = md != null ? md : mRData.max_days;
+          rd = rd != null ? rd : mRData.remind_days;
         }
         if (d != null) {
           const numD = Number(d);
@@ -23231,6 +23288,18 @@ function showAccountAgeBreakdown(accountId) {
   for (const d of allDicts) {
     if (d && d[accountId]) { acctInfo = d[accountId]; break; }
   }
+  if (!acctInfo) {
+    for (const d of allDicts) {
+      if (!d) continue;
+      for (const [k, v] of Object.entries(d)) {
+        if (v && (v.label === accountId || v.account_number === accountId || k === accountId)) {
+          acctInfo = v;
+          break;
+        }
+      }
+      if (acctInfo) break;
+    }
+  }
   const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
   const entries = Object.entries(bySym).map(([sym, data]) => ({
     symbol: sym,
@@ -23255,6 +23324,21 @@ function showGroupAgeBreakdown(groupName, commaSeparatedIds) {
     for (const d of allDicts) {
       if (d && d[id]) { acctInfo = d[id]; break; }
     }
+    if (!acctInfo) {
+      for (const d of allDicts) {
+        if (!d) continue;
+        for (const [k, v] of Object.entries(d)) {
+          if (v && (v.label === id || v.account_number === id || k === id)) {
+            acctInfo = v;
+            break;
+          }
+        }
+        if (acctInfo) break;
+      }
+    const cReminders = window._latestCycleReminders || {};
+    const isCycleEnabled = !!(acctInfo && (acctInfo.cycle_reminder_enabled || acctInfo.cycle_reminder)) ||
+                           !!(cReminders[id] || (acctInfo && (cReminders[acctInfo.label] || cReminders[acctInfo.account_number])));
+    if (!isCycleEnabled) return;
     const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
     Object.entries(bySym).forEach(([sym, data]) => {
       if (!groupSymMap[sym]) {
@@ -24520,6 +24604,7 @@ async function addIForexAccount() {
     leverage: parseInt(document.getElementById('ifxLeverage').value) || 400,
     swapfree: document.getElementById('ifxSwapFree') ? document.getElementById('ifxSwapFree').checked : false,
     cycle_reminder: document.getElementById('ifxCycleReminder') ? document.getElementById('ifxCycleReminder').checked : false,
+    cycle_reminder_enabled: document.getElementById('ifxCycleReminder') ? document.getElementById('ifxCycleReminder').checked : false,
     cycle_reminder_days: document.getElementById('ifxCycleRemindDays') && document.getElementById('ifxCycleRemindDays').value.trim() !== '' ? parseInt(document.getElementById('ifxCycleRemindDays').value) : null,
     cycle_max_days: document.getElementById('ifxCycleMaxDays') && document.getElementById('ifxCycleMaxDays').value.trim() !== '' ? parseInt(document.getElementById('ifxCycleMaxDays').value) : null,
     auto_cycle_enabled: document.getElementById('ifxAutoCycle') ? document.getElementById('ifxAutoCycle').checked : false,
@@ -24571,7 +24656,7 @@ async function editIForexAccount(id) {
     if (document.getElementById('eifxSwapFree')) {
       document.getElementById('eifxSwapFree').checked = !!cfg.swapfree;
     }
-    if (document.getElementById('eifxCycleReminder')) document.getElementById('eifxCycleReminder').checked = !!cfg.cycle_reminder;
+    if (document.getElementById('eifxCycleReminder')) document.getElementById('eifxCycleReminder').checked = !!(cfg.cycle_reminder_enabled || cfg.cycle_reminder);
     if (document.getElementById('eifxCycleRemindDays')) document.getElementById('eifxCycleRemindDays').value = cfg.cycle_reminder_days != null ? cfg.cycle_reminder_days : '';
     if (document.getElementById('eifxCycleMaxDays')) document.getElementById('eifxCycleMaxDays').value = cfg.cycle_max_days != null ? cfg.cycle_max_days : '';
     if (document.getElementById('eifxAutoCycle')) document.getElementById('eifxAutoCycle').checked = !!cfg.auto_cycle_enabled;
@@ -24611,6 +24696,7 @@ async function saveIForexEdit() {
     base_url: document.getElementById('eifxBaseUrl').value.trim() || 'https://trader.iforex.com/webpl4',
     swapfree: document.getElementById('eifxSwapFree') ? document.getElementById('eifxSwapFree').checked : false,
     cycle_reminder: document.getElementById('eifxCycleReminder') ? document.getElementById('eifxCycleReminder').checked : false,
+    cycle_reminder_enabled: document.getElementById('eifxCycleReminder') ? document.getElementById('eifxCycleReminder').checked : false,
     cycle_reminder_days: document.getElementById('eifxCycleRemindDays') && document.getElementById('eifxCycleRemindDays').value.trim() !== '' ? parseInt(document.getElementById('eifxCycleRemindDays').value) : null,
     cycle_max_days: document.getElementById('eifxCycleMaxDays') && document.getElementById('eifxCycleMaxDays').value.trim() !== '' ? parseInt(document.getElementById('eifxCycleMaxDays').value) : null,
     auto_cycle_enabled: document.getElementById('eifxAutoCycle') ? document.getElementById('eifxAutoCycle').checked : false,

@@ -57,6 +57,63 @@ REVERSE_INSTRUMENT_MAP = {
 }
 
 
+def _parse_iforex_epoch(val: Any) -> Optional[float]:
+    """Robustly parse an epoch or timestamp string from iFOREX into a UTC Unix timestamp."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        # Handle milliseconds timestamp (> year 1973 in ms)
+        if val > 1e11:
+            return float(val) / 1000.0
+        return float(val)
+    s = str(val).strip()
+    if not s:
+        return None
+    # Purely numeric string
+    try:
+        f_val = float(s)
+        if f_val > 1e11:
+            return f_val / 1000.0
+        return f_val
+    except ValueError:
+        pass
+    # MS AJAX /Date(1234567890000)/ format
+    if "/Date(" in s:
+        import re
+        m = re.search(r'/Date\((\d+)', s)
+        if m:
+            return float(m.group(1)) / 1000.0
+    # ISO 8601 strings
+    cleaned = s.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is not None:
+            return dt.timestamp()
+        return dt.replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        pass
+    import re
+    s_clean = re.sub(r'\.\d+(?=\s*$|\s*[a-zA-Z]+$)', '', s)
+    formats = (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M",
+        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
+        "%m/%d/%y %H:%M:%S", "%m/%d/%y %H:%M",
+        "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M",
+        "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M",
+        "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p",
+        "%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M %p",
+    )
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(s_clean, fmt)
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            continue
+    return None
+
+
 # ─── Notional Quantity & Lot Conversion Helpers ──────────────────────────────
 FOREX_CURRENCIES = {
     "USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF",
@@ -913,6 +970,10 @@ class IForexAccount:
                 open_price = float(o.get("OpenPrice") or o.get("open_price") or 0.0)
                 open_time = str(o.get("OpenTime") or o.get("open_time") or "")
                 open_epoch = o.get("open_epoch")
+                if open_epoch is None and open_time:
+                    open_epoch = _parse_iforex_epoch(open_time)
+                if open_epoch is not None and not o.get("open_epoch"):
+                    o["open_epoch"] = open_epoch
 
                 positions.append({
                     "ticket": t,
@@ -1096,17 +1157,63 @@ class IForexAccount:
             info["equity"] = round(float(scraped_equity), 2)
         else:
             info["equity"] = round(bal + tot_open_pl, 2)
-        info["position_details"] = [
-            {
-                "ticket": str(o.get("Ticket") or o.get("ticket")),
+        pos_details = []
+        oldest_epoch = None
+        sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
+        now_ts_calc = time.time()
+        for o in orders:
+            ticket = o.get("Ticket") or o.get("ticket")
+            if not ticket:
+                continue
+            t_str = str(ticket)
+            open_t_str = str(o.get("OpenTime") or o.get("open_time") or "")
+            oe = o.get("open_epoch")
+            if oe is None and open_t_str:
+                oe = _parse_iforex_epoch(open_t_str)
+                if oe is not None:
+                    o["open_epoch"] = oe
+            if oe is not None:
+                if oldest_epoch is None or oe < oldest_epoch:
+                    oldest_epoch = oe
+                s_name = (o.get("Symbol") or o.get("symbol") or "EURUSD").strip().upper().replace("/", "").replace(" ", "")
+                if s_name:
+                    if s_name not in sym_epochs:
+                        sym_epochs[s_name] = {"oldest_epoch": oe, "count": 1}
+                    else:
+                        sym_epochs[s_name]["count"] += 1
+                        if oe < sym_epochs[s_name]["oldest_epoch"]:
+                            sym_epochs[s_name]["oldest_epoch"] = oe
+
+            pos_details.append({
+                "ticket": t_str,
                 "symbol": o.get("Symbol") or o.get("symbol") or "EURUSD",
                 "type": str(o.get("Type") or o.get("direction") or "buy"),
                 "lots": float(o.get("Lots") or o.get("lots") or 0.01),
                 "open_price": float(o.get("OpenPrice") or o.get("open_price") or 0.0),
-                "profit": float(o.get("Profit") or o.get("profit") or 0.0)
-            }
-            for o in orders if o.get("Ticket") or o.get("ticket")
-        ]
+                "profit": float(o.get("Profit") or o.get("profit") or 0.0),
+                "open_epoch": oe,
+                "open_time": open_t_str
+            })
+        info["position_details"] = pos_details
+        if oldest_epoch is not None:
+            info["oldest_position_epoch"] = oldest_epoch
+            # Approximate rollover days until _enrich_age refines with exact day schedule
+            info["oldest_position_age"] = max(0, int((now_ts_calc - oldest_epoch) / 86400))
+        else:
+            info.pop("oldest_position_epoch", None)
+            info.pop("oldest_position_age", None)
+
+        if sym_epochs:
+            age_by_sym = {}
+            for s_name, s_data in sym_epochs.items():
+                age_by_sym[s_name] = {
+                    "age": max(0, int((now_ts_calc - s_data["oldest_epoch"]) / 86400)),
+                    "count": s_data["count"]
+                }
+            info["position_age_by_symbol"] = age_by_sym
+        else:
+            info.pop("position_age_by_symbol", None)
+
         info.setdefault("leverage", int(self.config.get("leverage", 400)))
 
         # Margin: prefer live value from browser-scraped account summary (accSummaryUsedMargin),
@@ -1565,7 +1672,9 @@ class IForexAccountManager:
                                                     "type": side_,
                                                     "lots": ls_,
                                                     "open_price": exec_price,
-                                                    "profit": 0.0
+                                                    "profit": 0.0,
+                                                    "open_epoch": now_fill_epoch,
+                                                    "open_time": datetime.fromtimestamp(now_fill_epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                                                 })
                                                 info["position_details"] = pos_list
                                             info["last_update"] = now_fill_epoch
@@ -1628,6 +1737,14 @@ class IForexAccountManager:
                 "market_closed": bool(acct.is_market_closed),
                 # account_currency: manual config override, then API-detected, then fallback to denomination detection (defaults to USD)
                 "account_currency": acct.config.get("account_currency") or info.get("account_currency") or getattr(acct, "_account_summary", {}).get("account_currency"),
+                # Position age — only expose if cycle reminder is checked on this account
+                "oldest_position_age": info.get("oldest_position_age") if bool(acct.config.get("cycle_reminder_enabled") or acct.config.get("cycle_reminder")) else None,
+                "position_age_by_symbol": info.get("position_age_by_symbol") if bool(acct.config.get("cycle_reminder_enabled") or acct.config.get("cycle_reminder")) else None,
+                # Cycle reminder — expose both keys
+                "cycle_reminder_enabled": bool(acct.config.get("cycle_reminder_enabled") or acct.config.get("cycle_reminder")),
+                "cycle_remind_days": acct.config.get("cycle_reminder_days") if bool(acct.config.get("cycle_reminder_enabled") or acct.config.get("cycle_reminder")) else None,
+                "cycle_max_days": acct.config.get("cycle_max_days") if bool(acct.config.get("cycle_reminder_enabled") or acct.config.get("cycle_reminder")) else None,
+                "pips_to_mc": info.get("pips_to_mc"),
             }
         return result
 
