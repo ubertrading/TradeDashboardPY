@@ -3805,7 +3805,7 @@ _last_position_counts = {}  # account -> last CONFIRMED (alerted) position count
 _pending_position_changes = {}  # account -> {"from": int, "to": int, "count": int}
 # Number of consecutive polls the new count must hold before an alert fires.
 # Prevents transient MT Bridge partial-reads from generating false alerts.
-_POS_ALERT_CONFIRM_POLLS = 3
+_POS_ALERT_CONFIRM_POLLS = 5
 
 def _send_position_change_alert(account, old_count, new_count, margin_pct=None):
     """Send position change alert via enabled channels (in background)."""
@@ -3902,6 +3902,29 @@ def _check_position_changes(all_accounts_info):
                 should_alert = False
                 if is_open and dashboard_settings.get("position_change_opened", True):
                     should_alert = True
+                    # Extra guard: verify at least one position has a recent open_epoch.
+                    # When count increases due to a broker partial-read recovery (missing
+                    # tickets that were already open reappear after a sync), all positions
+                    # have old open_epoch values — not recent ones.  Genuine new opens
+                    # always have open_epoch within the last ~90 seconds.
+                    # Only applied when position_details is available (MT Direct / bridge
+                    # accounts); EA-poll accounts continue to use count-based detection.
+                    position_details = info.get("position_details")
+                    if position_details:
+                        _OPEN_AGE_SEC = 90
+                        _now_ts = time.time()
+                        has_recent_open = any(
+                            p.get("open_epoch") and (_now_ts - p["open_epoch"]) < _OPEN_AGE_SEC
+                            for p in position_details
+                        )
+                        if not has_recent_open:
+                            app.logger.info(
+                                "[POS-ALERT] %s: count increased %d->%d but no position "
+                                "with open_epoch < %ds ago — suppressing as broker sync "
+                                "artifact (partial-read recovery)",
+                                acct_id, confirmed, pos, _OPEN_AGE_SEC
+                            )
+                            should_alert = False
                 elif is_close and dashboard_settings.get("position_change_closed", True):
                     should_alert = True
 
@@ -3916,9 +3939,24 @@ def _check_position_changes(all_accounts_info):
                         pass
                     _send_position_change_alert(acct_id, confirmed, pos, margin_pct=margin_pct)
 
-                # Promote pending to confirmed and clear the pending slot
-                _last_position_counts[acct_id] = pos
+                # Promote pending to confirmed and clear the pending slot.
+                # Exception: for a close direction where the alert was suppressed
+                # (position_change_closed=False), do NOT advance the baseline to the
+                # lower value.  If the baseline silently drops (35→34) and then the
+                # broker restores the missing ticket, the recovery looks like "position
+                # opened" (34→35) and fires a false alert.  Keeping the baseline at
+                # 'confirmed' means the recovery produces pos==confirmed, which cancels
+                # the pending entry without any alert.
+                if not (is_close and not should_alert):
+                    _last_position_counts[acct_id] = pos
+                else:
+                    app.logger.debug(
+                        "[POS-ALERT] %s: close %d->%d alert suppressed (position_change_closed=False) "
+                        "— holding baseline at %d to prevent false rebound open alert",
+                        acct_id, confirmed, pos, confirmed
+                    )
                 _pending_position_changes.pop(acct_id, None)
+
 
         except Exception:
             pass
