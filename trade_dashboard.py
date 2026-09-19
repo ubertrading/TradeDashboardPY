@@ -4662,8 +4662,8 @@ def _render_metatrader_html_statement(stmt):
 
 
 
-def _render_summary_index_html(summary_rows, generated_str=None):
-    """Render an HTML index dashboard for all account statements directly in stmts/."""
+def _render_summary_index_html(summary_rows, generated_str=None, available_dates=None, current_date=None, relative_prefix=""):
+    """Render an HTML index dashboard for all account statements with rolling date navigation."""
     if not generated_str:
         generated_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows_html = []
@@ -4706,6 +4706,46 @@ def _render_summary_index_html(summary_rows, generated_str=None):
 
     tot_pnl_cls = "profit_pos" if tot_pnl > 0 else ("profit_neg" if tot_pnl < 0 else "")
 
+    # Date history navigation toolbar
+    date_nav_html = ""
+    if available_dates:
+        date_buttons = []
+        is_latest_active = (current_date in (None, "latest", ""))
+        latest_style = (
+            "background-color: #1a73e8; color: #ffffff; font-weight: bold; padding: 5px 12px; "
+            "border-radius: 4px; text-decoration: none; border: 1px solid #1a73e8; font-size: 11px;"
+        ) if is_latest_active else (
+            "background-color: #f1f3f4; color: #3c4043; padding: 5px 12px; "
+            "border-radius: 4px; text-decoration: none; border: 1px solid #dadce0; font-size: 11px;"
+        )
+        latest_url = f"{relative_prefix}index.html"
+        date_buttons.append(f'<a href="{latest_url}" style="{latest_style}">⭐ Latest</a>')
+
+        for d_str in available_dates:
+            try:
+                dt = datetime.strptime(d_str, "%Y-%m-%d")
+                d_label = dt.strftime("%a %b %d")
+            except Exception:
+                d_label = d_str
+            is_active = (d_str == current_date)
+            btn_style = (
+                "background-color: #1a73e8; color: #ffffff; font-weight: bold; padding: 5px 12px; "
+                "border-radius: 4px; text-decoration: none; border: 1px solid #1a73e8; font-size: 11px;"
+            ) if is_active else (
+                "background-color: #f1f3f4; color: #3c4043; padding: 5px 12px; "
+                "border-radius: 4px; text-decoration: none; border: 1px solid #dadce0; font-size: 11px;"
+            )
+            target_url = f"{relative_prefix}{d_str}/index.html"
+            date_buttons.append(f'<a href="{target_url}" style="{btn_style}">{d_label}</a>')
+
+        date_nav_html = f"""
+<div style="margin: 15px 0 20px 0; padding: 10px 14px; background-color: #F8F9FA; border: 1px solid #E0E0E0; border-radius: 6px;">
+  <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+    <span style="font-weight: bold; color: #4A607A; margin-right: 4px; font-size: 11px;">📅 Rolling Statement History:</span>
+    {" ".join(date_buttons)}
+  </div>
+</div>"""
+
     html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
 <html>
 <head>
@@ -4730,7 +4770,7 @@ tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
 <body>
 <h2 style="color: #2C3E50; margin-bottom: 5px;">MetaTrader Account Statements Index</h2>
 <p style="color: #666; margin-top: 0;">Generated on {generated_str}. Total Accounts: {len(summary_rows)}</p>
-
+{date_nav_html}
 <table>
   <thead>
     <tr>
@@ -4762,6 +4802,36 @@ tr.total_row {{ background-color: #E6ECF2; font-weight: bold; }}
     return html_content
 
 
+def _prune_old_statements(retention_days=None):
+    """Keep only the most recent N date-stamped statement directories under stmts/."""
+    try:
+        if retention_days is None:
+            retention_days = int(dashboard_settings.get("statement_retention_days", 7))
+        retention_days = max(1, int(retention_days))
+
+        if not os.path.isdir(_STMTS_DIR):
+            return
+
+        date_dirs = sorted([
+            d for d in os.listdir(_STMTS_DIR)
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and os.path.isdir(os.path.join(_STMTS_DIR, d))
+        ])
+
+        if len(date_dirs) > retention_days:
+            to_delete = date_dirs[:-retention_days]
+            for old_d in to_delete:
+                old_path = os.path.join(_STMTS_DIR, old_d)
+                try:
+                    shutil.rmtree(old_path, ignore_errors=True)
+                    logger.info("[STMTS] Pruned old statement folder: %s (retention limit = %d days)", old_d, retention_days)
+                except Exception as err:
+                    logger.warning("[STMTS] Failed removing old statement folder %s: %s", old_d, err)
+            logger.info("[STMTS] Retention cleanup complete: kept %d most recent date folders (retention limit: %d)",
+                        min(len(date_dirs), retention_days), retention_days)
+    except Exception as e:
+        logger.error("[STMTS] Error pruning old statements: %s", e)
+
+
 def _save_full_statements(date_str=None):
     """Save full all-time account statements for all connected accounts directly to stmts/.
 
@@ -4783,6 +4853,9 @@ def _save_full_statements(date_str=None):
         now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         generated_ts = now_dt.timestamp()
         day_to_ts = int(generated_ts) + 86400  # all deals up to now
+        cur_date_str = date_str or now_dt.strftime("%Y-%m-%d")
+        date_dir = os.path.join(_STMTS_DIR, cur_date_str)
+        os.makedirs(date_dir, exist_ok=True)
 
         all_accounts = {}
 
@@ -5081,22 +5154,44 @@ def _save_full_statements(date_str=None):
                 stmt["day_deal_count"]    = stmt["closed_deal_count"]
                 stmt["day_by_symbol"]     = stmt["by_symbol"]
 
-                # ── Write per-account HTML Statement and JSON backup in stmts/ and temp/ ──
+                # ── Write per-account HTML Statement and JSON backup in date_dir, stmts/, and temp/ ──
                 html_content = _render_metatrader_html_statement(stmt)
+
+                # 1. Write into date folder (e.g. stmts/2026-09-19/)
+                date_html = os.path.join(date_dir, f"{safe_id}.html")
+                date_json = os.path.join(date_dir, f"{safe_id}.json")
+                with open(date_html, "w", encoding="utf-8") as _fhtml:
+                    _fhtml.write(html_content)
+                with open(date_json, "w", encoding="utf-8") as _fjson:
+                    json.dump(stmt, _fjson, indent=2, default=str)
+
+                # 2. Write into root stmts/ (always mirrors the latest snapshot)
                 with open(html_path, "w", encoding="utf-8") as _fhtml:
                     _fhtml.write(html_content)
-
                 with open(json_path, "w", encoding="utf-8") as _fjson:
                     json.dump(stmt, _fjson, indent=2, default=str)
 
-                # Generate balance graphs (GIF & PNG) according to platform
+                # Generate balance graphs (GIF & PNG) in date_dir and copy to stmts/
                 is_mt5 = _is_mt5_account(stmt, acct_id)
                 if is_mt5:
-                    png_path = os.path.join(_STMTS_DIR, f"{safe_id}.png")
-                    _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), png_path)
+                    date_png = os.path.join(date_dir, f"{safe_id}.png")
+                    root_png = os.path.join(_STMTS_DIR, f"{safe_id}.png")
+                    _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), date_png)
+                    try:
+                        shutil.copy2(date_png, root_png)
+                    except Exception:
+                        _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), root_png)
                 else:
-                    gif_path = os.path.join(_STMTS_DIR, f"{safe_id}.gif")
-                    _generate_mt4_balance_graph(stmt.get("deals", []), gif_path, safe_id=safe_id)
+                    date_gif = os.path.join(date_dir, f"{safe_id}.gif")
+                    root_gif = os.path.join(_STMTS_DIR, f"{safe_id}.gif")
+                    _generate_mt4_balance_graph(stmt.get("deals", []), date_gif, safe_id=safe_id)
+                    try:
+                        shutil.copy2(date_gif, root_gif)
+                        date_png_fallback = os.path.join(date_dir, f"{safe_id}.png")
+                        if os.path.isfile(date_png_fallback):
+                            shutil.copy2(date_png_fallback, os.path.join(_STMTS_DIR, f"{safe_id}.png"))
+                    except Exception:
+                        _generate_mt4_balance_graph(stmt.get("deals", []), root_gif, safe_id=safe_id)
 
                 # Mirror to d:\Documents\dev\temp if directory exists
                 _temp_dir = r"d:\Documents\dev\temp"
@@ -5156,24 +5251,46 @@ def _save_full_statements(date_str=None):
             except Exception as _acct_err:
                 logger.error("[STMTS] Error saving statement for %s: %s", acct_id, _acct_err)
 
-        # ── Write summary.json and index.html directly in stmts/ ────────────
+        # ── Write summary.json in both date_dir and root stmts/ ────────────
         summary = {
             "generated_at":  now_str,
             "generated_ts":  generated_ts,
+            "date":          cur_date_str,
             "account_count": len(summary_rows),
             "accounts":      summary_rows,
         }
+        with open(os.path.join(date_dir, "summary.json"), "w", encoding="utf-8") as _fdate:
+            json.dump(summary, _fdate, indent=2, default=str)
+
         summary_path = os.path.join(_STMTS_DIR, "summary.json")
-        with open(summary_path, "w", encoding="utf-8") as _f:
-            json.dump(summary, _f, indent=2, default=str)
+        with open(summary_path, "w", encoding="utf-8") as _froot:
+            json.dump(summary, _froot, indent=2, default=str)
 
-        index_path = os.path.join(_STMTS_DIR, "index.html")
-        index_html = _render_summary_index_html(summary_rows, now_str)
-        with open(index_path, "w", encoding="utf-8") as _findex:
-            _findex.write(index_html)
+        # ── Find available date folders for rolling history toolbar ─────────
+        avail_dates = sorted([
+            d for d in os.listdir(_STMTS_DIR)
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and os.path.isdir(os.path.join(_STMTS_DIR, d))
+        ], reverse=True)
 
-        logger.info("[STMTS] Saved full HTML statements for %d accounts → %s",
-                    len(summary_rows), _STMTS_DIR)
+        # ── Write index.html in date_dir (links relative with "../") ───────
+        date_index_html = _render_summary_index_html(
+            summary_rows, now_str, available_dates=avail_dates, current_date=cur_date_str, relative_prefix="../"
+        )
+        with open(os.path.join(date_dir, "index.html"), "w", encoding="utf-8") as _fdate_idx:
+            _fdate_idx.write(date_index_html)
+
+        # ── Write index.html in root stmts/ (links relative with "") ────────
+        root_index_html = _render_summary_index_html(
+            summary_rows, now_str, available_dates=avail_dates, current_date="latest", relative_prefix=""
+        )
+        with open(os.path.join(_STMTS_DIR, "index.html"), "w", encoding="utf-8") as _froot_idx:
+            _froot_idx.write(root_index_html)
+
+        logger.info("[STMTS] Saved full HTML statements for %d accounts → %s (and mirrored to root %s)",
+                    len(summary_rows), date_dir, _STMTS_DIR)
+
+        # ── Prune old statements past retention period ─────────────────────
+        _prune_old_statements()
 
     except Exception as e:
         logger.error("[STMTS] Full statement save error: %s", e, exc_info=True)
@@ -5246,6 +5363,7 @@ _DEFAULT_SETTINGS = {
     "fund_email_enabled": True,
     "fund_email_time": "08:00",
     "auto_cycle_time_est": "",
+    "statement_retention_days": 7,
     "adr_settings": {
         "GBPCHF": 90, "USDCHF": 65,
         "default": 80
@@ -16937,6 +17055,12 @@ def api_update_settings():
             dashboard_settings["fund_email_time"] = str(data["fund_email_time"]).strip()
         if "auto_cycle_time_est" in data:
             dashboard_settings["auto_cycle_time_est"] = str(data["auto_cycle_time_est"]).strip()
+        if "statement_retention_days" in data:
+            try:
+                dashboard_settings["statement_retention_days"] = max(1, int(data["statement_retention_days"]))
+                _prune_old_statements(dashboard_settings["statement_retention_days"])
+            except (ValueError, TypeError):
+                pass
         if "adr_settings" in data and isinstance(data["adr_settings"], dict):
             adr = {}
             for sym, val in data["adr_settings"].items():
@@ -17964,6 +18088,22 @@ body {
       <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Auto-Cycle Settings</button>
     </div>
   </div>
+
+  <!-- Account Statements & History Retention Settings -->
+  <div class="settings-section">
+    <h3>📄 Account Statements Retention</h3>
+    <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Configure rolling daily statement retention. Full statements are saved each day into date-stamped folders (e.g. <code>stmts/2026-09-19/</code>).</p>
+    <div class="settings-grid">
+      <label>Retention Period (Days)</label>
+      <input type="number" id="setStatementRetentionDays" value="7" min="1" max="365" step="1" style="width:90px;">
+    </div>
+    <p style="font-size:0.75rem;color:var(--text2);margin-top:8px;">Only the most recent X daily statement folders are kept; older dates are automatically pruned. Default is 7 days.</p>
+    <div class="settings-actions">
+      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save Statement Settings</button>
+      <a href="/statements" target="_blank" class="btn btn-sm" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);text-decoration:none;padding:5px 12px;border-radius:4px;display:inline-flex;align-items:center;gap:4px;">📊 Open Statements Hub</a>
+    </div>
+  </div>
+
   <div class="settings-section">
     <h3>💰 Fee Alert Thresholds</h3>
     <p style="font-size:0.8rem;color:var(--text2);margin-bottom:10px;">Set minimum fee amount to trigger alerts per account. Default 0 = alert on any fee.</p>
@@ -23558,6 +23698,9 @@ async function loadSettings() {
         document.getElementById('setFundEmailTime').value = s.fund_email_time || '08:00';
         document.getElementById('setAutoCycleTimeEst').value = s.auto_cycle_time_est || '';
     }
+    if (document.getElementById('setStatementRetentionDays')) {
+        document.getElementById('setStatementRetentionDays').value = s.statement_retention_days || 7;
+    }
     document.getElementById('setTgEnabled').checked = s.telegram && s.telegram.enabled;
     document.getElementById('setTgBotToken').value = (s.telegram && s.telegram.bot_token) || '';
     document.getElementById('setTgChatId').value = (s.telegram && s.telegram.chat_id) || '';
@@ -24024,7 +24167,8 @@ async function saveSettings(silent) {
     },
     fund_email_enabled: document.getElementById('setFundEmailEnabled') ? document.getElementById('setFundEmailEnabled').checked : true,
     fund_email_time: document.getElementById('setFundEmailTime') ? document.getElementById('setFundEmailTime').value : "08:00",
-    auto_cycle_time_est: document.getElementById('setAutoCycleTimeEst') ? document.getElementById('setAutoCycleTimeEst').value : ""
+    auto_cycle_time_est: document.getElementById('setAutoCycleTimeEst') ? document.getElementById('setAutoCycleTimeEst').value : "",
+    statement_retention_days: document.getElementById('setStatementRetentionDays') ? (parseInt(document.getElementById('setStatementRetentionDays').value) || 7) : 7
   };
   try {
     const res = await fetch('/api/settings', {
