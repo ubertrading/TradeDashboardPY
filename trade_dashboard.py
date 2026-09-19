@@ -21,19 +21,123 @@ Usage:
   TRADE_PORT=5001 python trade_dashboard.py
 """
 
+import sys
+import os
+import subprocess
+import importlib.util
+
+# ─── Self-Bootstrapping Dependency Auto-Installer ───────────────────────────
+# Automatically checks and installs all required dependencies on startup
+# (especially on production or clean machines) before any third-party imports.
+def _bootstrap_dependencies():
+    """Ensure all required third-party packages are installed before app startup."""
+    required_packages = {
+        "flask": "Flask",
+        "requests": "requests",
+        "PIL": "Pillow",
+        "dateutil": "python-dateutil",
+        "pandas": "pandas",
+        "tzdata": "tzdata",
+        "colorama": "colorama",
+    }
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    req_files = [
+        os.path.join(script_dir, "requirements.txt"),
+        os.path.join(script_dir, "docs", "requirements.txt"),
+        os.path.join(script_dir, "var", "requirements.txt"),
+    ]
+    req_file_to_use = next((f for f in req_files if os.path.isfile(f)), None)
+
+    missing_pkgs = []
+    for mod_name, pip_name in required_packages.items():
+        if importlib.util.find_spec(mod_name) is None:
+            missing_pkgs.append(pip_name)
+
+    if missing_pkgs:
+        print(f"[STARTUP] Missing packages detected: {missing_pkgs}. Auto-installing dependencies...")
+        try:
+            if req_file_to_use:
+                print(f"[STARTUP] Installing dependencies from {os.path.basename(req_file_to_use)} ...")
+                res = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", req_file_to_use],
+                    capture_output=True, text=True, timeout=300
+                )
+                if res.returncode == 0:
+                    print("[STARTUP] All requirements installed successfully.")
+                else:
+                    print(f"[STARTUP] pip install -r returned code {res.returncode}")
+            for pkg in missing_pkgs:
+                mod_for_pkg = next((m for m, p in required_packages.items() if p == pkg), pkg)
+                if importlib.util.find_spec(mod_for_pkg) is None:
+                    print(f"[STARTUP] Installing missing package: {pkg} ...")
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", pkg],
+                        capture_output=True, text=True, timeout=180
+                    )
+            importlib.invalidate_caches()
+        except Exception as e:
+            print(f"[STARTUP] Error during dependency auto-installation: {e}")
+
+_bootstrap_dependencies()
+
 from flask import Flask, request, jsonify
 import time
 import json
 import threading
 import csv
-import os
 import re
-import sys
+import math
+import shutil
 import uuid
 import logging
-import subprocess
+import zlib
+import struct
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+# ─── Automatic Dependency Management ───────────────────────────────────────
+def _auto_install_package(pip_name):
+    """Attempt to install a missing python package using pip."""
+    try:
+        logging.info("[DEP] Auto-installing missing package '%s' via pip...", pip_name)
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", pip_name],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        if res.returncode == 0:
+            logging.info("[DEP] Package '%s' installed successfully.", pip_name)
+            return True
+        else:
+            logging.warning("[DEP] pip install %s failed (code %d): %s",
+                            pip_name, res.returncode, (res.stderr or res.stdout or "").strip())
+            return False
+    except Exception as e:
+        logging.warning("[DEP] Error running pip install for '%s': %s", pip_name, e)
+        return False
+
+
+def _ensure_dependency(import_name, pip_name=None):
+    """Check if import_name can be imported, auto-installing pip_name if missing."""
+    if not pip_name:
+        pip_name = import_name
+    try:
+        __import__(import_name)
+        return True
+    except ImportError:
+        logging.info("[DEP] Required module '%s' is not installed. Initiating auto-installation of '%s'...", import_name, pip_name)
+        if _auto_install_package(pip_name):
+            try:
+                import importlib
+                importlib.invalidate_caches()
+                __import__(import_name)
+                return True
+            except Exception as e2:
+                logging.warning("[DEP] Module '%s' still could not be imported after pip install: %s", import_name, e2)
+        return False
+
 
 app = Flask(__name__)
 app.json.compact = True  # Force compact JSON (no spaces after separators) for EA compatibility
@@ -1257,14 +1361,33 @@ def _is_account_connected(aid):
 
         if mt_direct_manager:
             for k, acct in mt_direct_manager.accounts.items():
-                c = acct.config
+                c = getattr(acct, "config", {}) or {}
                 if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or str(c.get("login") or "") in (aid, acc_str, label):
-                    st = mt_direct_manager.get_status().get(k, {})
+                    st = mt_direct_manager.get_status().get(k, {}) if hasattr(mt_direct_manager, "get_status") else {}
                     is_conn = (getattr(acct, "connected", False) or getattr(acct, "_connected", False) or bool(st.get("connected")))
                     if is_conn:
                         return True
                     else:
                         return False
+
+        if 'mt_bridge_clients' in globals() and mt_bridge_clients:
+            for k, bc in mt_bridge_clients.items():
+                c = getattr(bc, "config", {}) or {}
+                if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or str(getattr(bc, "account_id", "")) in (aid, acc_str, label):
+                    if getattr(bc, "connected", False) or getattr(bc, "_connected", False):
+                        return True
+                    else:
+                        return False
+
+        if 'mt_bridge_client' in globals() and mt_bridge_client:
+            if hasattr(mt_bridge_client, 'accounts'):
+                for k, bc in mt_bridge_client.accounts.items():
+                    c = getattr(bc, "config", {}) or {}
+                    if k in (aid, acc_str, label) or c.get("label") in (aid, acc_str, label) or str(getattr(bc, "account_id", "")) in (aid, acc_str, label):
+                        if getattr(bc, "connected", False) or getattr(bc, "_connected", False):
+                            return True
+                        else:
+                            return False
 
         if fix_manager:
             for k, acct in fix_manager.accounts.items():
@@ -2541,62 +2664,350 @@ _snapshot_thread.start()
 _STMTS_DIR = os.path.join(_SCRIPT_DIR, "stmts")
 os.makedirs(_STMTS_DIR, exist_ok=True)
 
-def _render_metatrader_html_statement(stmt):
-    """Render an authentic MetaTrader-formatted HTML account statement matching native MT4 Statement.htm layout."""
-    acct_id = str(stmt.get("account_id", ""))
-    # Account number shown on statement = broker login (numeric), falling back to account_id
-    acct_number = str(stmt.get("account_number") or stmt.get("login") or acct_id)
-    # Name on account = AccountName from MT4 DLL, falling back to group_label / account_id
-    acct_name = str(stmt.get("account_name") or stmt.get("group_label") or acct_id)
-    # Company/broker = server hostname (strip port); no hardcoded broker fallback
-    company_name = str(stmt.get("company") or stmt.get("broker") or
-                       (stmt.get("server", "").split(":")[0] if stmt.get("server") else None) or
-                       acct_id)
-    date_str = str(stmt.get("date") or datetime.now().strftime("%Y %B %d, %H:%M"))
-    if " " not in date_str and "-" in date_str:
+
+# ── Known broker name mappings: matches on server hostname / account_id keywords ─
+_KNOWN_BROKERS = [
+    (["orbex", "orbexglobal", "46.235.34.20", "149.5.84"], "Orbex Global Ltd"),
+    (["dukascopy", "duka", "jforex", "52.59.88.247"],    "Dukascopy Bank SA"),
+    (["swissquote", "sqe", "sqb", "79.127.198", "176.56.182"], "Swissquote Bank SA"),
+    (["icmarkets", "icm", "raw trading", "194.164.176", "194.164.177", "192.81.110"], "Raw Trading Ltd"),
+    (["ava", "avatrade", "192.109.15.233"],              "Ava Trade Markets Ltd."),
+    (["deriv", "der-", "13.248.213.130"],                "Deriv (SVG) LLC"),
+    (["fxv", "fxview", "185.96.244.193"],                "Finvasia Capital Ltd"),
+    (["noor", "185.97.161.115"],                         "Noor Capital PSC"),
+    (["ycm", "hycm", "185.97.161.99"],                   "HYCM Ltd"),
+    (["bri", "bright", "162.255.145.125"],               "Bright Win Securities"),
+    (["t247", "trade247", "188.240.63.165"],             "Trade247 Ltd"),
+    (["go", "gomarkets", "185.96.245.205"],              "GO Markets Pty Ltd"),
+    (["hantec", "hdb", "hantecmarkets"],                 "Hantec Markets"),
+    (["iforex", "ifx"],                                  "iFOREX"),
+    (["pepperstone", "pepper"],                          "Pepperstone"),
+    (["fxpro", "fx-pro"],                                "FxPro"),
+    (["oanda"],                                           "OANDA"),
+    (["exness"],                                          "Exness"),
+    (["xm.com", "xmglobal", "tradexm"],                 "XM Global"),
+    (["fxcm"],                                            "FXCM"),
+    (["axiory", "axicorp", "axitrader"],                 "Axitrader"),
+    (["axi."],                                            "Axi"),
+    (["forex.com", "gain"],                              "Forex.com"),
+    (["tickmill"],                                        "Tickmill"),
+    (["tmgm", "trademax"],                               "TMGM"),
+    (["eightcap"],                                        "Eightcap"),
+    (["fbs.com", "fbsbroker"],                           "FBS"),
+    (["thinkmarkets", "thinkcapital"],                   "ThinkMarkets"),
+    (["vantage", "vantagemarkets"],                      "Vantage Markets"),
+    (["roboforex", "robo"],                              "RoboForex"),
+    (["alpari"],                                          "Alpari"),
+    (["hotforex", "hfm.com", "hfmarkets"],               "HFM"),
+    (["admiralmarkets", "admiral"],                      "Admiral Markets"),
+    (["windsor", "windsorcb"],                           "Windsor Brokers"),
+    (["interactive", "ibkr", "interactivebrokers"],      "Interactive Brokers"),
+    (["blackbull", "bbroker"],                           "BlackBull Markets"),
+]
+
+def _resolve_broker_name(company_raw, server_raw, acct_id):
+    """Resolve broker name from company string, server hostname, or account_id.
+    Never returns the internal account_id or a numeric string as a company name.
+    """
+    # 1. Use company_raw if it looks like a real company name (contains space or mixed case, not purely numeric)
+    if company_raw:
+        s = str(company_raw).strip()
+        if s and s != acct_id and not re.match(r'^[\d.\s\-_]+$', s):
+            return s
+
+    # 2. Check known broker keywords against server_raw and acct_id
+    search_targets = []
+    if server_raw:
+        search_targets.append(str(server_raw).lower())
+    if acct_id:
+        search_targets.append(str(acct_id).lower())
+
+    for keywords, name in _KNOWN_BROKERS:
+        for target in search_targets:
+            if any(kw in target for kw in keywords):
+                return name
+
+    # 3. Use the server hostname (stripped of port and AWS-style suffixes)
+    if server_raw:
+        host = str(server_raw).split(":")[0].strip()
+        host = re.sub(r'\.compute\.amazonaws\.com$', '', host)
+        host = re.sub(r'\.ec2\.[^.]+$', '', host)
+        if host and not re.match(r'^[\d.]+$', host):  # not a bare IP
+            return host
+
+    return ""
+
+
+def _resolve_acct_number(login_raw, acct_id):
+    """Return the numeric account login string. Falls back to extracting trailing digits from acct_id."""
+    if login_raw:
+        s = str(login_raw).strip()
+        if s and s != acct_id:
+            return s
+    m = re.search(r'(\d{5,})[-_]?$', str(acct_id))
+    if m:
+        return m.group(1)
+    return str(acct_id)
+
+
+_KNOWN_SERVERS = [
+    (["orbex", "orb", "46.235.34", "149.5.84"],          "OrbexGlobal-Server"),
+    (["duka", "dukascopy", "52.59.88.247"],              "Dukascopy-Server"),
+    (["swissquote", "sq", "sqe", "sqb", "79.127.198", "176.56.182"], "Swissquote-Live"),
+    (["194.164.176.150"],                                "ICMarketsSC-MT5-4"),
+    (["194.164.176.167"],                                "ICMarketsSC-MT5-2"),
+    (["194.164.177.150"],                                "ICMarketsSC-MT5-5"),
+    (["192.81.110.120"],                                 "ICMarketsSC-MT5-1"),
+    (["mt5-3.icmarkets.com"],                            "ICMarketsSC-MT5-3"),
+    (["icmarkets", "icm"],                               "ICMarketsSC-MT5-4"),
+    (["ava", "avatrade", "192.109.15.233"],              "Ava-Real 1"),
+    (["deriv", "der-", "13.248.213.130"],                "Deriv-Server"),
+    (["fxv", "fxview", "185.96.244.193"],                "FXView-Live"),
+    (["noor", "185.97.161.115"],                         "NoorCapital-Live"),
+    (["ycm", "hycm", "185.97.161.99"],                   "HYCM-Live"),
+    (["bri", "bright", "162.255.145.125"],               "BrightWin-Live"),
+    (["t247", "trade247", "188.240.63.165"],             "Trade247-Server"),
+    (["go", "gomarkets", "185.96.245.205"],              "GOMarkets-Live"),
+    (["hantec", "hdb"],                                  "HantecMarkets-Live"),
+]
+
+def _resolve_server_name(server_raw, acct_id, company_name=""):
+    """Resolve human-readable MetaTrader server name (e.g. OrbexGlobal-Server). Never returns numeric account numbers."""
+    search_targets = []
+    if server_raw:
+        search_targets.append(str(server_raw).lower())
+    if acct_id:
+        search_targets.append(str(acct_id).lower())
+    if company_name and not re.match(r'^\d+$', str(company_name)):
+        search_targets.append(str(company_name).lower())
+
+    for keywords, name in _KNOWN_SERVERS:
+        for target in search_targets:
+            if any(kw in target for kw in keywords):
+                return name
+
+    if server_raw:
+        host = str(server_raw).split(":")[0].strip()
+        host = re.sub(r'\.compute\.amazonaws\.com$', '', host)
+        host = re.sub(r'\.ec2\.[^.]+$', '', host)
+        if host and not re.match(r'^[\d.]+$', host):
+            return host
+
+    if company_name and not re.match(r'^\d+$', str(company_name)):
+        return f"{company_name}-Live"
+    return "Server"
+
+
+_KNOWN_OWNER_MAP = {
+    "808973": "Hugues Jean Daniel Dubois - sub acc # 87490",
+    "HU-1-B-ORBEX-808973": "Hugues Jean Daniel Dubois - sub acc # 87490",
+    "HU-10-B-ORBEX-808973": "Hugues Jean Daniel Dubois - sub acc # 87490",
+    "808957": "Egor Koreshkov",
+    "EGOR-1-B-ORBEX-808957": "Egor Koreshkov",
+    "EGOR-1-B-ORB-808957": "Egor Koreshkov",
+}
+
+def _is_valid_human_name(n, acct_id):
+    if not n:
+        return False
+    s = str(n).strip()
+    if not s or s == acct_id:
+        return False
+    # Reject pure numbers (like "16278509", "88880855", etc.)
+    if re.match(r'^[\d\s\-_]+$', s):
+        return False
+    # Reject internal account ID patterns like "HU-1-AVA-88880855"
+    if re.match(r'^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+', s):
+        return False
+    return True
+
+def _resolve_owner_name(stmt, acct_id):
+    """Resolve owner human name from stmt, active manager, known prefixes, or configs. Never returns internal acct_id."""
+    acct_number = _resolve_acct_number(stmt.get("login") or stmt.get("account_number"), acct_id)
+
+    # 1. Direct known owner overrides
+    if acct_number in _KNOWN_OWNER_MAP:
+        return _KNOWN_OWNER_MAP[acct_number]
+    if acct_id in _KNOWN_OWNER_MAP:
+        return _KNOWN_OWNER_MAP[acct_id]
+
+    # 2. Check stmt directly for a valid human name
+    name = stmt.get("account_name") or stmt.get("name")
+    if _is_valid_human_name(name, acct_id):
+        res = str(name).strip()
+        if res in ("Hugues Jean Daniel Dubois",) and acct_number in _KNOWN_OWNER_MAP:
+            return _KNOWN_OWNER_MAP[acct_number]
+        return res
+
+    # 3. Try live ea_account_info (bridge may have pushed AccountName from DLL)
+    try:
+        if 'ea_account_info' in globals() and ea_account_info:
+            live = ea_account_info.get(acct_id, {})
+            c_name = live.get("account_name") or live.get("name")
+            if _is_valid_human_name(c_name, acct_id):
+                return str(c_name).strip()
+    except Exception:
+        pass
+
+    # 4. Try active manager account config
+    try:
+        if 'mt_direct_manager' in globals() and mt_direct_manager and hasattr(mt_direct_manager, 'accounts'):
+            acct_obj = mt_direct_manager.accounts.get(acct_id)
+            if acct_obj and hasattr(acct_obj, 'config'):
+                c_name = acct_obj.config.get("account_name") or acct_obj.config.get("name")
+                if _is_valid_human_name(c_name, acct_id):
+                    return str(c_name).strip()
+    except Exception:
+        pass
+
+    # 5. Try bridge client accounts
+    try:
+        if 'mt_bridge_clients' in globals() and mt_bridge_clients:
+            bc = mt_bridge_clients.get(acct_id)
+            if bc and hasattr(bc, 'config'):
+                c_name = bc.config.get("account_name") or bc.config.get("name")
+                if _is_valid_human_name(c_name, acct_id):
+                    return str(c_name).strip()
+    except Exception:
+        pass
+
+    # 6. Try direct JSON config file lookups
+    candidate_cfg_files = [
+        os.path.join(_CONFIGS_DIR, "mt_direct_accounts.json"),
+        r"d:\Documents\dev\backup\trade_dashboard\configs\mt_direct_accounts.json",
+        r"d:\Documents\dev\TradeDashboard\configs - LIVE\mt_direct_accounts.json",
+        r"d:\Documents\dev\temp\trade_dashboard - Copy (5)\trade_dashboard - Copy (5)\configs\mt_direct_accounts.json",
+    ]
+    for cfg_file in candidate_cfg_files:
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            date_str = dt.strftime("%Y %B %d, ") + datetime.now().strftime("%H:%M")
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if acct_id in cfg:
+                        c_name = cfg[acct_id].get("account_name") or cfg[acct_id].get("name")
+                        if _is_valid_human_name(c_name, acct_id):
+                            return str(c_name).strip()
+                    for k, v in cfg.items():
+                        if str(v.get("login", "")) == str(acct_number):
+                            c_name = v.get("account_name") or v.get("name")
+                            if _is_valid_human_name(c_name, acct_id):
+                                return str(c_name).strip()
         except Exception:
             pass
 
+    # 7. Prefix-based human name inference (covers ALL accounts matching user portfolio prefixes)
+    aid_upper = str(acct_id).upper()
+    if aid_upper.startswith(("HU-", "HUGO-", "HUGUES-")):
+        if "808973" in aid_upper or str(acct_number) == "808973":
+            return "Hugues Jean Daniel Dubois - sub acc # 87490"
+        return "Hugues Jean Daniel Dubois"
+    elif aid_upper.startswith(("EGOR-", "E-")):
+        return "Egor Koreshkov"
+    elif aid_upper.startswith(("AL-", "ALEX-", "ALEXANDRE-")):
+        return "Alexandre"
+    elif aid_upper.startswith(("IR-", "IRINA-")):
+        return "Irina"
+    elif aid_upper.startswith("EHERZOG-"):
+        return "E. Herzog"
+
+    # 8. Try previously saved statement JSON as cache
+    try:
+        safe_id = re.sub(r"[^\w\-]", "_", acct_id)
+        cached_json = os.path.join(_STMTS_DIR, f"{safe_id}.json")
+        if os.path.exists(cached_json):
+            with open(cached_json, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+                c_name = cached.get("account_name") or cached.get("name")
+                if _is_valid_human_name(c_name, acct_id):
+                    return str(c_name).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+
+def _render_metatrader4_html_statement(stmt):
+    """Render a native MetaTrader 4 DetailedStatement.htm-style HTML account statement matching native MT4 100%."""
+    acct_id = str(stmt.get("account_id", ""))
+
+    acct_number = _resolve_acct_number(
+        stmt.get("login") or stmt.get("account_number"), acct_id
+    )
+    acct_name = _resolve_owner_name(stmt, acct_id)
+    company_name = _resolve_broker_name(
+        stmt.get("company") or stmt.get("broker"),
+        stmt.get("server"),
+        acct_id,
+    ) or "MetaQuotes Software Corp."
+
+    # Date formatting: MT4 uses "YYYY Month D, HH:MM" e.g. "2026 September 19, 16:02"
+    raw_date = stmt.get("date")
+    if raw_date and isinstance(raw_date, str) and re.match(r"^\d{4} [A-Za-z]+ \d{1,2}, \d{2}:\d{2}$", raw_date):
+        date_str = raw_date
+    elif raw_date:
+        try:
+            if isinstance(raw_date, str):
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M"):
+                    try:
+                        dt = datetime.strptime(raw_date, fmt)
+                        break
+                    except Exception:
+                        dt = None
+                if not dt:
+                    dt = datetime.now()
+            elif isinstance(raw_date, (int, float)):
+                dt = datetime.fromtimestamp(raw_date)
+            else:
+                dt = datetime.now()
+        except Exception:
+            dt = datetime.now()
+        date_str = f"{dt.year} {dt.strftime('%B')} {dt.day}, {dt.strftime('%H:%M')}"
+    else:
+        dt = datetime.now()
+        date_str = f"{dt.year} {dt.strftime('%B')} {dt.day}, {dt.strftime('%H:%M')}"
+
     currency = str(stmt.get("currency", "USD"))
-    leverage_val = stmt.get("leverage") or 100
-    leverage = f"{leverage_val}"
+    leverage_val = str(stmt.get("leverage") or 100).replace("1:", "")
+    leverage = f"1:{leverage_val}"
 
-    balance = float(stmt.get("balance", 0.0) if stmt.get("balance") is not None else 0.0)
-    equity = float(stmt.get("equity", 0.0) if stmt.get("equity") is not None else 0.0)
-    margin = float(stmt.get("margin", 0.0) or 0.0)
-    free_margin = float(stmt.get("free_margin", 0.0) if stmt.get("free_margin") is not None else 0.0)
-
+    deals = stmt.get("deals") or []
     open_positions = stmt.get("open_positions") or []
-    closed_deals = stmt.get("deals") or []
+
+    # Sort deals by effective Close Time (and open_time for balance/credit transactions)
+    def sort_key(d):
+        c_time = d.get("close_time") or d.get("open_time") or ""
+        if str(d.get("type", "")).lower() in ("balance", "credit"):
+            c_time = d.get("open_time") or ""
+        return (c_time, int(d.get("ticket") or 0))
+
+    sorted_deals = sorted(deals, key=sort_key)
 
     def _mspt(val):
         if val is None:
             return "0.00"
         return f"{float(val):,.2f}".replace(",", " ")
 
-    def _mspr(val):
-        if val is None or float(val) == 0.0:
-            return "0.00000"
-        return f"{float(val):.5f}"
-
-    # ΓöÇΓöÇ 1. Closed Transactions ΓöÇΓöÇ
+    # ── 1. Process Closed Transactions ──
     closed_rows = []
     tot_closed_pnl = 0.0
     tot_closed_swap = 0.0
     tot_closed_tax = 0.0
     tot_closed_comm = 0.0
     tot_deposit_withdraw = 0.0
+    tot_credit = 0.0
 
-    for idx, d in enumerate(closed_deals):
+    trade_deals = []
+    bal_before_trades = 0.0
+    has_trades = False
+
+    for idx, d in enumerate(sorted_deals):
         tkt = d.get("ticket") or d.get("order") or ""
         o_time = d.get("open_time", "")
         c_time = d.get("close_time", "")
         stype = str(d.get("type", "")).lower()
         size = float(d.get("lots", 0.0) or 0.0)
-        item = str(d.get("symbol", ""))
+        item = str(d.get("symbol", "")).lower()
         o_price = float(d.get("open_price", 0.0) or 0.0)
         c_price = float(d.get("close_price", 0.0) or 0.0)
         sl = float(d.get("sl", 0.0) or 0.0)
@@ -2609,28 +3020,79 @@ def _render_metatrader_html_statement(stmt):
 
         bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
 
-        if stype == "balance" or "deposit" in comment.lower() or "deposit" in stype or "withdrawal" in stype or "withdrawal" in comment.lower():
+        if stype == "balance":
             tot_deposit_withdraw += pnl
-            closed_rows.append(f'<tr align=right><td title="{comment or "Deposit"}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>balance</td><td colspan=10 align=left>Deposit</td><td class=mspt>{_mspt(pnl)}</td></tr>')
+            if not has_trades:
+                bal_before_trades += pnl
+            closed_rows.append(
+                f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>balance</td><td colspan=10 align=left>{comment}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+            )
+        elif stype == "credit":
+            tot_credit += pnl
+            c_text = comment
+            if c_time and c_time != o_time:
+                c_text = f"{comment}, value date: {c_time[:10].replace('-', '.')}"
+            closed_rows.append(
+                f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>credit</td><td colspan=10 align=left nowrap>{c_text}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+            )
         else:
+            has_trades = True
+            trade_deals.append(d)
             tot_closed_pnl += pnl
             tot_closed_swap += swap
             tot_closed_tax += tax
             tot_closed_comm += comm
-            closed_rows.append(
-                f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>{c_time}</td><td style="mso-number-format:0\\.00000;">{_mspr(c_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
-            )
+
+            # Price decimals: 3 for JPY, 5 for non-JPY
+            decimals = 3 if "JPY" in item.upper() else 5
+            p_fmt = r"0\.000;" if decimals == 3 else r"0\.00000;"
+            o_pr_str = f"{o_price:.{decimals}f}"
+            c_pr_str = f"{c_price:.{decimals}f}"
+            sl_str = f"{sl:.{decimals}f}"
+            tp_str = f"{tp:.{decimals}f}"
+
+            # Comment formatting
+            title_str = ""
+            comment_row = ""
             if comment:
-                closed_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+                if "-" in comment:
+                    parts = comment.split("-")
+                    last_part = parts[-1].strip()
+                    if last_part.isdigit():
+                        ord_num = last_part
+                        title_str = f"#{ord_num} {comment}"
+                        comment_row = f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>{ord_num}</td><td colspan=3>{comment}</td></tr>'
+                    else:
+                        title_str = comment
+                        comment_row = f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>'
+                elif re.match(r"^#?(\d+)\s+(.+)$", comment):
+                    m = re.match(r"^#?(\d+)\s+(.+)$", comment)
+                    ord_num, rem = m.group(1), m.group(2)
+                    title_str = comment
+                    comment_row = f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>{ord_num}</td><td colspan=3>{rem}</td></tr>'
+                else:
+                    title_str = comment
+                    comment_row = f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>'
 
-    if not closed_rows:
-        closed_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
-    else:
-        closed_tr_html = "\n".join(closed_rows)
+            tkt_td = f'<td title="{title_str}">{tkt}</td>' if title_str else f'<td>{tkt}</td>'
 
-    tot_closed_net = tot_closed_pnl + tot_closed_swap + tot_closed_tax + tot_closed_comm
+            o_time_td = f'<td class=msdate nowrap>{o_time}</td>' if comment_row else f'<td nowrap>{o_time}</td>'
 
-    # ΓöÇΓöÇ 2. Open Trades ΓöÇΓöÇ
+            closed_rows.append(
+                f'<tr {bg_attr}align=right>{tkt_td}{o_time_td}<td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:{p_fmt}">{o_pr_str}</td><td style="mso-number-format:{p_fmt}">{sl_str}</td><td style="mso-number-format:{p_fmt}">{tp_str}</td><td class=msdate nowrap>{c_time}</td><td style="mso-number-format:{p_fmt}">{c_pr_str}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+            )
+            if comment_row:
+                closed_rows.append(comment_row)
+
+    tot_closed_comm = round(tot_closed_comm, 2)
+    tot_closed_tax = round(tot_closed_tax, 2)
+    tot_closed_swap = round(tot_closed_swap, 2)
+    tot_closed_pnl = round(tot_closed_pnl, 2)
+    tot_closed_net = round(tot_closed_comm + tot_closed_tax + tot_closed_swap + tot_closed_pnl, 2)
+    tot_deposit_withdraw = round(tot_deposit_withdraw, 2)
+    tot_credit = round(tot_credit, 2)
+
+    # ── 2. Open Trades ──
     open_rows = []
     tot_open_pnl = 0.0
     tot_open_swap = 0.0
@@ -2642,7 +3104,7 @@ def _render_metatrader_html_statement(stmt):
         o_time = p.get("open_time") or (datetime.fromtimestamp(p["open_epoch"]).strftime("%Y.%m.%d %H:%M:%S") if p.get("open_epoch") else "")
         stype = p.get("side") or ("buy" if p.get("type") == 0 else "sell")
         size = float(p.get("lots", 0.0) or 0.0)
-        item = str(p.get("symbol", ""))
+        item = str(p.get("symbol", "")).lower()
         o_price = float(p.get("open_price", 0.0) or 0.0)
         m_price = float(p.get("market_price", o_price) or o_price)
         sl = float(p.get("sl", 0.0) or 0.0)
@@ -2660,26 +3122,193 @@ def _render_metatrader_html_statement(stmt):
 
         bg_attr = 'bgcolor=#E0E0E0 ' if idx % 2 == 1 else ''
 
-        open_rows.append(
-            f'<tr {bg_attr}align=right><td title="{comment}">{tkt}</td><td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:0\\.00000;">{_mspr(o_price)}</td><td style="mso-number-format:0\\.00000;">{_mspr(sl)}</td><td style="mso-number-format:0\\.00000;">{_mspr(tp)}</td><td class=msdate nowrap>&nbsp;</td><td style="mso-number-format:0\\.00000;">{_mspr(m_price)}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
-        )
+        decimals = 3 if "JPY" in item.upper() else 5
+        p_fmt = r"0\.000;" if decimals == 3 else r"0\.00000;"
+        o_pr_str = f"{o_price:.{decimals}f}"
+        m_pr_str = f"{m_price:.{decimals}f}"
+        sl_str = f"{sl:.{decimals}f}"
+        tp_str = f"{tp:.{decimals}f}"
+
+        title_str = ""
+        comment_row = ""
         if comment:
-            open_rows.append(f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>')
+            title_str = comment
+            comment_row = f'<tr {bg_attr}align=right><td colspan=9>&nbsp;</td><td>&nbsp;</td><td colspan=3>{comment}</td></tr>'
 
-    if not open_rows:
-        open_tr_html = '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+        tkt_td = f'<td title="{title_str}">{tkt}</td>' if title_str else f'<td>{tkt}</td>'
+
+        open_rows.append(
+            f'<tr {bg_attr}align=right>{tkt_td}<td class=msdate nowrap>{o_time}</td><td>{stype}</td><td class=mspt>{size:.2f}</td><td>{item}</td><td style="mso-number-format:{p_fmt}">{o_pr_str}</td><td style="mso-number-format:{p_fmt}">{sl_str}</td><td style="mso-number-format:{p_fmt}">{tp_str}</td><td class=msdate nowrap>&nbsp;</td><td style="mso-number-format:{p_fmt}">{m_pr_str}</td><td class=mspt>{_mspt(comm)}</td><td class=mspt>{_mspt(tax)}</td><td class=mspt>{_mspt(swap)}</td><td class=mspt>{_mspt(pnl)}</td></tr>'
+        )
+        if comment_row:
+            open_rows.append(comment_row)
+
+    tot_open_comm = round(tot_open_comm, 2)
+    tot_open_tax = round(tot_open_tax, 2)
+    tot_open_swap = round(tot_open_swap, 2)
+    tot_open_pnl = round(tot_open_pnl, 2)
+    tot_open_net = round(tot_open_comm + tot_open_swap + tot_open_tax + tot_open_pnl, 2)
+
+    # ── Summary Balances ──
+    balance = float(stmt.get("balance") if stmt.get("balance") is not None else (tot_deposit_withdraw + tot_closed_net))
+    credit = tot_credit if tot_credit != 0.0 else float(stmt.get("credit", 0.0) or 0.0)
+    margin = float(stmt.get("margin", 0.0) or 0.0)
+
+    # In MT4: Free Margin = Equity - Margin, and Equity = Balance + Credit + Floating P/L
+    if tot_open_net != 0.0:
+        floating_pnl = tot_open_net
+        equity = round(balance + credit + floating_pnl, 2)
+        free_margin = round(equity - margin, 2)
+    elif stmt.get("free_margin") is not None and margin > 0:
+        free_margin = float(stmt["free_margin"])
+        equity = round(free_margin + margin, 2)
+        floating_pnl = round(equity - (balance + credit), 2)
+    elif stmt.get("equity") is not None:
+        raw_eq = float(stmt["equity"])
+        if abs(raw_eq - balance) < abs(raw_eq - (balance + credit)) and credit > 0:
+            equity = round(raw_eq + credit, 2)
+        else:
+            equity = raw_eq
+        floating_pnl = round(equity - (balance + credit), 2)
+        free_margin = round(equity - margin, 2)
     else:
-        open_tr_html = "\n".join(open_rows)
+        floating_pnl = 0.0
+        equity = round(balance + credit, 2)
+        free_margin = round(equity - margin, 2)
 
-    tot_open_net = tot_open_pnl + tot_open_swap + tot_open_tax + tot_open_comm
+    deposit_withdrawal = tot_deposit_withdraw
 
-    if stmt.get("deposit_withdrawal") is not None:
-        deposit_withdrawal = float(stmt["deposit_withdrawal"])
-    elif tot_deposit_withdraw != 0.0:
-        deposit_withdrawal = tot_deposit_withdraw
-    else:
-        deposit_withdrawal = balance - tot_closed_net
+    # ── 3. Details Statistics & Drawdown ──
+    gross_profit = 0.0
+    gross_loss = 0.0
+    profits = []
+    short_deals = []
+    long_deals = []
 
+    for d in trade_deals:
+        p = float(d.get('profit', 0) or 0)
+        comm = float(d.get('commission', 0) or 0)
+        sw = float(d.get('swap', 0) or 0)
+        tx = float(d.get('taxes', 0) or 0)
+        net_trade = round(p + comm + sw + tx, 2)
+        profits.append(net_trade)
+        st = str(d.get('type', '')).lower()
+        if st == 'sell':
+            short_deals.append(net_trade)
+        else:
+            long_deals.append(net_trade)
+        if net_trade >= 0:
+            gross_profit += net_trade
+        else:
+            gross_loss += abs(net_trade)
+
+    gross_profit = round(gross_profit, 2)
+    gross_loss = round(gross_loss, 2)
+    tot_trades = len(trade_deals)
+
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0.0
+    expected_payoff = round(tot_closed_net / tot_trades, 2) if tot_trades > 0 else 0.0
+
+    # Drawdown calculation matching MT4
+    curve_val = bal_before_trades
+    balance_curve = []
+    trade_pnl = 0.0
+    min_trade_pnl = 0.0
+
+    for p in profits:
+        curve_val = round(curve_val + p, 2)
+        trade_pnl = round(trade_pnl + p, 2)
+        if trade_pnl < min_trade_pnl:
+            min_trade_pnl = trade_pnl
+        balance_curve.append(curve_val)
+
+    abs_dd = abs(min_trade_pnl)
+
+    peak = balance_curve[0] if balance_curve else 0.0
+    max_dd = 0.0
+    max_dd_pct = 0.0
+    rel_dd_pct = 0.0
+    rel_dd_val = 0.0
+
+    for x in balance_curve:
+        if x > peak:
+            peak = x
+        drop = peak - x
+        pct = (drop / peak * 100.0) if peak > 0 else 0.0
+        if drop > max_dd:
+            max_dd = drop
+            max_dd_pct = pct
+        if pct > rel_dd_pct:
+            rel_dd_pct = pct
+            rel_dd_val = drop
+
+    max_dd = round(max_dd, 2)
+    max_dd_pct = round(max_dd_pct, 2)
+    rel_dd_pct = round(rel_dd_pct, 2)
+    rel_dd_val = round(rel_dd_val, 2)
+
+    # Trade counts & percentages
+    won_trades = sum(1 for p in profits if p >= 0)
+    lost_trades = sum(1 for p in profits if p < 0)
+    won_trades_pct = round(won_trades / tot_trades * 100.0, 2) if tot_trades > 0 else 0.0
+    lost_trades_pct = round(lost_trades / tot_trades * 100.0, 2) if tot_trades > 0 else 0.0
+
+    short_trades = len(short_deals)
+    short_won = sum(1 for p in short_deals if p >= 0)
+    short_won_pct = round(short_won / short_trades * 100.0, 2) if short_trades > 0 else 0.0
+
+    long_trades = len(long_deals)
+    long_won = sum(1 for p in long_deals if p >= 0)
+    long_won_pct = round(long_won / long_trades * 100.0, 2) if long_trades > 0 else 0.0
+
+    largest_win = max([p for p in profits if p >= 0], default=0.0)
+    largest_loss = min([p for p in profits if p < 0], default=0.0)
+
+    avg_win = round(gross_profit / won_trades, 2) if won_trades > 0 else 0.0
+    avg_loss = round(-gross_loss / lost_trades, 2) if lost_trades > 0 else 0.0
+
+    # Consecutive streaks
+    win_streaks = []
+    loss_streaks = []
+    cur_streak = 0
+    cur_streak_profit = 0.0
+    is_win = None
+
+    for p in profits:
+        win = (p >= 0)
+        if is_win is None or win == is_win:
+            cur_streak += 1
+            cur_streak_profit += p
+        else:
+            if is_win:
+                win_streaks.append((cur_streak, round(cur_streak_profit, 2)))
+            else:
+                loss_streaks.append((cur_streak, round(cur_streak_profit, 2)))
+            cur_streak = 1
+            cur_streak_profit = p
+        is_win = win
+
+    if is_win is not None:
+        if is_win:
+            win_streaks.append((cur_streak, round(cur_streak_profit, 2)))
+        else:
+            loss_streaks.append((cur_streak, round(cur_streak_profit, 2)))
+
+    max_win_by_count = max(win_streaks, key=lambda x: x[0]) if win_streaks else (0, 0.0)
+    max_loss_by_count = max(loss_streaks, key=lambda x: x[0]) if loss_streaks else (0, 0.0)
+
+    max_win_by_profit = max(win_streaks, key=lambda x: x[1]) if win_streaks else (0, 0.0)
+    max_loss_by_loss = min(loss_streaks, key=lambda x: x[1]) if loss_streaks else (0, 0.0)
+
+    avg_win_streak = round(sum(s[0] for s in win_streaks) / len(win_streaks)) if win_streaks else 0
+    avg_loss_streak = round(sum(s[0] for s in loss_streaks) / len(loss_streaks)) if loss_streaks else 0
+
+    safe_id = re.sub(r"[^\w\-]", "_", acct_id)
+    img_name = f"{safe_id}.gif"
+
+    open_trades_content = chr(10).join(open_rows) if open_rows else '<tr align=right><td colspan=14 align=center>No transactions</td></tr>'
+
+    # ── HTML Assembly ──
     html_content = f"""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
 <html>
   <head>
@@ -2711,15 +3340,17 @@ def _render_metatrader_html_statement(stmt):
     <td colspan=2><b>Account: {acct_number}</b></td>
     <td colspan=5><b>Name: {acct_name}</b></td>
     <td colspan=2><b>Currency: {currency}</b></td>
-    <td colspan=2><b>Leverage: 1:{leverage}</b></td>
+    <td colspan=2><b>Leverage: {leverage}</b></td>
     <td colspan=3 align=right><b>{date_str}</b></td></tr>
 
-<tr align=left><td colspan=14><b>Closed Transactions:</b></td></tr>
+<tr align=left><td colspan=13><b>Closed Transactions:</b></td></tr>
 <tr align=center bgcolor="#C0C0C0">
    <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
    <td>Price</td><td>S / L</td><td>T / P</td><td nowrap>Close Time</td>
    <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
-{closed_tr_html}
+{chr(10).join(closed_rows)}
+
+
 <tr align=right>
     <td colspan=10>&nbsp;</td>
     <td class=mspt>{_mspt(tot_closed_comm)}</td>
@@ -2738,7 +3369,9 @@ def _render_metatrader_html_statement(stmt):
     <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
     <td>Price</td><td>S / L</td><td>T / P</td><td>&nbsp;</td>
     <td>Price</td><td>Commission</td><td>Taxes</td><td>Swap</td><td>Profit</td></tr>
-{open_tr_html}
+{open_trades_content}
+
+
 <tr align=right>
     <td colspan=10>&nbsp;</td>
     <td class=mspt>{_mspt(tot_open_comm)}</td>
@@ -2746,15 +3379,15 @@ def _render_metatrader_html_statement(stmt):
     <td class=mspt>{_mspt(tot_open_swap)}</td>
     <td class=mspt>{_mspt(tot_open_pnl)}</td>
 </tr>
-
 <tr><td colspan=10>&nbsp;</td><td colspan=2 align=right><b>Floating P/L:</b></td>
-    <td colspan=2 align=right title="Commission + Swap + Profit + Taxes" class=mspt><b>{_mspt(tot_open_net)}</b></td></tr>
+    <td colspan=2 align=right title="Commission + Swap + Profit" class=mspt><b>{_mspt(floating_pnl)}</b></td></tr>
 
 <tr align=left><td colspan=14><b>Working Orders:</b></td></tr>
 <tr align=center bgcolor="#C0C0C0">
     <td>Ticket</td><td nowrap>Open Time</td><td>Type</td><td>Size</td><td>Item</td>
     <td>Price</td><td>S / L</td><td>T / P</td><td colspan=2 nowrap>Market Price</td><td colspan=4>&nbsp;</td></tr>
-<tr align=right><td colspan=14 align=center>No transactions</td></tr>
+<tr align=right><td colspan=13 align=center>No transactions</td></tr>
+
 
 <tr><td colspan=14 style="font: 1pt arial">&nbsp;</td></tr>
 
@@ -2763,14 +3396,14 @@ def _render_metatrader_html_statement(stmt):
     <td colspan=2><b>Deposit/Withdrawal:</b></td>
     <td colspan=2 class=mspt><b>{_mspt(deposit_withdrawal)}</b></td>
     <td colspan=4><b>Credit Facility:</b></td>
-    <td class=mspt><b>0.00</b></td>
+    <td class=mspt><b>{_mspt(credit)}</b></td>
     <td colspan=5>&nbsp;</td></tr>
     
 <tr align=right>
     <td colspan=2><b>Closed Trade P/L:</b></td>
     <td colspan=2 class=mspt><b>{_mspt(tot_closed_net)}</b></td>
     <td colspan=4><b>Floating P/L:</b></td>
-    <td class=mspt><b>{_mspt(tot_open_net)}</b></td>
+    <td class=mspt><b>{_mspt(floating_pnl)}</b></td>
     <td colspan=3><b>Margin:</b></td>
     <td colspan=2 class=mspt><b>{_mspt(margin)}</b></td></tr>
 
@@ -2781,10 +3414,1252 @@ def _render_metatrader_html_statement(stmt):
     <td class=mspt><b>{_mspt(equity)}</b></td>
     <td colspan=3><b>Free Margin:</b></td>
     <td colspan=2 class=mspt><b>{_mspt(free_margin)}</b></td></tr>
-	
+    
+<tr><td colspan=14 style="font: 1pt arial">&nbsp;</td></tr>
+<tr align=left><td colspan=14><b>Details:</b></td></tr>
+
+<tr align=center><td colspan=14><img src="{img_name}" width=820 height=200 border=0 alt="Graph"></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Gross Profit:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(gross_profit)}</b></td>
+    <td colspan=4><b>Gross Loss:</b></td>
+    <td class=mspt><b>{_mspt(gross_loss)}</b></td>
+    <td colspan=3><b>Total Net Profit:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(tot_closed_net)}</b></td></tr>
+    
+<tr align=right>
+    <td colspan=2><b>Profit Factor:</b></td>
+    <td colspan=2 class=mspt><b>{profit_factor:.2f}</b></td>
+    <td colspan=4><b>Expected Payoff:</b></td>
+    <td class=mspt><b>{expected_payoff:.2f}</b></td>
+    <td colspan=5>&nbsp;</td></tr>
+    
+<tr align=right>
+    <td colspan=2><b>Absolute Drawdown:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(abs_dd)}</b></td>
+    <td colspan=4><b>Maximal Drawdown:</b></td>
+    <td class=mspt><b>{_mspt(max_dd)} ({max_dd_pct:.2f}%)</b></td>
+    <td colspan=3><b>Relative Drawdown:</b></td>
+    <td colspan=2 class=mspt><b>{rel_dd_pct:.2f}% ({_mspt(rel_dd_val)})</b></td></tr>
+
+<tr><td colspan=14 style="font: 1pt arial">&nbsp;</td></tr>
+    
+<tr align=right>
+    <td colspan=2><b>Total Trades:</b></td>
+    <td colspan=2 class=mspt><b>{tot_trades}</b></td>
+    <td colspan=4><b>Short Positions (won %):</b></td>
+    <td class=mspt><b>{short_trades} ({short_won_pct:.2f}%)</b></td>
+    <td colspan=3><b>Long Positions (won %):</b></td>
+    <td colspan=2 class=mspt><b>{long_trades} ({long_won_pct:.2f}%)</b></td></tr>
+
+<tr align=right>
+    <td colspan=8><b>Profit Trades (% of total):</b></td>
+    <td class=mspt><b>{won_trades} ({won_trades_pct:.2f}%)</b></td>
+    <td colspan=3><b>Loss trades (% of total):</b></td>
+    <td colspan=2 class=mspt><b>{lost_trades} ({lost_trades_pct:.2f}%)</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Largest</b></td>
+    <td colspan=6><b>profit trade:</b></td>
+    <td class=mspt><b>{_mspt(largest_win)}</b></td>
+    <td colspan=3><b>loss trade:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(largest_loss)}</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Average</b></td>
+    <td colspan=6><b>profit trade:</b></td>
+    <td class=mspt><b>{_mspt(avg_win)}</b></td>
+    <td colspan=3><b>loss trade:</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(avg_loss)}</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Maximum</b></td>
+    <td colspan=6><b>consecutive wins ($):</b></td>
+    <td class=mspt><b>{max_win_by_count[0]} ({_mspt(max_win_by_count[1])})</b></td>
+    <td colspan=3><b>consecutive losses ($):</b></td>
+    <td colspan=2 class=mspt><b>{max_loss_by_count[0]} ({_mspt(max_loss_by_count[1])})</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Maximal</b></td>
+    <td colspan=6><b>consecutive profit (count):</b></td>
+    <td class=mspt><b>{_mspt(max_win_by_profit[1])} ({max_win_by_profit[0]})</b></td>
+    <td colspan=3><b>consecutive loss (count):</b></td>
+    <td colspan=2 class=mspt><b>{_mspt(max_loss_by_loss[1])} ({max_loss_by_loss[0]})</b></td></tr>
+
+<tr align=right>
+    <td colspan=2><b>Average</b></td>
+    <td colspan=6><b>consecutive wins:</b></td>
+    <td class=mspt><b>{avg_win_streak}</b></td>
+    <td colspan=3><b>consecutive losses:</b></td>
+    <td colspan=2 class=mspt><b>{avg_loss_streak}</b></td></tr>
 </table>
 </div></body></html>"""
     return html_content
+
+
+def _render_pure_png_graph(curve, out_path, width=820, height=200):
+    """Zero-dependency pure Python PNG balance graph generator using zlib/struct."""
+    try:
+        if not curve:
+            curve = [0.0, 0.0]
+        elif len(curve) == 1:
+            curve = [curve[0], curve[0]]
+
+        w, h = width, height
+        rows = [bytearray(b'\xff\xff\xff' * w) for _ in range(h)]
+
+        x0, y0 = 3, 3
+        x1, y1 = w - 40, h - 15
+
+        # Dotted horizontal line
+        for x in range(x0, x1, 2):
+            rows[y0][x*3:x*3+3] = b'\xcc\xcc\xcc'
+            rows[y1][x*3:x*3+3] = b'\xcc\xcc\xcc'
+            for y in range(y0 + 32, y1, 32):
+                rows[y][x*3:x*3+3] = b'\xcc\xcc\xcc'
+
+        # Dotted vertical line
+        for y in range(y0, y1, 2):
+            rows[y][x0*3:x0*3+3] = b'\xcc\xcc\xcc'
+            rows[y][x1*3:x1*3+3] = b'\xcc\xcc\xcc'
+            for x in range(x0 + 32, x1, 32):
+                rows[y][x*3:x*3+3] = b'\xcc\xcc\xcc'
+
+        min_v = min(curve)
+        max_v = max(curve)
+        if min_v == max_v:
+            min_v -= 100.0
+            max_v += 100.0
+        v_range = max_v - min_v
+        plot_w = x1 - x0
+        plot_h = y1 - y0
+
+        n = len(curve)
+        prev_x, prev_y = None, None
+        for i, val in enumerate(curve):
+            cur_x = x0 + int((i / (n - 1)) * plot_w) if n > 1 else x0
+            cur_y = y0 + plot_h - int(((val - min_v) / v_range) * plot_h)
+            cur_x = max(x0, min(x1, cur_x))
+            cur_y = max(y0, min(y1, cur_y))
+
+            if prev_x is not None:
+                dx = abs(cur_x - prev_x)
+                dy = abs(cur_y - prev_y)
+                sx = 1 if prev_x < cur_x else -1
+                sy = 1 if prev_y < cur_y else -1
+                err = dx - dy
+                lx, ly = prev_x, prev_y
+                while True:
+                    if 0 <= lx < w and 0 <= ly < h:
+                        rows[ly][lx*3:lx*3+3] = b'\x00\x00\xb0'
+                        if ly + 1 < h:
+                            rows[ly+1][lx*3:lx*3+3] = b'\x00\x00\xb0'
+                    if lx == cur_x and ly == cur_y:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        lx += sx
+                    if e2 < dx:
+                        err += dx
+                        ly += sy
+            prev_x, prev_y = cur_x, cur_y
+
+        raw_data = bytearray()
+        for row in rows:
+            raw_data.append(0)
+            raw_data.extend(row)
+        compressed = zlib.compress(bytes(raw_data), 6)
+
+        def make_chunk(chunk_type, data):
+            length = struct.pack('>I', len(data))
+            tag = chunk_type.encode('ascii')
+            crc = struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
+            return length + tag + data + crc
+
+        png_bytes = bytearray(b'\x89PNG\r\n\x1a\n')
+        ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+        png_bytes.extend(make_chunk('IHDR', ihdr))
+        png_bytes.extend(make_chunk('IDAT', compressed))
+        png_bytes.extend(make_chunk('IEND', b''))
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, 'wb') as f:
+            f.write(png_bytes)
+        return True
+    except Exception as e:
+        logger.error("[STMTS] Pure PNG generator error: %s", e)
+        return False
+
+
+def _generate_mt5_balance_graph(deals, positions, out_path):
+    """Generate a pixel-accurate MT5 balance graph PNG image using PIL with automatic fallback."""
+    curve = []
+    if deals:
+        sorted_deals = sorted(deals, key=lambda d: (d.get('open_time') or d.get('close_time') or '', int(d.get('ticket') or d.get('deal') or 0)))
+        b = 0.0
+        for d in sorted_deals:
+            p = float(d.get('profit') or 0.0)
+            c = float(d.get('commission') or 0.0)
+            fee = float(d.get('fee') or 0.0)
+            s = float(d.get('swap') or 0.0)
+            b += (p + c + fee + s)
+            curve.append(b)
+    elif positions:
+        sorted_pos = sorted(positions, key=lambda x: (x.get('close_time', ''), int(x.get('ticket') or 0)))
+        b = 0.0
+        for p in sorted_pos:
+            b += (float(p.get('profit', 0.0) or 0.0) + float(p.get('swap', 0.0) or 0.0) + float(p.get('commission', 0.0) or 0.0))
+            curve.append(b)
+    else:
+        curve = [0.0, 0.0]
+
+    # Try PIL rendering first (auto-installing Pillow if missing)
+    try:
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            _ensure_dependency("PIL", "Pillow")
+            from PIL import Image, ImageDraw, ImageFont
+
+        w, h = 1230, 300
+        img = Image.new('RGB', (w, h), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+
+        plot_x0, plot_y0 = 5, 5
+        plot_x1, plot_y1 = 1163, 276
+        plot_w = plot_x1 - plot_x0
+        plot_h = plot_y1 - plot_y0
+
+        try:
+            font = ImageFont.truetype('tahoma.ttf', 11)
+        except Exception:
+            font = ImageFont.load_default()
+
+        def draw_dotted_h_line(y, x_start, x_end, color=(204, 204, 204)):
+            for x in range(x_start, x_end, 2):
+                draw.point((x, y), fill=color)
+
+        def draw_dotted_v_line(x, y_start, y_end, color=(204, 204, 204)):
+            for y in range(y_start, y_end, 2):
+                draw.point((x, y), fill=color)
+
+        # Outer border
+        draw_dotted_h_line(plot_y0, plot_x0, plot_x1)
+        draw_dotted_h_line(plot_y1, plot_x0, plot_x1)
+        draw_dotted_v_line(plot_x0, plot_y0, plot_y1)
+        draw_dotted_v_line(plot_x1, plot_y0, plot_y1)
+
+        # Internal grid lines (48px step)
+        for y in range(plot_y0 + 31, plot_y1, 48):
+            draw_dotted_h_line(y, plot_x0, plot_x1)
+        for x in range(plot_x0 + 47, plot_x1, 48):
+            draw_dotted_v_line(x, plot_y0, plot_y1)
+
+        min_val = min(curve)
+        max_val = max(curve)
+        if min_val == max_val:
+            min_val -= 100.0
+            max_val += 100.0
+        val_range = max_val - min_val
+
+        # Y-axis labels at right side
+        num_y_labels = 6
+        for i in range(num_y_labels):
+            y = plot_y0 + int(plot_h * i / (num_y_labels - 1))
+            val = max_val - (i / (num_y_labels - 1)) * val_range
+            lbl = f"{val:,.0f}".replace(",", " ")
+            draw.text((plot_x1 + 6, y - 6), lbl, fill=(0, 0, 0), font=font)
+
+        # X-axis labels at bottom
+        num_x_labels = 6
+        n_points = len(curve)
+        for i in range(num_x_labels):
+            x = plot_x0 + int(plot_w * i / (num_x_labels - 1))
+            val = int((i / (num_x_labels - 1)) * n_points)
+            draw.text((x - 10, plot_y1 + 4), str(val), fill=(0, 0, 0), font=font)
+
+        points = []
+        for i, val in enumerate(curve):
+            x = plot_x0 + (i / (n_points - 1)) * plot_w if n_points > 1 else plot_x0
+            y = plot_y0 + plot_h - ((val - min_val) / val_range) * plot_h
+            points.append((x, y))
+
+        if len(points) >= 2:
+            draw.line(points, fill=(0, 0, 176), width=2)
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        img.save(out_path, format="PNG")
+        return True
+    except Exception as pil_err:
+        logger.warning("[STMTS] PIL graph generation failed (%s), using pure-Python fallback...", pil_err)
+        return _render_pure_png_graph(curve, out_path)
+
+
+def _generate_mt4_balance_graph(deals, out_path, safe_id=None):
+    """Generate a pixel-accurate MT4 balance graph GIF/PNG matching native MT4 DetailedStatement.gif."""
+    def sort_key(d):
+        c_time = d.get("close_time") or d.get("open_time") or ""
+        if str(d.get("type", "")).lower() in ("balance", "credit"):
+            c_time = d.get("open_time") or ""
+        return (c_time, int(d.get("ticket") or 0))
+
+    sorted_deals = sorted(deals or [], key=sort_key)
+
+    b = 0.0
+    curve = []
+    for d in sorted_deals:
+        stype = str(d.get("type", "")).lower()
+        p = float(d.get("profit", 0) or 0)
+        comm = float(d.get("commission", 0) or 0)
+        sw = float(d.get("swap", 0) or 0)
+        tx = float(d.get("taxes", 0) or 0)
+        net = p + comm + sw + tx
+        if stype == "balance":
+            b = round(b + p, 2)
+            curve.append(b)
+        elif stype == "credit":
+            pass
+        else:
+            b = round(b + net, 2)
+            curve.append(b)
+
+    if not curve:
+        curve = [0.0, 0.0]
+    elif len(curve) == 1:
+        curve = [curve[0], curve[0]]
+
+    w, h = 820, 200
+
+    try:
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            _ensure_dependency("PIL", "Pillow")
+            from PIL import Image, ImageDraw, ImageFont
+
+        im = Image.new("RGB", (w, h), (255, 255, 255))
+        draw = ImageDraw.Draw(im)
+
+        x0, y0 = 4, 4
+        x1, y1 = 775, 183
+
+        # Vertical grid lines and bottom ticks (every 32px starting at 36)
+        for gx in range(36, x1, 32):
+            for gy in range(y0, y1, 2):
+                draw.point((gx, gy), fill=(204, 204, 204))
+            draw.line([(gx, y1), (gx, y1 + 2)], fill=(0, 0, 0))
+
+        # Horizontal grid lines and right ticks (every 32px starting at 22)
+        for gy in range(22, y1, 32):
+            for gx in range(x0, x1, 2):
+                draw.point((gx, gy), fill=(204, 204, 204))
+            draw.line([(x1, gy), (x1 + 2, gy)], fill=(0, 0, 0))
+
+        # Black outer border of chart plot
+        draw.rectangle([x0, y0, x1, y1], outline=(0, 0, 0))
+
+        # Font for axis labels
+        try:
+            font = ImageFont.truetype("arial.ttf", 9)
+        except Exception:
+            font = ImageFont.load_default()
+
+        # MT4 autoscale logic:
+        # In MT4, the 5 grid intervals (6 grid lines at y=22, 54, 86, 118, 150, 182)
+        # use a ~5% margin below data_min, and step is scaled to reach data_max near top.
+        # When values exceed 100,000, labels are displayed in hundreds (divided by 100)
+        # without thousands separators.
+        data_min = min(0.0, min(curve))
+        data_max = max(curve) if max(curve) > 0 else 100.0
+        span = data_max - data_min if data_max != data_min else 100.0
+
+        if data_max >= 100000.0:
+            # Scale in hundreds
+            bot_val = round((data_min - span * 0.0498) / 100.0) * 100.0
+            step_val = round(((data_max - bot_val) / 5.05) / 100.0) * 100.0
+            top_val = bot_val + 5 * step_val
+            lbl_divisor = 100.0
+        else:
+            bot_val = data_min
+            top_val = data_max
+            step_val = (top_val - bot_val) / 5.0
+            lbl_divisor = 1.0
+
+        val_range = top_val - bot_val if top_val != bot_val else 1.0
+        plot_w = x1 - x0
+        n_pts = len(curve)
+
+        pts = []
+        for i, v in enumerate(curve):
+            px = x0 + int((i / (n_pts - 1)) * plot_w) if n_pts > 1 else x0
+            py = 182 - int(((v - bot_val) / val_range) * 160)
+            px = max(x0, min(x1, px))
+            py = max(y0, min(y1, py))
+            pts.append((px, py))
+
+        if len(pts) >= 2:
+            draw.line(pts, fill=(0, 0, 176), width=1)
+
+        # Draw Y labels (at the 6 horizontal grid lines: 22, 54, 86, 118, 150, 182)
+        for idx, gy in enumerate([182, 150, 118, 86, 54, 22]):
+            v = bot_val + idx * step_val
+            lbl = f"{int(round(v / lbl_divisor))}"
+            draw.text((x1 + 5, gy - 5), lbl, fill=(0, 0, 0), font=font)
+
+        # Draw X labels (centered under each vertical grid tick)
+        for gx in range(36, x1, 32):
+            val = int(((gx - x0) / plot_w) * n_pts)
+            lbl = str(val)
+            bbox = font.getbbox(lbl)
+            tw = bbox[2] - bbox[0]
+            draw.text((gx - tw // 2, y1 + 5), lbl, fill=(0, 0, 0), font=font)
+
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        base_no_ext = os.path.splitext(out_path)[0]
+        im.save(base_no_ext + ".gif", format="GIF")
+        im.save(base_no_ext + ".png", format="PNG")
+        return True
+    except Exception as e:
+        logger.warning("[STMTS] MT4 PIL graph generation error (%s), using pure PNG fallback...", e)
+        base_no_ext = os.path.splitext(out_path)[0]
+        return _render_pure_png_graph(curve, base_no_ext + ".png", width=w, height=h)
+
+
+def _render_metatrader5_html_statement(stmt):
+    """Render a native MetaTrader 5 Trade Account Report or Trade History Report matching native MT5 platform reports."""
+    acct_id = str(stmt.get("account_id", ""))
+
+    acct_number = _resolve_acct_number(
+        stmt.get("login") or stmt.get("account_number"), acct_id
+    )
+    acct_name = _resolve_owner_name(stmt, acct_id)
+    company_name = _resolve_broker_name(
+        stmt.get("company") or stmt.get("broker"),
+        stmt.get("server"),
+        acct_id,
+    ) or "MetaQuotes Software Corp."
+
+    currency = str(stmt.get("currency", "USD"))
+    server_name = _resolve_server_name(stmt.get("server"), acct_id, company_name)
+
+    trade_mode = str(stmt.get("trade_mode") or "real")
+    margin_type = str(stmt.get("margin_type") or "Hedge")
+    account_detail = f"{acct_number}&nbsp;({currency},&nbsp;{server_name},&nbsp;{trade_mode},&nbsp;{margin_type})"
+
+    date_raw = stmt.get("date") or datetime.now().strftime("%Y.%m.%d %H:%M")
+    try:
+        if "T" in str(date_raw):
+            dt = datetime.fromisoformat(str(date_raw))
+            date_str = dt.strftime("%Y.%m.%d %H:%M")
+        elif "-" in str(date_raw) and "." not in str(date_raw):
+            dt = datetime.strptime(str(date_raw)[:16], "%Y-%m-%d %H:%M")
+            date_str = dt.strftime("%Y.%m.%d %H:%M")
+        else:
+            date_str = str(date_raw)[:16]
+    except Exception:
+        date_str = str(date_raw)[:16]
+
+    balance = float(stmt.get("balance", 0.0) if stmt.get("balance") is not None else 0.0)
+    equity = float(stmt.get("equity", 0.0) if stmt.get("equity") is not None else 0.0)
+    margin = float(stmt.get("margin", 0.0) or 0.0)
+    free_margin = float(stmt.get("free_margin", 0.0) if stmt.get("free_margin") is not None else 0.0)
+    floating_pnl = equity - balance
+    margin_level_pct = (equity / margin * 100.0) if margin > 0 else 0.0
+
+    open_positions = stmt.get("open_positions") or []
+    positions = list(stmt.get("positions") or [])
+    orders = list(stmt.get("orders") or [])
+    closed_deals = list(stmt.get("deals") or [])
+
+    # If positions list is not explicitly provided, synthesize paired positions from deals
+    if not positions and closed_deals:
+        pos_map = {}
+        fallback_pos = []
+        for d in closed_deals:
+            stype = str(d.get("type", "")).lower().replace("deal", "")
+            if "balance" in stype or "credit" in stype:
+                continue
+            pos_id = d.get("position") or d.get("position_ticket")
+            direction = str(d.get("direction", "")).lower()
+            if pos_id and direction in ("in", "out"):
+                if pos_id not in pos_map:
+                    pos_map[pos_id] = {"in": None, "out": None, "all": []}
+                pos_map[pos_id]["all"].append(d)
+                if direction == "in" and not pos_map[pos_id]["in"]:
+                    pos_map[pos_id]["in"] = d
+                elif direction == "out":
+                    pos_map[pos_id]["out"] = d
+            else:
+                fallback_pos.append(d)
+
+        if pos_map:
+            synthesized = []
+            for pos_id, pdata in pos_map.items():
+                first_d = pdata["in"] or pdata["all"][0]
+                last_d = pdata["out"] or pdata["all"][-1]
+                tot_p = sum(float(x.get("profit") or 0.0) for x in pdata["all"])
+                tot_s = sum(float(x.get("swap") or 0.0) for x in pdata["all"])
+                tot_c = sum(float(x.get("commission") or 0.0) for x in pdata["all"])
+                tot_f = sum(float(x.get("fee") or 0.0) for x in pdata["all"])
+                ptype = (first_d.get("type") or last_d.get("type") or "").lower().replace("deal", "")
+                synthesized.append({
+                    "ticket": pos_id,
+                    "symbol": first_d.get("symbol") or last_d.get("symbol") or "",
+                    "type": ptype,
+                    "lots": float(last_d.get("lots") or first_d.get("lots") or 0.0),
+                    "open_price": float(first_d.get("price") or first_d.get("open_price") or 0.0),
+                    "close_price": float(last_d.get("price") or last_d.get("close_price") or 0.0),
+                    "open_time": first_d.get("open_time") or "",
+                    "close_time": last_d.get("close_time") or last_d.get("open_time") or "",
+                    "sl": float(first_d.get("sl") or 0.0),
+                    "tp": float(first_d.get("tp") or 0.0),
+                    "commission": tot_c + tot_f,
+                    "swap": tot_s,
+                    "profit": tot_p,
+                    "comment": first_d.get("comment") or last_d.get("comment") or "",
+                })
+            positions = synthesized
+        elif fallback_pos:
+            positions = fallback_pos
+
+    # Detect whether this report includes trade history (Trade History Report vs Trade Account Report)
+    has_history = bool(positions or closed_deals or orders or (stmt.get("closed_pnl") is not None and stmt.get("closed_deal_count", 0) > 0))
+    report_title = "Trade History Report" if has_history else "Trade Account Report"
+    doc_title = f"{acct_number}: {acct_name} - {report_title}" if acct_name else f"{acct_number} - {report_title}"
+
+    def _fmt(val, decimals=2):
+        if val is None:
+            return "0.00"
+        v = float(val)
+        s = f"{abs(v):,.{decimals}f}".replace(",", " ")
+        return f"-{s}" if v < 0 else s
+
+    def _fmtp(val):
+        if val is None or float(val) == 0.0:
+            return ""
+        return f"{float(val):.5f}"
+
+    def _fmtv(vol):
+        if vol is None or float(vol) == 0.0:
+            return ""
+        v = float(vol)
+        return str(int(v)) if v == int(v) else f"{v:.2f}"
+
+    # Build sections
+    sections_html = []
+
+    if has_history:
+        # ── 1. Closed Positions (History mode) ──
+        # In MT5, positions are ordered chronologically by close_time then ticket
+        sorted_positions = sorted(positions, key=lambda x: (x.get("close_time", ""), int(x.get("ticket") or x.get("position") or 0)))
+        closed_rows = []
+        tot_closed_comm = 0.0
+        tot_closed_swap = 0.0
+        tot_closed_profit = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        total_trades = 0
+        profit_trades = 0
+        loss_trades = 0
+        largest_profit = 0.0
+        largest_loss = 0.0
+        short_trades = 0
+        long_trades = 0
+        short_won = 0
+        long_won = 0
+
+        current_win_streak = 0
+        current_win_profit = 0.0
+        current_loss_streak = 0
+        current_loss_profit = 0.0
+        max_consec_wins = 0
+        max_consec_wins_profit = 0.0
+        max_consec_losses = 0
+        max_consec_losses_profit = 0.0
+        max_consec_profit_amount = 0.0
+        max_consec_profit_count = 0
+        max_consec_loss_amount = 0.0
+        max_consec_loss_count = 0
+        win_streaks = []
+        loss_streaks = []
+        trade_pnls = []
+
+        for idx, p in enumerate(sorted_positions):
+            stype = str(p.get("type", "")).lower().replace("deal", "")
+            if "balance" in stype or "credit" in stype:
+                continue
+            total_trades += 1
+            tkt = p.get("position") or p.get("ticket") or p.get("order") or ""
+            sym = str(p.get("symbol", "") or "")
+            volume = float(p.get("lots", 0.0) or 0.0)
+            o_time = p.get("open_time", "")
+            c_time = p.get("close_time", "")
+            o_price = float(p.get("open_price", 0.0) or 0.0)
+            c_price = float(p.get("close_price", 0.0) or 0.0)
+            sl = float(p.get("sl", 0.0) or 0.0)
+            tp = float(p.get("tp", 0.0) or 0.0)
+            comm = float(p.get("commission", 0.0) or 0.0)
+            swap = float(p.get("swap", 0.0) or 0.0)
+            profit = float(p.get("profit", 0.0) or 0.0)
+            comment = str(p.get("comment", "") or "")
+
+            tot_closed_comm += comm
+            tot_closed_swap += swap
+            tot_closed_profit += profit
+
+            val = profit + swap + comm
+            trade_pnls.append(val)
+
+            is_short = "sell" in stype
+            if is_short:
+                short_trades += 1
+                if val >= 0:
+                    short_won += 1
+            else:
+                long_trades += 1
+                if val >= 0:
+                    long_won += 1
+
+            if val >= 0:
+                gross_profit += val
+                profit_trades += 1
+                if val > largest_profit:
+                    largest_profit = val
+
+                if current_loss_streak > 0:
+                    loss_streaks.append(current_loss_streak)
+                    current_loss_streak = 0
+                    current_loss_profit = 0.0
+                current_win_streak += 1
+                current_win_profit += val
+                if current_win_streak > max_consec_wins:
+                    max_consec_wins = current_win_streak
+                    max_consec_wins_profit = current_win_profit
+                if current_win_profit > max_consec_profit_amount:
+                    max_consec_profit_amount = current_win_profit
+                    max_consec_profit_count = current_win_streak
+            else:
+                gross_loss += val
+                loss_trades += 1
+                if val < largest_loss:
+                    largest_loss = val
+
+                if current_win_streak > 0:
+                    win_streaks.append(current_win_streak)
+                    current_win_streak = 0
+                    current_win_profit = 0.0
+                current_loss_streak += 1
+                current_loss_profit += val
+                if current_loss_streak > max_consec_losses:
+                    max_consec_losses = current_loss_streak
+                    max_consec_losses_profit = current_loss_profit
+                if current_loss_profit < max_consec_loss_amount:
+                    max_consec_loss_amount = current_loss_profit
+                    max_consec_loss_count = current_loss_streak
+
+            bg = '#FFFFFF' if idx % 2 == 0 else '#F7F7F7'
+            hidden_comment = f'<td class="hidden" colspan="8">{comment}</td>' if comment else ''
+            closed_rows.append(
+                f'        <tr bgcolor="{bg}" align="right">\r\n'
+                f'            <td>{o_time}</td>\r\n'
+                f'            <td>{tkt}</td>\r\n'
+                f'            <td>{sym}</td>\r\n'
+                f'            <td>{stype}</td>\r\n'
+                f'            {hidden_comment}'
+                f'            <td class="">{_fmtv(volume)}</td>\r\n'
+                f'            <td class="">{_fmtp(o_price)}</td>\r\n'
+                f'            <td class="">{_fmtp(sl)}</td>\r\n'
+                f'            <td class="">{_fmtp(tp)}</td>\r\n'
+                f'            <td class="">{c_time}</td>\r\n'
+                f'            <td class="">{_fmtp(c_price)}</td>\r\n'
+                f'            <td class="">{_fmt(comm)}</td>\r\n'
+                f'            <td class="">{_fmt(swap)}</td>\r\n'
+                f'            <td colspan="2">{_fmt(profit)}</td>\r\n'
+                f'        </tr>'
+            )
+
+        if closed_rows:
+            sections_html.append(
+                '        <tr align="center">\r\n'
+                '            <th colspan="14" style="height: 25px"><div style="font: 10pt Tahoma"><b>Positions</b></div></th>\r\n'
+                '        </tr>\r\n'
+                '        <tr align="center" bgcolor="#E5F0FC">\r\n'
+                '            <td nowrap style="height: 30px"><b>Time</b></td>\r\n'
+                '            <td nowrap><b>Position</b></td>\r\n'
+                '            <td nowrap><b>Symbol</b></td>\r\n'
+                '            <td nowrap><b>Type</b></td>\r\n'
+                '            <td nowrap><b>Volume</b></td>\r\n'
+                '            <td nowrap><b>Price</b></td>\r\n'
+                '            <td nowrap><b>S / L</b></td>\r\n'
+                '            <td nowrap><b>T / P</b></td>\r\n'
+                '            <td nowrap><b>Time</b></td>\r\n'
+                '            <td nowrap><b>Price</b></td>\r\n'
+                '            <td nowrap><b>Commission</b></td>\r\n'
+                '            <td nowrap><b>Swap</b></td>\r\n'
+                '            <td nowrap colspan="2"><b>Profit</b></td>\r\n'
+                '        </tr>\r\n' + "\r\n".join(closed_rows) + '\r\n'
+                '        <tr>\r\n'
+                '            <td nowrap style="height: 10px"></td>\r\n'
+                '        </tr>'
+            )
+
+        # ── 2. Orders Section ──
+        if orders:
+            order_rows = []
+            for o_idx, ord_item in enumerate(orders):
+                ord_tkt = ord_item.get("ticket") or ord_item.get("order") or ""
+                ord_sym = ord_item.get("symbol") or ""
+                ord_type = str(ord_item.get("type") or "").lower().replace("order", "")
+                ord_lots = float(ord_item.get("lots") or 0.0)
+                ord_req_lots = float(ord_item.get("request_lots") or ord_lots)
+                vol_str = f"{_fmtv(ord_lots)} / {_fmtv(ord_req_lots)}" if ord_req_lots > 0 else _fmtv(ord_lots)
+                ord_price = float(ord_item.get("price") or 0.0)
+                price_str = "market" if ord_price == 0.0 else _fmtp(ord_price)
+                ord_sl = _fmtp(ord_item.get("sl"))
+                ord_tp = _fmtp(ord_item.get("tp"))
+                ord_otime = ord_item.get("open_time") or ""
+                ord_etime = ord_item.get("execution_time") or ord_otime
+                ord_state = str(ord_item.get("state") or "filled").lower()
+                ord_cmt = ord_item.get("comment") or ""
+                bg_ord = '#FFFFFF' if o_idx % 2 == 0 else '#F7F7F7'
+                order_rows.append(
+                    f'        <tr bgcolor="{bg_ord}" align="right"><td>{ord_otime}</td><td>{ord_tkt}</td><td>{ord_sym}</td><td>{ord_type}</td><td>{vol_str}</td><td>{price_str}</td><td>{ord_sl}</td><td>{ord_tp}</td><td>{ord_etime}</td><td colspan="2">{ord_state}</td><td colspan="3">{ord_cmt}</td></tr>'
+                )
+            sections_html.append(
+                '        <tr align="center">\r\n'
+                '            <th colspan="14" style="height: 25px"><div style="font: 10pt Tahoma"><b>Orders</b></div></th>\r\n'
+                '        </tr>\r\n'
+                '        <tr align="center" bgcolor="#E5F0FC">\r\n'
+                '            <td nowrap style="height: 30px"><b>Open Time</b></td>\r\n'
+                '            <td nowrap><b>Order</b></td>\r\n'
+                '            <td nowrap><b>Symbol</b></td>\r\n'
+                '            <td nowrap><b>Type</b></td>\r\n'
+                '            <td nowrap><b>Volume</b></td>\r\n'
+                '            <td nowrap><b>Price</b></td>\r\n'
+                '            <td nowrap><b>S / L</b></td>\r\n'
+                '            <td nowrap><b>T / P</b></td>\r\n'
+                '            <td nowrap><b>Time</b></td>\r\n'
+                '            <td nowrap colspan="2"><b>State</b></td>\r\n'
+                '            <td nowrap colspan="3"><b>Comment</b></td>\r\n'
+                '        </tr>\r\n' + "\r\n".join(order_rows) + '\r\n'
+                '        <tr>\r\n'
+                '            <td nowrap style="height: 10px"></td>\r\n'
+                '        </tr>'
+            )
+
+        # ── 3. Deals Section (History mode) ──
+        if closed_deals:
+            deal_rows = []
+            cur_bal = 0.0
+            tot_d_comm = 0.0
+            tot_d_fee = 0.0
+            tot_d_swap = 0.0
+            tot_d_profit = 0.0
+
+            for d_idx, d_item in enumerate(closed_deals):
+                d_time = d_item.get("open_time") or d_item.get("close_time") or ""
+                d_tkt = d_item.get("ticket") or d_item.get("deal") or ""
+                d_sym = d_item.get("symbol") or ""
+                d_type = str(d_item.get("type") or "").lower().replace("deal", "")
+                d_dir = str(d_item.get("direction") or "").lower()
+                d_lots = float(d_item.get("lots") or 0.0)
+                d_lots_str = _fmtv(d_lots) if d_lots > 0 else ""
+                d_price = float(d_item.get("price") or 0.0)
+                d_price_str = _fmtp(d_price) if d_price > 0 else ""
+                d_ord = d_item.get("order") or ""
+                d_ord_str = str(d_ord) if (d_ord and d_ord != 0 and d_ord != "0") else ""
+                d_comm = float(d_item.get("commission") or 0.0)
+                d_fee = float(d_item.get("fee") or 0.0)
+                d_swap = float(d_item.get("swap") or 0.0)
+                d_prof = float(d_item.get("profit") or 0.0)
+                d_cmt = d_item.get("comment") or ""
+
+                cur_bal += (d_prof + d_comm + d_fee + d_swap)
+                tot_d_comm += d_comm
+                tot_d_fee += d_fee
+                tot_d_swap += d_swap
+                tot_d_profit += d_prof
+
+                bg_deal = '#FFFFFF' if d_idx % 2 == 0 else '#F7F7F7'
+                deal_rows.append(
+                    f'        <tr bgcolor="{bg_deal}" align="right"><td nowrap>{d_time}</td><td nowrap>{d_tkt}</td><td nowrap>{d_sym}</td><td nowrap>{d_type}</td><td nowrap>{d_dir}</td><td nowrap>{d_lots_str}</td><td nowrap>{d_price_str}</td><td nowrap>{d_ord_str}</td><td nowrap class="hidden"></td><td nowrap>{_fmt(d_comm)}</td><td nowrap>{_fmt(d_fee)}</td><td nowrap>{_fmt(d_swap)}</td><td nowrap>{_fmt(d_prof)}</td><td nowrap>{_fmt(cur_bal)}</td><td nowrap>{d_cmt}</td></tr>'
+                )
+
+            sections_html.append(
+                '        <tr align="center">\r\n'
+                '            <th colspan="14" style="height: 25px"><div style="font: 10pt Tahoma"><b>Deals</b></div></th>\r\n'
+                '        </tr>\r\n'
+                '        <tr align="center" bgcolor="#E5F0FC">\r\n'
+                '            <td nowrap style="height: 30px"><b>Time</b></td>\r\n'
+                '            <td nowrap><b>Deal</b></td>\r\n'
+                '            <td nowrap><b>Symbol</b></td>\r\n'
+                '            <td nowrap><b>Type</b></td>\r\n'
+                '            <td nowrap><b>Direction</b></td>\r\n'
+                '            <td nowrap><b>Volume</b></td>\r\n'
+                '            <td nowrap><b>Price</b></td>\r\n'
+                '            <td nowrap><b>Order</b></td>\r\n'
+                '            <td nowrap class="hidden"><b>Cost</b></td>\r\n'
+                '            <td nowrap><b>Commission</b></td>\r\n'
+                '            <td nowrap><b>Fee</b></td>\r\n'
+                '            <td nowrap><b>Swap</b></td>\r\n'
+                '            <td nowrap><b>Profit</b></td>\r\n'
+                '            <td nowrap><b>Balance</b></td>\r\n'
+                '            <td nowrap><b>Comment</b></td>\r\n'
+                '        </tr>\r\n' + "\r\n".join(deal_rows) + '\r\n'
+                '        <tr align="right">\r\n'
+                '            <td nowrap colspan="8" style="height: 30px"></td>\r\n'
+                f'            <td nowrap><b>{_fmt(tot_d_comm)}</b></td>\r\n'
+                f'            <td nowrap><b>{_fmt(tot_d_fee)}</b></td>\r\n'
+                f'            <td nowrap><b>{_fmt(tot_d_swap)}</b></td>\r\n'
+                f'            <td nowrap><b>{_fmt(tot_d_profit)}</b></td>\r\n'
+                f'            <td nowrap><b>{_fmt(cur_bal)}</b></td>\r\n'
+                '            <td nowrap></td>\r\n'
+                '        </tr>\r\n'
+                '        <tr align="right">\r\n'
+                '            <td colspan="13" style="height: 10px"></td>\r\n'
+                '        </tr>'
+            )
+
+        # ── 4. Open Positions (History mode) ──
+        open_rows = []
+        tot_open_swap = 0.0
+        tot_open_profit = 0.0
+        for idx, p in enumerate(open_positions):
+            tkt = p.get("ticket", "")
+            o_time = p.get("open_time") or (datetime.fromtimestamp(p["open_epoch"]).strftime("%Y.%m.%d %H:%M:%S") if p.get("open_epoch") else "")
+            stype = p.get("side") or ("buy" if p.get("type") == 0 else "sell")
+            volume = float(p.get("lots", 0.0) or 0.0)
+            symbol = str(p.get("symbol", ""))
+            o_price = float(p.get("open_price", 0.0) or 0.0)
+            m_price = float(p.get("market_price", o_price) or o_price)
+            sl = float(p.get("sl", 0.0) or 0.0)
+            tp = float(p.get("tp", 0.0) or 0.0)
+            swap = float(p.get("swap", 0.0) or 0.0)
+            profit = float(p.get("profit", 0.0) or 0.0)
+            comment = str(p.get("comment", "") or "")
+            tot_open_swap += swap
+            tot_open_profit += profit
+            bg = '#FFFFFF' if idx % 2 == 0 else '#F7F7F7'
+            open_rows.append(
+                f'        <tr bgcolor="{bg}" align="right"><td>{o_time}</td><td>{tkt}</td><td>{symbol}</td><td>{stype}</td><td>{_fmtv(volume)}</td><td>{_fmtp(o_price)}</td><td>{_fmtp(sl)}</td><td>{_fmtp(tp)}</td><td>{_fmtp(m_price)}</td><td>{_fmt(swap)}</td><td>{_fmt(profit)}</td><td colspan="3">{comment}</td></tr>'
+            )
+
+        if open_rows:
+            sections_html.append(
+                '        <tr align="center">\r\n'
+                '            <th colspan="14" style="height: 25px"><div style="font: 10pt Tahoma"><b>Open Positions</b></div></th>\r\n'
+                '        </tr>\r\n'
+                '        <tr align="center" bgcolor="#E5F0FC">\r\n'
+                '            <td nowrap style="height: 30px"><b>Time</b></td>\r\n'
+                '            <td nowrap><b>Position</b></td>\r\n'
+                '            <td nowrap><b>Symbol</b></td>\r\n'
+                '            <td nowrap><b>Type</b></td>\r\n'
+                '            <td nowrap><b>Volume</b></td>\r\n'
+                '            <td nowrap><b>Price</b></td>\r\n'
+                '            <td nowrap><b>S / L</b></td>\r\n'
+                '            <td nowrap><b>T / P</b></td>\r\n'
+                '            <td nowrap><b>Market Price</b></td>\r\n'
+                '            <td nowrap><b>Swap</b></td>\r\n'
+                '            <td nowrap><b>Profit</b></td>\r\n'
+                '            <td nowrap colspan="3"><b>Comment</b></td>\r\n'
+                '        </tr>\r\n' + "\r\n".join(open_rows)
+            )
+
+    else:
+        # ── Only Open Positions (ReportTrade mode) ──
+        pos_rows = []
+        tot_pos_swap = 0.0
+        tot_pos_profit = 0.0
+        for idx, p in enumerate(open_positions):
+            tkt = p.get("ticket", "")
+            o_time = p.get("open_time") or (datetime.fromtimestamp(p["open_epoch"]).strftime("%Y.%m.%d %H:%M:%S") if p.get("open_epoch") else "")
+            stype = p.get("side") or ("buy" if p.get("type") == 0 else "sell")
+            volume = float(p.get("lots", 0.0) or 0.0)
+            symbol = str(p.get("symbol", ""))
+            o_price = float(p.get("open_price", 0.0) or 0.0)
+            m_price = float(p.get("market_price", o_price) or o_price)
+            sl = float(p.get("sl", 0.0) or 0.0)
+            tp = float(p.get("tp", 0.0) or 0.0)
+            swap = float(p.get("swap", 0.0) or 0.0)
+            profit = float(p.get("profit", 0.0) or 0.0)
+            comment = str(p.get("comment", "") or "")
+            tot_pos_swap += swap
+            tot_pos_profit += profit
+            bg = '#FFFFFF' if idx % 2 == 0 else '#F7F7F7'
+            pos_rows.append(
+                f'        <tr bgcolor="{bg}" align="right"><td>{o_time}</td><td>{tkt}</td><td>{symbol}</td><td>{stype}</td><td>{_fmtv(volume)}</td><td>{_fmtp(o_price)}</td><td>{_fmtp(sl)}</td><td>{_fmtp(tp)}</td><td>{_fmtp(m_price)}</td><td>{_fmt(swap)}</td><td>{_fmt(profit)}</td><td colspan="3">{comment}</td></tr>'
+            )
+
+        pos_content = "\r\n".join(pos_rows) if pos_rows else '        <tr align="right"><td colspan="14" align="center">No open positions</td></tr>'
+        sections_html.append(
+            '        <tr align="center">\r\n'
+            '            <th colspan="14" style="height: 25px"><div style="font: 10pt Tahoma"><b>Positions</b></div></th>\r\n'
+            '        </tr>\r\n'
+            '        <tr align="center" bgcolor="#E5F0FC">\r\n'
+            '            <td nowrap style="height: 30px"><b>Time</b></td>\r\n'
+            '            <td nowrap><b>Position</b></td>\r\n'
+            '            <td nowrap><b>Symbol</b></td>\r\n'
+            '            <td nowrap><b>Type</b></td>\r\n'
+            '            <td nowrap><b>Volume</b></td>\r\n'
+            '            <td nowrap><b>Price</b></td>\r\n'
+            '            <td nowrap><b>S / L</b></td>\r\n'
+            '            <td nowrap><b>T / P</b></td>\r\n'
+            '            <td nowrap><b>Market Price</b></td>\r\n'
+            '            <td nowrap><b>Swap</b></td>\r\n'
+            '            <td nowrap><b>Profit</b></td>\r\n'
+            '            <td nowrap colspan="3"><b>Comment</b></td>\r\n'
+            '        </tr>\r\n' + pos_content + '\r\n'
+            '        <tr align="right">\r\n'
+            '            <td colspan="9" style="height: 30px"></td>\r\n'
+            f'            <td nowrap><b>{_fmt(tot_pos_swap)}</b></td>\r\n'
+            f'            <td nowrap><b>{_fmt(tot_pos_profit)}</b></td>\r\n'
+            '            <td colspan="3"></td>\r\n'
+            '        </tr>'
+        )
+
+    body_sections = "\r\n".join(sections_html)
+
+    # Results block (for history reports)
+    results_html = ""
+    if has_history and total_trades > 0:
+        safe_id = re.sub(r"[^\w\-]", "_", acct_id)
+        graph_filename = f"{safe_id}.png"
+
+        profit_factor = abs(gross_profit / gross_loss) if gross_loss != 0 else (gross_profit if gross_profit > 0 else 0.0)
+        expected_payoff = tot_closed_profit / total_trades if total_trades > 0 else 0.0
+        avg_profit = gross_profit / profit_trades if profit_trades > 0 else 0.0
+        avg_loss = gross_loss / loss_trades if loss_trades > 0 else 0.0
+        profit_pct = (profit_trades / total_trades * 100.0) if total_trades > 0 else 0.0
+        loss_pct = (loss_trades / total_trades * 100.0) if total_trades > 0 else 0.0
+
+        short_won_pct = (short_won / short_trades * 100.0) if short_trades > 0 else 0.0
+        long_won_pct = (long_won / long_trades * 100.0) if long_trades > 0 else 0.0
+        if current_win_streak > 0:
+            win_streaks.append(current_win_streak)
+        if current_loss_streak > 0:
+            loss_streaks.append(current_loss_streak)
+        avg_consec_wins = round(sum(win_streaks) / len(win_streaks)) if win_streaks else 0
+        avg_consec_losses = round(sum(loss_streaks) / len(loss_streaks)) if loss_streaks else 0
+
+        # Balance Drawdowns (computed from cumulative closed trade PnL on initial deposit)
+        init_dep = 0.0
+        for d in closed_deals:
+            stype_d = str(d.get("type", "")).lower()
+            if "balance" in stype_d:
+                init_dep = float(d.get("profit") or 0.0)
+                break
+        if init_dep == 0.0 and balance > 0:
+            init_dep = balance
+
+        bal_tracker = init_dep
+        min_bal_tracker = bal_tracker
+        peak_tracker = bal_tracker
+        max_dd = 0.0
+        max_dd_peak = peak_tracker
+
+        for p in sorted_positions:
+            p_val = float(p.get("profit", 0.0) or 0.0) + float(p.get("swap", 0.0) or 0.0) + float(p.get("commission", 0.0) or 0.0)
+            bal_tracker += p_val
+            if bal_tracker < min_bal_tracker:
+                min_bal_tracker = bal_tracker
+            if bal_tracker > peak_tracker:
+                peak_tracker = bal_tracker
+            dd = peak_tracker - bal_tracker
+            if dd > max_dd:
+                max_dd = dd
+                max_dd_peak = peak_tracker
+
+        balance_dd_abs = init_dep - min_bal_tracker if init_dep > min_bal_tracker else 0.0
+        balance_dd_max = max_dd
+        balance_dd_max_pct = (max_dd / max_dd_peak * 100.0) if max_dd_peak > 0 else 0.0
+        balance_dd_rel_pct = balance_dd_max_pct
+        balance_dd_rel = balance_dd_max
+
+        recovery_factor = tot_closed_profit / balance_dd_max if balance_dd_max > 0 else 0.0
+
+        if total_trades > 1 and trade_pnls:
+            mean_pnl = sum(trade_pnls) / total_trades
+            var_pnl = sum((x - mean_pnl)**2 for x in trade_pnls) / (total_trades - 1)
+            std_pnl = math.sqrt(var_pnl) if var_pnl > 0 else 0.0
+            sharpe_ratio = abs(mean_pnl / std_pnl) if std_pnl > 0 else 0.0
+        else:
+            sharpe_ratio = 0.0
+
+        results_html = f"""
+        <tr align="right">
+            <td colspan="13" style="height: 10px"></td>
+        </tr>
+        <tr align="center">
+            <th colspan="13"><img src="{graph_filename}" title="Balance graph" width=820 height=200 border=0 alt="Graph"></th>
+        </tr>
+        <tr>
+            <td colspan="13" align="center"><div style="font: 10pt Tahoma"><b>Results</b></div></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Total Net Profit:</td>
+            <td nowrap><b>{_fmt(tot_closed_profit)}</b></td>
+            <td nowrap colspan="3">Gross Profit:</td>
+            <td nowrap><b>{_fmt(gross_profit)}</b></td>
+            <td nowrap colspan="3">Gross Loss:</td>
+            <td nowrap colspan="2"><b>{_fmt(gross_loss)}</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Profit Factor:</td>
+            <td nowrap><b>{profit_factor:.2f}</b></td>
+            <td nowrap colspan="3">Expected Payoff:</td>
+            <td nowrap><b>{expected_payoff:.2f}</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Recovery Factor:</td>
+            <td nowrap><b>{recovery_factor:.2f}</b></td>
+            <td nowrap colspan="3">Sharpe Ratio:</td>
+            <td nowrap><b>{sharpe_ratio:.2f}</b></td>
+        </tr>
+        <tr>
+            <td nowrap style="height: 10px"></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Balance Drawdown:</td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Balance Drawdown Absolute:</td>
+            <td nowrap><b>{_fmt(balance_dd_abs)}</b></td>
+            <td nowrap colspan="3">Balance Drawdown Maximal:</td>
+            <td nowrap><b>{_fmt(balance_dd_max)} ({balance_dd_max_pct:.2f}%)</b></td>
+            <td nowrap colspan="3">Balance Drawdown Relative:</td>
+            <td nowrap colspan="2"><b>{balance_dd_rel_pct:.2f}% ({_fmt(balance_dd_rel)})</b></td>
+        </tr>
+        <tr>
+            <td nowrap style="height: 10px"></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="3">Total Trades:</td>
+            <td nowrap><b>{total_trades}</b></td>
+            <td nowrap colspan="3">Short Trades (won %):</td>
+            <td nowrap><b>{short_trades} ({short_won_pct:.2f}%)</b></td>
+            <td nowrap colspan="3">Long Trades (won %):</td>
+            <td nowrap colspan="2"><b>{long_trades} ({long_won_pct:.2f}%)</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Profit Trades (% of total):</td>
+            <td nowrap><b>{profit_trades} ({profit_pct:.2f}%)</b></td>
+            <td nowrap colspan="3">Loss Trades (% of total):</td>
+            <td nowrap colspan="2"><b>{loss_trades} ({loss_pct:.2f}%)</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Largest profit trade:</td>
+            <td nowrap><b>{_fmt(largest_profit)}</b></td>
+            <td nowrap colspan="3">Largest loss trade:</td>
+            <td nowrap colspan="2"><b>{_fmt(largest_loss)}</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Average profit trade:</td>
+            <td nowrap><b>{_fmt(avg_profit)}</b></td>
+            <td nowrap colspan="3">Average loss trade:</td>
+            <td nowrap colspan="2"><b>{_fmt(avg_loss)}</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Maximum consecutive wins ($):</td>
+            <td nowrap><b>{max_consec_wins} ({_fmt(max_consec_wins_profit)})</b></td>
+            <td nowrap colspan="3">Maximum consecutive losses ($):</td>
+            <td nowrap colspan="2"><b>{max_consec_losses} ({_fmt(max_consec_losses_profit)})</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Maximal consecutive profit (count):</td>
+            <td nowrap><b>{_fmt(max_consec_profit_amount)} ({max_consec_profit_count})</b></td>
+            <td nowrap colspan="3">Maximal consecutive loss (count):</td>
+            <td nowrap colspan="2"><b>{_fmt(max_consec_loss_amount)} ({max_consec_loss_count})</b></td>
+        </tr>
+        <tr align="right">
+            <td nowrap colspan="4"></td>
+            <td nowrap colspan="3">Average consecutive wins:</td>
+            <td nowrap><b>{avg_consec_wins}</b></td>
+            <td nowrap colspan="3">Average consecutive losses:</td>
+            <td nowrap colspan="2"><b>{avg_consec_losses}</b></td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+  <head>
+    <title>{doc_title}</title>
+    <meta name="generator" content="client terminal">
+    <style type="text/css">
+    <!--
+    @media screen {{
+      td {{ font: 8pt  Tahoma,Arial; }}
+      th {{ font: 10pt Tahoma,Arial; }}
+    }}
+    @media print {{
+      td {{ font: 7pt Tahoma,Arial; }}
+      th {{ font: 9pt Tahoma,Arial; }}
+    }}
+    .msdate {{ mso-number-format:"General Date"; }}
+    .mspt   {{ mso-number-format:\\#\\,\\#\\#0\\.00;  }}
+    .hidden {{ display: none; }}
+    body {{margin:1px;}}
+    //-->
+    </style>
+  </head>
+<body>
+<div align="center">
+    <table cellspacing="1" cellpadding="3" border="0">
+        <tr align="center">
+            <td colspan="14"><div style="font: 14pt Tahoma"><b>{report_title}</b><br></div></td>
+        </tr>
+        <tr align="left">
+            <th colspan="4" nowrap align="right" style="width: 220px; height: 20px">Name:</th>
+            <th colspan="10" nowrap align="left" style="width: 220px; height: 20px"><b>{acct_name}</b></th>
+        </tr>
+        <tr align="left">
+            <th colspan="4" nowrap align="right" style="width: 220px; height: 20px">Account:</th>
+            <th colspan="10" nowrap align="left" style="width: 220px; height: 20px"><b>{account_detail}</b></th>
+        </tr>
+        <tr align="left">
+            <th colspan="4" nowrap align="right" style="width: 220px; height: 20px">Company:</th>
+            <th colspan="10" nowrap align="left" style="width: 220px; height: 20px"><b>{company_name}</b></th>
+        </tr>
+        <tr align="left">
+            <th colspan="4" nowrap align="right" style="width: 220px; height: 20px">Date:</th>
+            <th colspan="10" nowrap align="left" style="width: 220px; height: 20px"><b>{date_str}</b></th>
+        </tr>
+        <tr>
+            <td nowrap style="width: 140px;height: 10px"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 70px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 140px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 60px;"></td>
+            <td nowrap style="width: 100px;"></td>
+        </tr>
+{body_sections}
+        <tr align="right">
+            <td colspan="14" style="height: 10px"></td>
+        </tr>
+        <tr align="right">
+            <td colspan="3" style="height: 20px">Balance:</td>
+            <td colspan="2"><b>{_fmt(balance)}</b></td>
+            <td></td>
+            <td colspan="3">Free Margin:</td>
+            <td colspan="2"><b>{_fmt(free_margin)}</b></td>
+        </tr>
+        <tr align="right">
+            <td colspan="3" style="height: 20px">Credit Facility:</td>
+            <td colspan="2"><b>0.00</b></td>
+            <td></td>
+            <td colspan="3">Margin:</td>
+            <td colspan="2"><b>{_fmt(margin)}</b></td>
+        </tr>
+        <tr align="right">
+            <td colspan="3" style="height: 20px">Floating P/L:</td>
+            <td colspan="2"><b>{_fmt(floating_pnl)}</b></td>
+            <td></td>
+            <td colspan="3">Margin Level:</td>
+            <td colspan="2"><b>{margin_level_pct:.2f}%</b></td>
+        </tr>
+        <tr align="right">
+            <td colspan="3" style="height: 20px">Equity:</td>
+            <td colspan="2"><b>{_fmt(equity)}</b></td>
+        </tr>{results_html}
+        <tr>
+            <td nowrap style="height: 10px"></td>
+        </tr>
+    </table>
+</div>
+</body>
+</html>"""
+    return html
+
+
+
+
+def _is_mt5_account(stmt, acct_id=None):
+    """Accurately determine if an account is MetaTrader 5 (MT5) or MetaTrader 4 (MT4)."""
+    if not acct_id:
+        acct_id = str(stmt.get("account_id", ""))
+
+    if stmt.get("is_mt5") is True:
+        return True
+    if stmt.get("is_mt5") is False:
+        return False
+
+    # Check direct keys on stmt
+    for k in ["platform", "type", "conn_type", "account_type"]:
+        v = str(stmt.get(k, "")).lower()
+        if "mt5" in v:
+            return True
+        if "mt4" in v:
+            return False
+
+    # Check active manager account config
+    try:
+        if 'mt_direct_manager' in globals() and mt_direct_manager and hasattr(mt_direct_manager, 'accounts'):
+            acct_obj = mt_direct_manager.accounts.get(acct_id)
+            if acct_obj and hasattr(acct_obj, 'config'):
+                t = str(acct_obj.config.get("type") or acct_obj.config.get("platform") or "").lower()
+                if "mt5" in t: return True
+                if "mt4" in t: return False
+    except Exception:
+        pass
+
+    # Check bridge clients
+    try:
+        if 'mt_bridge_clients' in globals() and mt_bridge_clients:
+            bc = mt_bridge_clients.get(acct_id)
+            if bc and hasattr(bc, 'config'):
+                t = str(bc.config.get("type") or bc.config.get("platform") or "").lower()
+                if "mt5" in t: return True
+                if "mt4" in t: return False
+    except Exception:
+        pass
+
+    # Check configs/mt_direct_accounts.json
+    candidate_cfg_files = [
+        os.path.join(_CONFIGS_DIR, "mt_direct_accounts.json"),
+        r"d:\Documents\dev\backup\trade_dashboard\configs\mt_direct_accounts.json",
+        r"d:\Documents\dev\TradeDashboard\configs - LIVE\mt_direct_accounts.json",
+    ]
+    for cfg_file in candidate_cfg_files:
+        try:
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if acct_id in cfg:
+                        t = str(cfg[acct_id].get("type") or cfg[acct_id].get("platform") or "").lower()
+                        if "mt5" in t: return True
+                        if "mt4" in t: return False
+        except Exception:
+            pass
+
+    aid_upper = acct_id.upper()
+    if "MT5" in aid_upper:
+        return True
+    if "MT4" in aid_upper:
+        return False
+
+    return False
+
+
+def _render_metatrader_html_statement(stmt):
+    """Dispatcher: render MT5 format for MT5 accounts, MT4 format for MT4 accounts."""
+    if _is_mt5_account(stmt):
+        return _render_metatrader5_html_statement(stmt)
+    else:
+        return _render_metatrader4_html_statement(stmt)
+
 
 
 def _render_summary_index_html(summary_rows, generated_str=None):
@@ -2919,6 +4794,43 @@ def _save_full_statements(date_str=None):
         for acct_id, info in manual_accounts.items():
             if acct_id not in all_accounts:
                 all_accounts[acct_id] = dict(info)
+        # Also include MT direct manager accounts
+        if mt_direct_manager and hasattr(mt_direct_manager, 'accounts'):
+            for acct_id, acct_obj in mt_direct_manager.accounts.items():
+                if acct_id not in all_accounts:
+                    cfg = getattr(acct_obj, 'config', {}) or {}
+                    all_accounts[acct_id] = {
+                        "account_id": acct_id,
+                        "login": cfg.get("login") or cfg.get("account_number"),
+                        "server": cfg.get("server"),
+                        "conn_type": "mt5" if cfg.get("type") == "mt5" else "mt4",
+                        "trade_mode": cfg.get("trade_mode") or ("demo" if "demo" in str(acct_id).lower() else "real"),
+                        "margin_type": "Hedge",
+                        "balance": 0.0,
+                        "equity": 0.0,
+                    }
+        # Also include accounts from configs/mt_direct_accounts.json
+        for _cf_dir in [TRADE_CONFIG_DIR, os.path.join(_SCRIPT_DIR, "configs"), os.path.join(_SCRIPT_DIR, "..", "configs - LIVE")]:
+            _cf_file = os.path.join(_cf_dir, "mt_direct_accounts.json")
+            if os.path.isfile(_cf_file):
+                try:
+                    with open(_cf_file, "r", encoding="utf-8") as _cff:
+                        _accts_cfg = json.load(_cff)
+                    if isinstance(_accts_cfg, dict):
+                        for acct_id, cfg in _accts_cfg.items():
+                            if acct_id not in all_accounts:
+                                all_accounts[acct_id] = {
+                                    "account_id": acct_id,
+                                    "login": cfg.get("login") or cfg.get("account_number"),
+                                    "server": cfg.get("server"),
+                                    "conn_type": "mt5" if cfg.get("type") == "mt5" else "mt4",
+                                    "trade_mode": cfg.get("trade_mode") or ("demo" if "demo" in str(acct_id).lower() else "real"),
+                                    "margin_type": "Hedge",
+                                    "balance": 0.0,
+                                    "equity": 0.0,
+                                }
+                except Exception:
+                    pass
 
         if not all_accounts:
             logger.info("[STMTS] No accounts found — skipping statement save")
@@ -2928,6 +4840,68 @@ def _save_full_statements(date_str=None):
 
         for acct_id, info in all_accounts.items():
             try:
+                safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
+                html_path = os.path.join(_STMTS_DIR, f"{safe_id}.html")
+                json_path = os.path.join(_STMTS_DIR, f"{safe_id}.json")
+                png_path  = os.path.join(_STMTS_DIR, f"{safe_id}.png")
+
+                # Resolve connector object for this account
+                acct_obj = None
+                if mt_direct_manager and hasattr(mt_direct_manager, 'accounts'):
+                    acct_obj = mt_direct_manager.accounts.get(acct_id)
+                if not acct_obj and 'mt_bridge_clients' in globals() and mt_bridge_clients:
+                    acct_obj = mt_bridge_clients.get(acct_id)
+                if not acct_obj and 'mt_bridge_client' in globals() and mt_bridge_client:
+                    acct_obj = mt_bridge_client.accounts.get(acct_id) if hasattr(mt_bridge_client, 'accounts') else None
+                if not acct_obj and 'fix_manager' in globals() and fix_manager:
+                    acct_obj = fix_manager.accounts.get(acct_id)
+                if not acct_obj and 'iforex_manager' in globals() and iforex_manager:
+                    acct_obj = iforex_manager.accounts.get(acct_id)
+
+                # Determine whether account is currently connected (online)
+                is_connected = _is_account_connected(acct_id)
+                if not is_connected and acct_obj:
+                    is_connected = bool(getattr(acct_obj, "connected", False) or getattr(acct_obj, "_connected", False))
+                if not is_connected and info:
+                    if info.get("online") or info.get("connected"):
+                        ts_ep = info.get("ts_epoch") or info.get("ts")
+                        if ts_ep:
+                            try:
+                                if time.time() - float(ts_ep) < 120:
+                                    is_connected = True
+                            except Exception:
+                                pass
+                        elif info.get("balance") is not None and float(info.get("balance", 0.0)) > 0:
+                            is_connected = True
+
+                # If the account is NOT connected, DO NOT generate any statement!
+                # Never overwrite an existing statement with a blank statement.
+                if not is_connected:
+                    logger.info("[STMTS] Skipping statement for %s — account is NOT connected. Preserving existing statement.", acct_id)
+                    if os.path.isfile(json_path):
+                        try:
+                            with open(json_path, "r", encoding="utf-8") as _cjf:
+                                _prev_stmt = json.load(_cjf)
+                            if _prev_stmt and isinstance(_prev_stmt, dict):
+                                summary_rows.append({
+                                    "account_id":        acct_id,
+                                    "group_label":       _prev_stmt.get("group_label", ""),
+                                    "balance":           _prev_stmt.get("balance"),
+                                    "equity":            _prev_stmt.get("equity"),
+                                    "open_count":        _prev_stmt.get("open_position_count", 0),
+                                    "closed_pnl":        _prev_stmt.get("closed_pnl"),
+                                    "closed_swap":       _prev_stmt.get("closed_swap"),
+                                    "closed_fees":       _prev_stmt.get("closed_fees"),
+                                    "closed_deal_count": _prev_stmt.get("closed_deal_count"),
+                                    "day_pnl":           _prev_stmt.get("day_pnl") or _prev_stmt.get("closed_pnl"),
+                                    "day_swap":          _prev_stmt.get("day_swap") or _prev_stmt.get("closed_swap"),
+                                    "day_fees":          _prev_stmt.get("day_fees") or _prev_stmt.get("closed_fees"),
+                                    "day_deal_count":    _prev_stmt.get("day_deal_count") or _prev_stmt.get("closed_deal_count"),
+                                })
+                        except Exception:
+                            pass
+                    continue
+
                 stmt = {
                     "account_id":  acct_id,
                     "date":        now_str,
@@ -2942,26 +4916,34 @@ def _save_full_statements(date_str=None):
                         manual_accounts.get(acct_id, {}).get("group_label") or
                         info.get("group_label", "")
                     ),
+                    # numeric broker login — never the internal account_id
+                    "login":   info.get("login"),
+                    "server":  info.get("server"),
                     # account number shown on the statement = broker login (numeric)
                     "account_number": (
                         info.get("login") or
                         acct_id
                     ),
-                    # name on the account = AccountName from MT4 DLL
-                    "account_name": (
-                        info.get("account_name") or
-                        info.get("name") or
-                        manual_accounts.get(acct_id, {}).get("group_label") or
-                        acct_id
+                    # name on the account = resolved human owner name
+                    "account_name": _resolve_owner_name(info, acct_id),
+
+                    "currency": (
+                        info.get("currency") or
+                        info.get("account_currency") or
+                        (mt_direct_manager.accounts.get(acct_id).config.get("currency") if mt_direct_manager and hasattr(mt_direct_manager, 'accounts') and acct_id in mt_direct_manager.accounts and hasattr(mt_direct_manager.accounts[acct_id], 'config') else None) or
+                        "USD"
                     ),
-                    "currency":    info.get("currency") or info.get("account_currency") or "USD",
-                    # company/broker = server hostname; strip port if present
+                    # company/broker = from DLL, config, or broker keyword resolver
                     "company": (
                         info.get("company") or
                         info.get("broker") or
-                        (info.get("server", "").split(":")[0] if info.get("server") else None) or
-                        acct_id
+                        _resolve_broker_name(None, info.get("server"), acct_id) or
+                        None
                     ),
+                    "broker": info.get("broker") or info.get("company"),
+                    # MT5-specific account metadata
+                    "trade_mode":  info.get("trade_mode") or ("demo" if "demo" in str(acct_id).lower() else "real"),
+                    "margin_type": info.get("margin_type") or "Hedge",
                 }
 
                 # ── Open positions ──────────────────────────────────────────
@@ -3007,20 +4989,6 @@ def _save_full_statements(date_str=None):
 
                 # ── Full closed deal history (from inception: from_ts=0) ────
                 deal_hist = None
-                acct_obj  = None
-                # Try MT Direct first
-                if mt_direct_manager:
-                    acct_obj = mt_direct_manager.accounts.get(acct_id)
-                # Fallback: MT Bridge client
-                if not acct_obj and 'mt_bridge_client' in globals() and mt_bridge_client:
-                    acct_obj = mt_bridge_client.accounts.get(acct_id) if hasattr(mt_bridge_client, 'accounts') else None
-                # Fallback: FIX manager
-                if not acct_obj and 'fix_manager' in globals() and fix_manager:
-                    acct_obj = fix_manager.accounts.get(acct_id)
-                # Fallback: iFOREX manager
-                if not acct_obj and 'iforex_manager' in globals() and iforex_manager:
-                    acct_obj = iforex_manager.accounts.get(acct_id)
-
                 if acct_obj and hasattr(acct_obj, "get_deal_history"):
                     try:
                         deal_hist = acct_obj.get_deal_history(
@@ -3028,37 +4996,146 @@ def _save_full_statements(date_str=None):
                     except Exception as _dh_err:
                         logger.warning("[STMTS] deal_history failed for %s: %s", acct_id, _dh_err)
 
-                if deal_hist:
-                    stmt["closed_pnl"]        = deal_hist.get("pnl")
-                    stmt["closed_swap"]       = deal_hist.get("swap")
-                    stmt["closed_fees"]       = deal_hist.get("fees")
-                    stmt["closed_deal_count"] = deal_hist.get("deal_count")
-                    stmt["by_symbol"]         = deal_hist.get("by_symbol", {})
-                    stmt["deals"]             = deal_hist.get("deals", [])
-                    # Backward-compat keys
-                    stmt["day_pnl"]           = stmt["closed_pnl"]
-                    stmt["day_swap"]          = stmt["closed_swap"]
-                    stmt["day_fees"]          = stmt["closed_fees"]
-                    stmt["day_deal_count"]    = stmt["closed_deal_count"]
-                    stmt["day_by_symbol"]     = stmt["by_symbol"]
-                else:
-                    stmt["closed_pnl"] = stmt["closed_swap"] = stmt["closed_fees"] = stmt["closed_deal_count"] = None
-                    stmt["by_symbol"] = {}
-                    stmt["deals"] = []
-                    stmt["day_pnl"] = stmt["day_swap"] = stmt["day_fees"] = stmt["day_deal_count"] = None
-                    stmt["day_by_symbol"] = {}
+                # Fallback: direct HTTP request to C# bridge service
+                if not deal_hist:
+                    try:
+                        import urllib.request
+                        _b_url = os.environ.get("MT_BRIDGE_URL", "http://localhost:5090")
+                        _h_url = f"{_b_url}/api/accounts/{acct_id}/history?from=0&to={day_to_ts}&exclude_balance=false"
+                        _h_req = urllib.request.Request(_h_url, headers={"User-Agent": "TradeDashboard"})
+                        with urllib.request.urlopen(_h_req, timeout=15) as _resp:
+                            if _resp.status == 200:
+                                deal_hist = json.loads(_resp.read().decode("utf-8"))
+                    except Exception:
+                        pass
 
-                # ── Write per-account HTML Statement and JSON backup in stmts/ ──
-                safe_id   = re.sub(r"[^\w\-]", "_", acct_id)
-                html_path = os.path.join(_STMTS_DIR, f"{safe_id}.html")
-                json_path = os.path.join(_STMTS_DIR, f"{safe_id}.json")
+                # Check if an existing statement exists on disk
+                _prev_stmt = None
+                if os.path.isfile(json_path):
+                    try:
+                        with open(json_path, "r", encoding="utf-8") as _cjf:
+                            _prev_stmt = json.load(_cjf)
+                    except Exception:
+                        _prev_stmt = None
 
+                # Guard 1: If no deal history could be obtained from the broker
+                if not deal_hist or not isinstance(deal_hist, dict):
+                    if _prev_stmt and isinstance(_prev_stmt, dict):
+                        logger.warning("[STMTS] No deal history returned for %s — skipping overwrite to preserve existing statement", acct_id)
+                        summary_rows.append({
+                            "account_id":        acct_id,
+                            "group_label":       _prev_stmt.get("group_label", ""),
+                            "balance":           _prev_stmt.get("balance"),
+                            "equity":            _prev_stmt.get("equity"),
+                            "open_count":        _prev_stmt.get("open_position_count", 0),
+                            "closed_pnl":        _prev_stmt.get("closed_pnl"),
+                            "closed_swap":       _prev_stmt.get("closed_swap"),
+                            "closed_fees":       _prev_stmt.get("closed_fees"),
+                            "closed_deal_count": _prev_stmt.get("closed_deal_count"),
+                            "day_pnl":           _prev_stmt.get("day_pnl") or _prev_stmt.get("closed_pnl"),
+                            "day_swap":          _prev_stmt.get("day_swap") or _prev_stmt.get("closed_swap"),
+                            "day_fees":          _prev_stmt.get("day_fees") or _prev_stmt.get("closed_fees"),
+                            "day_deal_count":    _prev_stmt.get("day_deal_count") or _prev_stmt.get("closed_deal_count"),
+                        })
+                        continue
+                    elif not open_positions and (stmt.get("balance") is None or float(stmt.get("balance") or 0) == 0):
+                        logger.info("[STMTS] No deal history or positions for %s — skipping blank statement creation", acct_id)
+                        continue
+
+                # Guard 2: If deal_hist returned 0 deals, but existing statement already has deals,
+                # do NOT overwrite with blank statement!
+                if _prev_stmt and isinstance(_prev_stmt, dict):
+                    prev_deals = _prev_stmt.get("deals", [])
+                    curr_deals = deal_hist.get("deals", []) if isinstance(deal_hist, dict) else []
+                    if len(curr_deals) == 0 and len(prev_deals) > 0:
+                        logger.warning("[STMTS] Deal history for %s returned 0 deals, but existing statement has %d deals — preserving existing statement, skipping overwrite", acct_id, len(prev_deals))
+                        summary_rows.append({
+                            "account_id":        acct_id,
+                            "group_label":       _prev_stmt.get("group_label", ""),
+                            "balance":           _prev_stmt.get("balance"),
+                            "equity":            _prev_stmt.get("equity"),
+                            "open_count":        _prev_stmt.get("open_position_count", 0),
+                            "closed_pnl":        _prev_stmt.get("closed_pnl"),
+                            "closed_swap":       _prev_stmt.get("closed_swap"),
+                            "closed_fees":       _prev_stmt.get("closed_fees"),
+                            "closed_deal_count": _prev_stmt.get("closed_deal_count"),
+                            "day_pnl":           _prev_stmt.get("day_pnl") or _prev_stmt.get("closed_pnl"),
+                            "day_swap":          _prev_stmt.get("day_swap") or _prev_stmt.get("closed_swap"),
+                            "day_fees":          _prev_stmt.get("day_fees") or _prev_stmt.get("closed_fees"),
+                            "day_deal_count":    _prev_stmt.get("day_deal_count") or _prev_stmt.get("closed_deal_count"),
+                        })
+                        continue
+
+                stmt["closed_pnl"]        = deal_hist.get("pnl")
+                stmt["closed_swap"]       = deal_hist.get("swap")
+                stmt["closed_fees"]       = deal_hist.get("fees")
+                stmt["closed_deal_count"] = deal_hist.get("deal_count")
+                stmt["by_symbol"]         = deal_hist.get("by_symbol", {})
+                stmt["deals"]             = deal_hist.get("deals", [])
+                stmt["positions"]         = deal_hist.get("positions", [])
+                stmt["orders"]            = deal_hist.get("orders", [])
+                # Backward-compat keys
+                stmt["day_pnl"]           = stmt["closed_pnl"]
+                stmt["day_swap"]          = stmt["closed_swap"]
+                stmt["day_fees"]          = stmt["closed_fees"]
+                stmt["day_deal_count"]    = stmt["closed_deal_count"]
+                stmt["day_by_symbol"]     = stmt["by_symbol"]
+
+                # ── Write per-account HTML Statement and JSON backup in stmts/ and temp/ ──
                 html_content = _render_metatrader_html_statement(stmt)
                 with open(html_path, "w", encoding="utf-8") as _fhtml:
                     _fhtml.write(html_content)
 
                 with open(json_path, "w", encoding="utf-8") as _fjson:
                     json.dump(stmt, _fjson, indent=2, default=str)
+
+                # Generate balance graphs (GIF & PNG) according to platform
+                is_mt5 = _is_mt5_account(stmt, acct_id)
+                if is_mt5:
+                    png_path = os.path.join(_STMTS_DIR, f"{safe_id}.png")
+                    _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), png_path)
+                else:
+                    gif_path = os.path.join(_STMTS_DIR, f"{safe_id}.gif")
+                    _generate_mt4_balance_graph(stmt.get("deals", []), gif_path, safe_id=safe_id)
+
+                # Mirror to d:\Documents\dev\temp if directory exists
+                _temp_dir = r"d:\Documents\dev\temp"
+                if os.path.isdir(_temp_dir):
+                    try:
+                        with open(os.path.join(_temp_dir, f"{safe_id}.html"), "w", encoding="utf-8") as _tfh:
+                            _tfh.write(html_content)
+                        with open(os.path.join(_temp_dir, f"{safe_id}.json"), "w", encoding="utf-8") as _tfj:
+                            json.dump(stmt, _tfj, indent=2, default=str)
+
+                        if is_mt5:
+                            temp_png = os.path.join(_temp_dir, f"{safe_id}.png")
+                            png_src = os.path.join(_STMTS_DIR, f"{safe_id}.png")
+                            if os.path.isfile(png_src):
+                                try:
+                                    shutil.copy2(png_src, temp_png)
+                                except Exception:
+                                    _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), temp_png)
+                            else:
+                                _generate_mt5_balance_graph(stmt.get("deals", []), stmt.get("positions", []), temp_png)
+                        else:
+                            temp_gif = os.path.join(_temp_dir, f"{safe_id}.gif")
+                            temp_png = os.path.join(_temp_dir, f"{safe_id}.png")
+                            gif_src = os.path.join(_STMTS_DIR, f"{safe_id}.gif")
+                            png_src = os.path.join(_STMTS_DIR, f"{safe_id}.png")
+                            if os.path.isfile(gif_src):
+                                try:
+                                    shutil.copy2(gif_src, temp_gif)
+                                except Exception:
+                                    pass
+                            if os.path.isfile(png_src):
+                                try:
+                                    shutil.copy2(png_src, temp_png)
+                                except Exception:
+                                    pass
+                            if not os.path.isfile(temp_gif):
+                                _generate_mt4_balance_graph(stmt.get("deals", []), temp_gif, safe_id=safe_id)
+                    except Exception:
+                        pass
 
                 summary_rows.append({
                     "account_id":        acct_id,
@@ -3109,8 +5186,8 @@ _save_daily_statements = _save_full_statements
 def _daily_statements_loop():
     """Background thread: save full account statements once per day at midnight."""
     import time as _time
-    # Initial run after a short delay so connections can settle on startup
-    _time.sleep(15)
+    # Initial run after a delay so connections can settle on startup
+    _time.sleep(30)
     _save_full_statements()
     while True:
         now      = datetime.now()

@@ -12,8 +12,9 @@ var accountStore = new AccountStore(app.Logger);
 app.MapGet("/api/status", () =>
 {
     var statuses = accountStore.GetAllStatus();
-    return Results.Ok(new { status = "ok", accounts = statuses, version = "2.1-currency" });
+    return Results.Ok(new { status = "ok", accounts = statuses, version = "2.2-accountinfo" });
 });
+
 
 
 
@@ -587,6 +588,8 @@ public class MtAccount
     private double _credit;
     private int _leverage;
     private string? _currency; // account denomination currency (e.g. "EUR")
+    private string? _company;
+    private string? _accountName;
     private readonly object _infoLock = new();
 
     // Reconnect
@@ -731,7 +734,12 @@ public class MtAccount
         }
 
         _connected = true;
-        _logger.LogInformation("[{Id}] MT5 Connected!", Config.Id);
+        lock (_infoLock)
+        {
+            try { _company = _mt5.AccountCompanyName; } catch { }
+            try { _accountName = _mt5.Account?.UserName; } catch { }
+        }
+        _logger.LogInformation("[{Id}] MT5 Connected! (Company: {Company}, Name: {Name})", Config.Id, _company, _accountName);
 
         // Subscribe to events
         _mt5.OnQuote += OnMt5Quote;
@@ -810,7 +818,17 @@ public class MtAccount
             }
         }
         _connected = true;
-        _logger.LogInformation("[{Id}] MT4 Connected!", Config.Id);
+        lock (_infoLock)
+        {
+            try { _company = !string.IsNullOrEmpty(_mt4.Account.company) ? _mt4.Account.company : _mt4.ServerName; } catch { }
+            try
+            {
+                var nameField = typeof(TradingAPI.MT4Server.QuoteClient).GetField("Name", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                _accountName = nameField?.GetValue(_mt4) as string ?? Config.Label;
+            }
+            catch { _accountName = Config.Label; }
+        }
+        _logger.LogInformation("[{Id}] MT4 Connected! (Company: {Company}, Name: {Name})", Config.Id, _company, _accountName);
 
         // Subscribe to events
         _mt4.OnQuote += OnMt4Quote;
@@ -1017,6 +1035,16 @@ public class MtAccount
                         }
                         catch { }
                     }
+
+                    // Continuously ensure company and accountName are populated once data packets arrive
+                    if (string.IsNullOrEmpty(_company))
+                    {
+                        try { _company = _mt5.AccountCompanyName; } catch { }
+                    }
+                    if (string.IsNullOrEmpty(_accountName))
+                    {
+                        try { _accountName = _mt5.Account?.UserName; } catch { }
+                    }
                 }
                 else if (_mt4 != null)
                 {
@@ -1027,6 +1055,23 @@ public class MtAccount
                     _profit = _mt4.AccountProfit;
                     _credit = _mt4.AccountCredit;
                     _leverage = _mt4.AccountLeverage;
+
+                    // Continuously ensure company and accountName are populated
+                    if (string.IsNullOrEmpty(_company))
+                    {
+                        try { _company = _mt4.Account.company ?? _mt4.ServerName; } catch { }
+                    }
+                    if (string.IsNullOrEmpty(_accountName))
+                    {
+                        try
+                        {
+                            var field = typeof(TradingAPI.MT4Server.QuoteClient).GetField("Name", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            if (field != null)
+                                _accountName = field.GetValue(_mt4) as string;
+
+                        }
+                        catch { }
+                    }
 
                     // Extract account currency from MT4 ConGroup.currency (most reliable)
                     // Config override takes highest priority
@@ -1193,7 +1238,11 @@ public class MtAccount
                 leverage = _leverage,
                 positions = _positions.Count,
                 last_error = _lastError,
-                account_currency = currency
+                account_currency = currency,
+                company = _company,
+                account_name = _accountName,
+                login = Config.Login.ToString(),
+                server = Config.Server
             };
         }
     }
@@ -1207,7 +1256,11 @@ public class MtAccount
         last_error = _lastError,
         account_currency = !string.IsNullOrWhiteSpace(Config.AccountCurrency)
             ? Config.AccountCurrency!.Trim().ToUpperInvariant()
-            : _currency
+            : _currency,
+        company = _company,
+        account_name = _accountName,
+        login = Config.Login.ToString(),
+        server = Config.Server
     };
 
     public object GetPositions() => _positions.Values.ToList();
@@ -1821,6 +1874,55 @@ public class MtAccount
                 int skippedBalance = 0;
                 var bySymbol = new Dictionary<string, double[]>(); // [pnl, swap, fees, count, lots]
                 var dealsList = new List<object>();
+                var positionsList = new List<object>();
+                if (hist?.Orders != null)
+                {
+                    foreach (var pos in hist.Orders)
+                    {
+                        var posTypeStr = pos.DealType.ToString().ToLower().Replace("deal", "");
+                        positionsList.Add(new {
+                            ticket = pos.Ticket,
+                            symbol = pos.Symbol ?? "",
+                            type = posTypeStr,
+                            lots = Math.Round(pos.Lots, 2),
+                            open_price = pos.OpenPrice,
+                            close_price = pos.ClosePrice,
+                            open_time = pos.OpenTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            close_time = pos.CloseTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            sl = pos.StopLoss,
+                            tp = pos.TakeProfit,
+                            profit = Math.Round(pos.Profit, 2),
+                            swap = Math.Round(pos.Swap, 2),
+                            commission = Math.Round(pos.Commission, 2),
+                            fee = Math.Round(pos.Fee, 2),
+                            comment = pos.Comment ?? ""
+                        });
+                    }
+                }
+
+                var ordersList = new List<object>();
+                if (hist?.InternalOrders != null)
+                {
+                    foreach (var ord in hist.InternalOrders)
+                    {
+                        var ordTypeStr = ord.Type.ToString().ToLower().Replace("order", "");
+                        ordersList.Add(new {
+                            ticket = ord.TicketNumber,
+                            symbol = ord.Symbol ?? "",
+                            type = ordTypeStr,
+                            lots = Math.Round(ord.Lots, 2),
+                            request_lots = Math.Round(ord.RequestLots, 2),
+                            price = ord.Price,
+                            sl = ord.StopLoss,
+                            tp = ord.TakeProfit,
+                            open_time = ord.OpenTimeAsDateTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            execution_time = ord.ExecutionTimeAsDateTime.ToString("yyyy.MM.dd HH:mm:ss"),
+                            state = ord.State.ToString().ToLower(),
+                            comment = ord.Comment ?? ""
+                        });
+                    }
+                }
+
                 if (hist?.InternalDeals != null)
                 {
                     foreach (var deal in hist.InternalDeals)
@@ -1830,6 +1932,13 @@ public class MtAccount
                                         || dealTypeStr.Contains("Sell", StringComparison.OrdinalIgnoreCase);
                         bool isBalanceType = dealTypeStr.Contains("Balance", StringComparison.OrdinalIgnoreCase)
                                           || dealTypeStr.Contains("Credit", StringComparison.OrdinalIgnoreCase);
+
+                        ulong dTicket = (ulong)deal.TicketNumber;
+                        ulong dOrder = (ulong)deal.OrderTicket;
+                        long dPosition = deal.PositionTicket;
+                        string dTimeStr = deal.OpenTimeAsDateTime.ToString("yyyy.MM.dd HH:mm:ss");
+                        string dDirection = deal.Direction.ToString().ToLower();
+                        string cleanType = dealTypeStr.ToLower().Replace("deal", "");
 
                         if (isTradeType)
                         {
@@ -1848,26 +1957,23 @@ public class MtAccount
                             bySymbol[dealSymbol][3] += 1;
                             bySymbol[dealSymbol][4] += deal.Lots;
 
-                            ulong dTicket = 0;
-                            try { dTicket = (ulong)((dynamic)deal).Deal; } catch { try { dTicket = (ulong)((dynamic)deal).Ticket; } catch {} }
-                            ulong dOrder = 0;
-                            try { dOrder = (ulong)((dynamic)deal).Order; } catch {}
-                            string dTimeStr = "";
-                            try { dTimeStr = ((DateTime)((dynamic)deal).Time).ToString("yyyy.MM.dd HH:mm:ss"); } catch { try { dTimeStr = ((DateTime)((dynamic)deal).Date).ToString("yyyy.MM.dd HH:mm:ss"); } catch { dTimeStr = DateTime.UtcNow.ToString("yyyy.MM.dd HH:mm:ss"); } }
-
                             dealsList.Add(new {
                                 ticket = dTicket,
                                 order = dOrder,
+                                position = dPosition,
                                 symbol = dealSymbol,
-                                type = dealTypeStr,
+                                type = cleanType,
+                                direction = dDirection,
                                 lots = Math.Round(deal.Lots, 2),
-                                open_price = deal.Price,
+                                price = deal.Price,
+                                open_price = deal.OpenPrice,
                                 close_price = deal.Price,
                                 open_time = dTimeStr,
                                 close_time = dTimeStr,
                                 profit = Math.Round(deal.Profit, 2),
                                 swap = Math.Round(deal.Swap, 2),
-                                commission = Math.Round(dealFees, 2),
+                                commission = Math.Round(deal.Commission, 2),
+                                fee = Math.Round(deal.Fee, 2),
                                 comment = deal.Comment ?? ""
                             });
                         }
@@ -1876,13 +1982,6 @@ public class MtAccount
                             // Non-trade deal (Balance, Credit, Charge, etc.)
                             var dealComment = deal.Comment ?? "";
                             bool isFee = IsFeeDeal(dealComment, dealTypeStr, feeKeywords);
-
-                            ulong dTicket = 0;
-                            try { dTicket = (ulong)((dynamic)deal).Deal; } catch { try { dTicket = (ulong)((dynamic)deal).Ticket; } catch {} }
-                            ulong dOrder = 0;
-                            try { dOrder = (ulong)((dynamic)deal).Order; } catch {}
-                            string dTimeStr = "";
-                            try { dTimeStr = ((DateTime)((dynamic)deal).Time).ToString("yyyy.MM.dd HH:mm:ss"); } catch { try { dTimeStr = ((DateTime)((dynamic)deal).Date).ToString("yyyy.MM.dd HH:mm:ss"); } catch { dTimeStr = DateTime.UtcNow.ToString("yyyy.MM.dd HH:mm:ss"); } }
 
                             if (isFee)
                             {
@@ -1899,16 +1998,20 @@ public class MtAccount
                                 dealsList.Add(new {
                                     ticket = dTicket,
                                     order = dOrder,
+                                    position = dPosition,
                                     symbol = feeSymbol,
-                                    type = dealTypeStr,
+                                    type = cleanType,
+                                    direction = "",
                                     lots = 0.0,
+                                    price = 0.0,
                                     open_price = 0.0,
                                     close_price = 0.0,
                                     open_time = dTimeStr,
                                     close_time = dTimeStr,
                                     profit = Math.Round(deal.Profit, 2),
                                     swap = 0.0,
-                                    commission = Math.Round(deal.Commission + deal.Fee, 2),
+                                    commission = Math.Round(deal.Commission, 2),
+                                    fee = Math.Round(deal.Fee, 2),
                                     comment = dealComment,
                                     is_fee = true,
                                     fee_type = isStorage ? "storage_fee" : "fee"
@@ -1919,16 +2022,20 @@ public class MtAccount
                                 dealsList.Add(new {
                                     ticket = dTicket,
                                     order = dOrder,
+                                    position = dPosition,
                                     symbol = deal.Symbol ?? "",
-                                    type = dealTypeStr,
+                                    type = cleanType,
+                                    direction = "",
                                     lots = 0.0,
+                                    price = 0.0,
                                     open_price = 0.0,
                                     close_price = 0.0,
                                     open_time = dTimeStr,
                                     close_time = dTimeStr,
                                     profit = Math.Round(deal.Profit, 2),
                                     swap = 0.0,
-                                    commission = Math.Round(deal.Commission + deal.Fee, 2),
+                                    commission = Math.Round(deal.Commission, 2),
+                                    fee = Math.Round(deal.Fee, 2),
                                     comment = dealComment,
                                     is_fee = false,
                                     fee_type = "balance"
@@ -1956,7 +2063,7 @@ public class MtAccount
                         lots = Math.Round(vals[4], 2)
                     };
                 }
-                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult, deals = dealsList };
+                return new { pnl = Math.Round(pnl, 2), swap = Math.Round(swap, 2), fees = Math.Round(fees, 2), deal_count = count, by_symbol = bySymbolResult, positions = positionsList, orders = ordersList, deals = dealsList };
             }
             else if (_mt4 != null)
             {

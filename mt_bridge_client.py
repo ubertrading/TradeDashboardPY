@@ -190,11 +190,12 @@ def ensure_bridge_running():
     try:
         result = _get("/api/status", timeout=2)
         if result.get("status") == "ok":
-            if result.get("version") == "2.1-currency":
+            if result.get("version") == "2.2-accountinfo":
                 logger.info("MtBridgeService already running (version %s)", result.get("version"))
                 return True
             else:
-                logger.warning("Running MtBridgeService is outdated (version=%s, expected 2.1-currency). Terminating to upgrade...", result.get("version"))
+                logger.warning("Running MtBridgeService is outdated (version=%s, expected 2.2-accountinfo). Terminating to upgrade...", result.get("version"))
+
                 try:
                     subprocess.run(["taskkill", "/F", "/IM", "MtBridgeService.exe"], capture_output=True, timeout=5)
                     time.sleep(1.5)
@@ -413,6 +414,22 @@ class MtBridgeAccount:
         acct["direct_mode"] = True
         acct["connected"] = info.get("connected", False)
         acct["last_update"] = time.time()
+
+        # Statement identity fields
+        login_val = info.get("login") or self.config.get("login")
+        if login_val:
+            acct["login"] = str(login_val).strip()
+        srv = info.get("server") or self.config.get("server")
+        if srv:
+            acct["server"] = str(srv).strip()
+        comp = info.get("company") or self.config.get("company") or self.config.get("broker")
+        if comp:
+            acct["company"] = str(comp).strip()
+            acct["broker"] = str(comp).strip()
+        owner = info.get("account_name") or self.config.get("account_name") or self.config.get("name")
+        if owner:
+            acct["account_name"] = str(owner).strip()
+            acct["name"] = str(owner).strip()
 
     @staticmethod
     def _parse_open_time(ot_str):

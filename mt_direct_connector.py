@@ -794,7 +794,34 @@ class MT4DirectAccount:
 
         # server: the broker server hostname from the connection config
         try:
-            info["server"] = str(self.config.get("server", ""))
+            info["server"] = str(getattr(self._client, "ServerName", "") or self.config.get("server", ""))
+        except Exception:
+            pass
+
+        # company / broker: ConGroup.company on MT4 Server API, or ServerName
+        try:
+            con_group = getattr(self._client, "Account", None)
+            grp_company = getattr(con_group, "company", None) if con_group else None
+            company = (str(grp_company).strip() if grp_company else None) or \
+                      str(getattr(self._client, "ServerName", "") or "").strip() or \
+                      self.config.get("company") or self.config.get("broker")
+            if company:
+                info["company"] = str(company).strip()
+                info["broker"] = str(company).strip()
+        except Exception:
+            pass
+
+        # account owner name: try self.config first, then QuoteClient.Name
+        try:
+            cfg_name = self.config.get("account_name") or self.config.get("name")
+            if cfg_name:
+                info["account_name"] = str(cfg_name).strip()
+                info["name"] = str(cfg_name).strip()
+            else:
+                raw_name = getattr(self._client, "Name", None)
+                if raw_name and str(raw_name).strip():
+                    info["account_name"] = str(raw_name).strip()
+                    info["name"] = str(raw_name).strip()
         except Exception:
             pass
 
@@ -2467,9 +2494,48 @@ class MT5DirectAccount:
                                         self.account_id, is_netting, trade_mode)
                 except Exception:
                     pass
-
         except Exception:
             pass
+
+        # Statement identity fields & metadata (always push, with or without AccountRec)
+        try:
+            # login: numeric login from config, MT5API.User, or Account.Login
+            login_val = self.config.get("login") or getattr(self._client, "User", None) or (getattr(acct, "Login", None) if acct else None)
+            if login_val is not None:
+                info["login"] = str(login_val).strip()
+
+            # server: ServerName or config
+            srv = str(getattr(self._client, "ServerName", "") or self.config.get("server", "")).strip()
+            if srv:
+                info["server"] = srv
+
+            # company / broker: AccountCompanyName from MT5API, or config
+            comp = getattr(self._client, "AccountCompanyName", None) or self.config.get("company") or self.config.get("broker")
+            if comp and str(comp).strip():
+                info["company"] = str(comp).strip()
+                info["broker"] = str(comp).strip()
+
+            # account owner name: config first, then UserName from MT5 AccountRec
+            cfg_owner = self.config.get("account_name") or self.config.get("name")
+            if cfg_owner:
+                info["account_name"] = str(cfg_owner).strip()
+                info["name"] = str(cfg_owner).strip()
+            else:
+                uname = getattr(acct, "UserName", None) if acct else None
+                if uname and str(uname).strip():
+                    info["account_name"] = str(uname).strip()
+                    info["name"] = str(uname).strip()
+
+            # margin_type and trade_mode
+            info["margin_type"] = "Netting" if info.get("netting_mode") else "Hedge"
+            acct_type_str = str(getattr(acct, "Type", "") if acct else "").lower()
+            if "demo" in acct_type_str or "demo" in str(self.config.get("server", "")).lower():
+                info["trade_mode"] = "demo"
+            else:
+                info["trade_mode"] = "real"
+        except Exception:
+            pass
+
 
         # Push quote data for subscribed symbol — prefer C# buffer
         target_symbol = info.get("symbol", "")
