@@ -60,3 +60,4 @@ iforex_edge_profile/
 iforex_edge_profile_test/
 iforex_accounts.json
 *.bak
+~$*

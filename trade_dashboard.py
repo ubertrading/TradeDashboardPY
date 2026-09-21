@@ -360,6 +360,26 @@ sys.excepthook = _handle_uncaught_exception
 if hasattr(threading, "excepthook"):
     threading.excepthook = _handle_thread_exception
 
+# ─── Native Crash Handler (faulthandler) ────────────────────────────────────
+# Catches OS-level crashes (segfaults, access violations in python312.dll or
+# C extensions) that bypass sys.excepthook and threading.excepthook entirely.
+# Writes a native traceback to faulthandler.log even when Python itself crashes.
+import faulthandler as _faulthandler
+_FAULTHANDLER_LOG = os.path.join(_LOGS_DIR, "faulthandler.log")
+try:
+    _fh_file = open(_FAULTHANDLER_LOG, "a", encoding="utf-8", buffering=1)
+    _fh_file.write(
+        f"\n{'='*60}\n"
+        f"faulthandler enabled at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"PID: {os.getpid()}\n"
+        f"{'='*60}\n"
+    )
+    _fh_file.flush()
+    _faulthandler.enable(file=_fh_file)
+    logger.info("[STARTUP] faulthandler enabled → logs/faulthandler.log")
+except Exception as _fh_err:
+    logger.warning("[STARTUP] Could not enable faulthandler: %s", _fh_err)
+
 # ─── In-memory state ────────────────────────────────────────────────────────
 event_log = []          # list of {ts, session_id, account, event, detail}
 ea_heartbeats = {}      # account -> last_poll_ts (track EA connectivity)
@@ -29235,8 +29255,23 @@ if __name__ == '__main__':
         except Exception as e:
             app.logger.warning("Could not register Windows console control handler: %s", e)
 
+    # ── Write PID file & clear stop sentinel for watchdog crash detection ────
+    _PID_FILE = os.path.join(_SCRIPT_DIR, "var", "dashboard.pid")
+    _STOP_FILE = os.path.join(_SCRIPT_DIR, "var", "watchdog.stop")
+    try:
+        os.makedirs(os.path.join(_SCRIPT_DIR, "var"), exist_ok=True)
+        if os.path.exists(_STOP_FILE):
+            os.remove(_STOP_FILE)
+            app.logger.info("[STARTUP] Removed watchdog.stop sentinel (re-enabling auto-restart)")
+        with open(_PID_FILE, "w") as _pf:
+            _pf.write(str(os.getpid()))
+        app.logger.info("[STARTUP] PID %d written to %s", os.getpid(), _PID_FILE)
+    except Exception as _pid_err:
+        app.logger.warning("[STARTUP] Could not update PID/sentinel file: %s", _pid_err)
+
     while not _shutdown_requested:
         app.logger.info("Starting Trade Dashboard server on %s:%d", TRADE_HOST, TRADE_PORT)
+
         try:
             if serve is not None:
                 serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=16)
@@ -29261,5 +29296,16 @@ if __name__ == '__main__':
         else:
             app.logger.warning("Trade Dashboard server stopped unexpectedly (no exception raised). Auto-restarting in 2s...")
             time.sleep(2)
+
+    # ── Clean shutdown: flag intentional stop for watchdog & cleanup PID ────
+    try:
+        with open(_STOP_FILE, "w") as _sf:
+            _sf.write(f"Stopped cleanly at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        if os.path.exists(_PID_FILE):
+            os.remove(_PID_FILE)
+        app.logger.info("[SHUTDOWN] Created watchdog.stop sentinel and removed PID file.")
+    except Exception as _clean_err:
+        app.logger.warning("[SHUTDOWN] Error during shutdown file cleanup: %s", _clean_err)
+
 
 

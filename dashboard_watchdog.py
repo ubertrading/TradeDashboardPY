@@ -51,6 +51,15 @@ MAX_RESTARTS = int(os.environ.get("WATCHDOG_MAX_RESTARTS", "0"))
 
 DASHBOARD_URL = f"http://{TRADE_HOST}:{TRADE_PORT}/api/status"
 
+# PID file written by trade_dashboard.py (or we track it ourselves after a restart)
+PID_FILE = os.path.join(SCRIPT_DIR, "var", "dashboard.pid")
+# Faulthandler crash log
+FAULTHANDLER_LOG = os.path.join(SCRIPT_DIR, "logs", "faulthandler.log")
+# Intentional-stop sentinel — watchdog will NOT auto-restart while this file exists.
+# Create it before killing the process to suppress restart. Deleted automatically on next start.
+STOP_FILE = os.path.join(SCRIPT_DIR, "var", "watchdog.stop")
+
+
 
 def _load_settings():
     """Load dashboard_settings.json from configs/ subdir (or explicit SETTINGS_FILE path)."""
@@ -133,7 +142,7 @@ def _notify(settings, subject, body):
 
 
 def _check_dashboard():
-    """Check if dashboard is responding. Returns True if healthy."""
+    """Check if dashboard is responding via HTTP. Returns True if healthy."""
     try:
         req = urllib.request.Request(DASHBOARD_URL)
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -141,6 +150,45 @@ def _check_dashboard():
         return True
     except Exception:
         return False
+
+
+def _read_pid():
+    """Read the dashboard PID from the PID file. Returns int or None."""
+    try:
+        with open(PID_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _is_pid_alive(pid):
+    """Check if a process with the given PID is still running (Windows-compatible)."""
+    if pid is None:
+        return None  # Unknown — can't tell
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5
+        )
+        return str(pid) in result.stdout
+    except Exception:
+        return None  # Unknown
+
+
+def _tail_faulthandler_log(lines=30):
+    """Return the last N lines of faulthandler.log, or empty string if not found."""
+    try:
+        with open(FAULTHANDLER_LOG, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return "".join(tail).strip()
+    except Exception:
+        return ""
+
+
+def _is_stop_requested():
+    """Return True if the intentional-stop sentinel file exists (user killed dashboard on purpose)."""
+    return os.path.exists(STOP_FILE)
 
 
 def _restart_dashboard():
@@ -168,18 +216,35 @@ def main():
     print(f"[WATCHDOG] Check interval: {CHECK_INTERVAL}s, failure threshold: {FAILURE_THRESHOLD}")
     print(f"[WATCHDOG] Auto-restart: {'ON' if AUTO_RESTART else 'OFF'}"
           + (f" (cmd: {RESTART_CMD}, max: {MAX_RESTARTS or 'unlimited'})" if AUTO_RESTART else ""))
-    print(f"[WATCHDOG] Settings file: {SETTINGS_FILE}")
+    print(f"[WATCHDOG] PID file:        {PID_FILE}")
+    print(f"[WATCHDOG] Stop sentinel:   {STOP_FILE}  ← create this file to suppress auto-restart")
+    print(f"[WATCHDOG] Faulthandler log: {FAULTHANDLER_LOG}")
+    print(f"[WATCHDOG] Settings file:   {SETTINGS_FILE}")
+
 
     consecutive_failures = 0
     alerted = False          # True = crash alert sent, waiting for recovery
     down_since = None
     restart_count = 0        # Total restarts since last successful recovery
     dashboard_proc = None    # Tracked subprocess (if we started it)
+    last_known_pid = None    # Last PID we saw alive
 
     while True:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── PID check (fast crash detection) ──────────────────────────────
+        current_pid = _read_pid()
+        if current_pid:
+            last_known_pid = current_pid
+        pid_alive = _is_pid_alive(last_known_pid)
+
+        # If we have a PID and it's definitively dead → count as immediate failure
+        pid_crashed = (last_known_pid is not None and pid_alive is False)
+
+        # ── HTTP health check ──────────────────────────────────────────────
         healthy = _check_dashboard()
 
+        # Dashboard is up if HTTP responds (authoritative), even if PID check lags
         if healthy:
             if alerted:
                 # Dashboard recovered — send recovery notification
@@ -197,15 +262,39 @@ def main():
                 down_since = None
                 restart_count = 0
             consecutive_failures = 0
-            print(f"[WATCHDOG] {now} — Dashboard OK")
+            print(f"[WATCHDOG] {now} — Dashboard OK (PID {last_known_pid or '?'})")
         else:
-            consecutive_failures += 1
-            print(f"[WATCHDOG] {now} — Dashboard UNREACHABLE ({consecutive_failures}/{FAILURE_THRESHOLD})")
+            # ── Check for intentional stop ─────────────────────────────────
+            if _is_stop_requested():
+                # User deliberately stopped the dashboard — do not alert or restart.
+                # Reset failure counter so we don't trigger on the first poll after
+                # the stop file is removed.
+                consecutive_failures = 0
+                alerted = False
+                print(f"[WATCHDOG] {now} — Dashboard is DOWN but stop sentinel exists"
+                      f" ({STOP_FILE}) — intentional stop, skipping restart.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # If the PID is definitively dead, treat as immediate confirmed failure
+            # (skip waiting for FAILURE_THRESHOLD HTTP polls)
+            if pid_crashed and not alerted:
+                consecutive_failures = FAILURE_THRESHOLD  # trigger alert immediately
+                print(f"[WATCHDOG] {now} — PID {last_known_pid} is dead (native crash detected)")
+            else:
+                consecutive_failures += 1
+                print(f"[WATCHDOG] {now} — Dashboard UNREACHABLE ({consecutive_failures}/{FAILURE_THRESHOLD})"
+                      + (f" — PID {last_known_pid} still alive" if pid_alive else ""))
 
             if consecutive_failures >= FAILURE_THRESHOLD and not alerted:
-                # Confirmed down — send crash alert
+                # Confirmed down — collect crash context from faulthandler log
                 settings = _load_settings()
                 down_since = datetime.now()
+                crash_context = ""
+                fh_tail = _tail_faulthandler_log(40)
+                if fh_tail:
+                    crash_context = f"\n\n─── faulthandler.log (last 40 lines) ───\n{fh_tail}"
+
                 restart_info = ""
                 if AUTO_RESTART:
                     restart_info = "\nAuto-restart: ENABLED — attempting restart..."
@@ -215,36 +304,45 @@ def main():
                     f"URL: {DASHBOARD_URL}\n"
                     f"Failed {consecutive_failures} consecutive health checks"
                     f"{restart_info}"
+                    f"{crash_context}"
                 )
                 result = _notify(settings, "🚨 Dashboard Crash Detected", msg)
                 print(f"[WATCHDOG] {now} — CRASH ALERT SENT. Notified: {result}")
+                if crash_context:
+                    print(f"[WATCHDOG] faulthandler tail included in alert.")
                 alerted = True
 
             # Auto-restart logic
             if alerted and AUTO_RESTART:
-                can_restart = (MAX_RESTARTS == 0 or restart_count < MAX_RESTARTS)
-                # Only attempt restart every FAILURE_THRESHOLD cycles after the initial alert
-                # (avoids hammering restarts every 30s)
-                cycles_since_alert = consecutive_failures - FAILURE_THRESHOLD
-                if can_restart and cycles_since_alert >= 0 and cycles_since_alert % FAILURE_THRESHOLD == 0:
-                    restart_count += 1
-                    print(f"[WATCHDOG] {now} — Auto-restart attempt #{restart_count}"
-                          + (f" (max {MAX_RESTARTS})" if MAX_RESTARTS else ""))
-                    time.sleep(RESTART_DELAY)
-                    dashboard_proc = _restart_dashboard()
-                    if dashboard_proc:
-                        # Give it time to start before next health check
-                        print(f"[WATCHDOG] Waiting {RESTART_DELAY}s for dashboard to initialize...")
+                # Re-check stop file here too — user may have created it between the
+                # crash detection and the restart attempt
+                if _is_stop_requested():
+                    print(f"[WATCHDOG] {now} — Stop sentinel detected — skipping auto-restart.")
+                else:
+                    can_restart = (MAX_RESTARTS == 0 or restart_count < MAX_RESTARTS)
+                    # Only attempt restart every FAILURE_THRESHOLD cycles after the initial alert
+                    # (avoids hammering restarts every 30s)
+                    cycles_since_alert = consecutive_failures - FAILURE_THRESHOLD
+                    if can_restart and cycles_since_alert >= 0 and cycles_since_alert % FAILURE_THRESHOLD == 0:
+                        restart_count += 1
+                        print(f"[WATCHDOG] {now} — Auto-restart attempt #{restart_count}"
+                              + (f" (max {MAX_RESTARTS})" if MAX_RESTARTS else ""))
                         time.sleep(RESTART_DELAY)
-                elif not can_restart and cycles_since_alert == 0:
-                    settings = _load_settings()
-                    msg = (
-                        f"⛔ <b>Dashboard restart limit reached</b>\n"
-                        f"Attempted {restart_count} restarts without recovery.\n"
-                        f"Manual intervention required."
-                    )
-                    _notify(settings, "⛔ Dashboard Restart Limit Reached", msg)
-                    print(f"[WATCHDOG] {now} — Max restarts ({MAX_RESTARTS}) reached. Manual intervention needed.")
+                        dashboard_proc = _restart_dashboard()
+                        if dashboard_proc:
+                            # Give it time to start before next health check
+                            print(f"[WATCHDOG] Waiting {RESTART_DELAY}s for dashboard to initialize...")
+                            time.sleep(RESTART_DELAY)
+                    elif not can_restart and cycles_since_alert == 0:
+                        settings = _load_settings()
+                        msg = (
+                            f"⛔ <b>Dashboard restart limit reached</b>\n"
+                            f"Attempted {restart_count} restarts without recovery.\n"
+                            f"Manual intervention required."
+                        )
+                        _notify(settings, "⛔ Dashboard Restart Limit Reached", msg)
+                        print(f"[WATCHDOG] {now} — Max restarts ({MAX_RESTARTS}) reached. Manual intervention needed.")
+
 
         time.sleep(CHECK_INTERVAL)
 
