@@ -98,7 +98,7 @@ if (-not $NssmExe) {
 Write-Host "[install] Using nssm: $NssmExe" -ForegroundColor Cyan
 
 # -- Common environment for both services ------------------------------------
-$envBlock = "TRADE_PORT=$TradePort`nTRADE_HOST=$TradeHost"
+$envBlock = "TRADE_PORT=$TradePort`nTRADE_HOST=$TradeHost`nPYTHONIOENCODING=utf-8`nPYTHONUTF8=1`nPYTHONUNBUFFERED=1"
 
 function Install-NssmService {
     param(
@@ -112,36 +112,36 @@ function Install-NssmService {
     $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if ($existing) {
         Write-Host "[install] Removing existing service '$Name'..." -ForegroundColor Yellow
-        & $NssmExe stop  $Name confirm 2>$null
-        & $NssmExe remove $Name confirm
+        & $NssmExe stop  $Name confirm 2>$null | Out-Null
+        & $NssmExe remove $Name confirm 2>$null | Out-Null
         Start-Sleep -Seconds 2
     }
 
     Write-Host "[install] Installing service '$Name'..." -ForegroundColor Cyan
-    & $NssmExe install $Name $PythonExe $Script
-    & $NssmExe set     $Name AppDirectory $ScriptDir
-    & $NssmExe set     $Name DisplayName  $DisplayName
-    & $NssmExe set     $Name Description  $Description
+    & $NssmExe install $Name $PythonExe $Script | Out-Null
+    & $NssmExe set     $Name AppDirectory $ScriptDir | Out-Null
+    & $NssmExe set     $Name DisplayName  $DisplayName | Out-Null
+    & $NssmExe set     $Name Description  $Description | Out-Null
 
     # Stdout/stderr -> log files
     $logDir = Join-Path $ScriptDir "logs"
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-    & $NssmExe set $Name AppStdout (Join-Path $logDir "$Name-stdout.log")
-    & $NssmExe set $Name AppStderr (Join-Path $logDir "$Name-stderr.log")
-    & $NssmExe set $Name AppRotateFiles 1
-    & $NssmExe set $Name AppRotateBytes 5242880   # 5 MB rotate
+    & $NssmExe set $Name AppStdout (Join-Path $logDir "$Name-stdout.log") | Out-Null
+    & $NssmExe set $Name AppStderr (Join-Path $logDir "$Name-stderr.log") | Out-Null
+    & $NssmExe set $Name AppRotateFiles 1 | Out-Null
+    & $NssmExe set $Name AppRotateBytes 5242880 | Out-Null   # 5 MB rotate
 
     # Environment variables
-    & $NssmExe set $Name AppEnvironmentExtra $envBlock
+    & $NssmExe set $Name AppEnvironmentExtra $envBlock | Out-Null
 
     # Auto-restart on failure: restart after 10s, up to 3 attempts per hour
-    & $NssmExe set $Name AppExit   Default Restart
-    & $NssmExe set $Name AppRestartDelay 10000   # 10 000 ms
+    & $NssmExe set $Name AppExit   Default Restart | Out-Null
+    & $NssmExe set $Name AppRestartDelay 10000 | Out-Null   # 10 000 ms
 
     # Start type = Automatic
-    & $NssmExe set $Name Start SERVICE_AUTO_START
+    & $NssmExe set $Name Start SERVICE_AUTO_START | Out-Null
 
-    Write-Host "[install] Service '$Name' installed." -ForegroundColor Green
+    Write-Host "[install] Service '$Name' configured." -ForegroundColor Green
 }
 
 if ($Uninstall) {
@@ -150,8 +150,8 @@ if ($Uninstall) {
         $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "[uninstall] Stopping and removing '$svc'..." -ForegroundColor Yellow
-            & $NssmExe stop   $svc confirm 2>$null
-            & $NssmExe remove $svc confirm
+            & $NssmExe stop   $svc confirm 2>$null | Out-Null
+            & $NssmExe remove $svc confirm 2>$null | Out-Null
             Write-Host "[uninstall] '$svc' removed." -ForegroundColor Green
         } else {
             Write-Host "[uninstall] Service '$svc' not found -- skipping." -ForegroundColor Gray
@@ -178,18 +178,19 @@ Install-NssmService `
 # The watchdog's WATCHDOG_AUTO_RESTART should be OFF when both run as services
 # (the service manager handles restart), but ON is safe because nssm's restart
 # also fires -- just two restart mechanisms at once, which is harmless.
-& $NssmExe set $WatchdogServiceName AppEnvironmentExtra "$envBlock`nWATCHDOG_AUTO_RESTART=0"
+& $NssmExe set $WatchdogServiceName AppEnvironmentExtra "$envBlock`nWATCHDOG_AUTO_RESTART=0" | Out-Null
 
 # -- Start both services ------------------------------------------------------
 Write-Host "`n[install] Starting services..." -ForegroundColor Cyan
-& $NssmExe start $ServiceName
-Start-Sleep -Seconds 15   # Give dashboard time to bind the port before watchdog polls it
-& $NssmExe start $WatchdogServiceName
+Start-Service $ServiceName -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+Start-Service $WatchdogServiceName -ErrorAction SilentlyContinue
 
-Write-Host "`n[install] [OK] Done! Both services installed and started." -ForegroundColor Green
+Write-Host "`n[install] [OK] Done! Services configured." -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service status:"
 Get-Service -Name $ServiceName, $WatchdogServiceName | Format-Table Name, Status, StartType -AutoSize
+
 Write-Host ""
 Write-Host "  Useful commands:"
 Write-Host "    Restart dashboard:  Restart-Service $ServiceName"

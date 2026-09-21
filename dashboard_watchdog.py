@@ -34,6 +34,20 @@ import urllib.error
 from datetime import datetime
 from email.mime.text import MIMEText
 
+# Force UTF-8 stdout/stderr on Windows so services/redirected pipes never fail with UnicodeEncodeError
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -217,8 +231,9 @@ def main():
     print(f"[WATCHDOG] Auto-restart: {'ON' if AUTO_RESTART else 'OFF'}"
           + (f" (cmd: {RESTART_CMD}, max: {MAX_RESTARTS or 'unlimited'})" if AUTO_RESTART else ""))
     print(f"[WATCHDOG] PID file:        {PID_FILE}")
-    print(f"[WATCHDOG] Stop sentinel:   {STOP_FILE}  ← create this file to suppress auto-restart")
+    print(f"[WATCHDOG] Stop sentinel:   {STOP_FILE}  <- create this file to suppress auto-restart")
     print(f"[WATCHDOG] Faulthandler log: {FAULTHANDLER_LOG}")
+
     print(f"[WATCHDOG] Settings file:   {SETTINGS_FILE}")
 
 
