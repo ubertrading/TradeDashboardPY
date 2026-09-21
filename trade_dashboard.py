@@ -17270,6 +17270,9 @@ body {
   line-height: 1.5;
   min-height: 100vh;
 }
+body.popout-strategy #cycleReminderBanner {
+  display: none !important;
+}
 .container { max-width: 100%; margin: 0 auto; padding: 20px; }
 
 /* Header */
@@ -24387,6 +24390,12 @@ const _dismissedReminders = new Set();
 function renderCycleReminders(reminders) {
   const banner = document.getElementById('cycleReminderBanner');
   if (!banner) return;
+  // Never show alerts in individual strategy windows (?strategy_id=...)
+  if (new URLSearchParams(window.location.search).get('strategy_id') || document.body.classList.contains('popout-strategy')) {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    return;
+  }
   const entries = Object.entries(reminders)
     .filter(([acct, r]) => !_dismissedReminders.has(acct) && r.level !== 'OK');
   if (entries.length === 0) {
@@ -26772,6 +26781,9 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
   const params = new URLSearchParams(window.location.search);
   const popoutStratId = params.get('strategy_id');
   if (popoutStratId) {
+    document.body.classList.add('popout-strategy');
+    const crb = document.getElementById('cycleReminderBanner');
+    if (crb) { crb.style.display = 'none'; crb.innerHTML = ''; }
     document.title = 'Strategy \u2014 Loading...';
     // ─── Save window geometry on resize/move/close ───
     function savePopoutGeo() {
@@ -26795,10 +26807,11 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
       await origRefresh();
       if (firstLoad) {
         firstLoad = false;
-        // Hide header, main tab-nav, footer — but NOT strategy sub-tab nav
-        document.querySelectorAll('.header, .tab-nav:not(#stratTabNav), .refresh-bar-wrap').forEach(el => el.style.display = 'none');
+        // Hide header, main tab-nav, footer, and alert banners — but NOT strategy sub-tab nav
+        document.querySelectorAll('.header, .tab-nav:not(#stratTabNav), .refresh-bar-wrap, #cycleReminderBanner').forEach(el => el.style.display = 'none');
         // Hide only main dashboard tab panels (not strategy sub-tabs)
         document.querySelectorAll('.tab-panel[id^="tab-"]').forEach(p => p.style.display = 'none');
+
         // Auto-open the strategy
         editStrategy(popoutStratId);
         // Restyle the modal to act as inline content (not overlay)
