@@ -11789,6 +11789,29 @@ def create_session():
             _log_event(session["id"], None, "session_created",
                        f"{session['action']} {session['pair']} x{session['total_positions']}")
 
+        # ── Proactively subscribe to quotes for new session pairs ─────────────
+        # Without this, a new instrument added while MT is already connected
+        # has to wait for the command loop to notice and subscribe — causing a
+        # visible "blank quote" until the first tick arrives (can take 5–30s).
+        # We fire subscribe_symbol immediately here so the broker starts
+        # streaming ticks before the UI polls for the first time.
+        try:
+            _mdm = globals().get("mt_direct_manager")
+            if _mdm and hasattr(_mdm, "accounts"):
+                sides = session.get("sides", {})
+                global_pair = session.get("pair", "")
+                for _aid, _side in sides.items():
+                    _acct = _mdm.accounts.get(_aid)
+                    if _acct and getattr(_acct, "connected", False):
+                        _pair = (_side.get("pair") or global_pair).strip()
+                        if _pair and hasattr(_acct, "subscribe_symbol"):
+                            _acct.subscribe_symbol(_pair)
+                            app.logger.info("[create_session] Pre-subscribed %s on %s for new session %s",
+                                            _pair, _aid, session["id"][:8])
+        except Exception as _sub_err:
+            app.logger.debug("[create_session] subscribe_symbol error (non-fatal): %s", _sub_err)
+        # ──────────────────────────────────────────────────────────────────────
+
         return jsonify(session), 201
     except Exception as e:
         app.logger.exception("Error creating session")
