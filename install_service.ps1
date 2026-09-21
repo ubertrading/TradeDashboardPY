@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Installs two services:
-      1. TradeDashboard  — runs trade_dashboard.py
-      2. TradeDashboardWatchdog — runs dashboard_watchdog.py
+      1. TradeDashboard  -- runs trade_dashboard.py
+      2. TradeDashboardWatchdog -- runs dashboard_watchdog.py
 
     Both services:
       - Run under the LOCAL SYSTEM account (or a user you specify)
@@ -41,20 +41,25 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
-# ── Helper: require Administrator ──────────────────────────────────────────
+# -- Helper: require Administrator ------------------------------------------
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]"Administrator")) {
-    Write-Error "This script must be run as Administrator. Right-click → 'Run as Administrator'."
+    Write-Error "This script must be run as Administrator. Right-click -> 'Run as Administrator'."
     exit 1
 }
 
-# ── Locate Python ───────────────────────────────────────────────────────────
+# -- Locate Python -----------------------------------------------------------
 if (-not $PythonExe) {
+    $cmdPy = Get-Command python.exe -ErrorAction SilentlyContinue
+    $cmdPySrc = if ($cmdPy) { $cmdPy.Source } else { $null }
+    $cmdPyL = Get-Command py.exe -ErrorAction SilentlyContinue
+    $cmdPyLSrc = if ($cmdPyL) { $cmdPyL.Source } else { $null }
+
     $candidates = @(
         "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe",
         "C:\Python312\python.exe",
-        (Get-Command python.exe -ErrorAction SilentlyContinue)?.Source,
-        (Get-Command py.exe    -ErrorAction SilentlyContinue)?.Source
+        $cmdPySrc,
+        $cmdPyLSrc
     )
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c)) { $PythonExe = $c; break }
@@ -66,17 +71,19 @@ if (-not $PythonExe -or -not (Test-Path $PythonExe)) {
 }
 Write-Host "[install] Using Python: $PythonExe" -ForegroundColor Cyan
 
-# ── Locate or download nssm ─────────────────────────────────────────────────
-$NssmExe = Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+# -- Locate or download nssm -------------------------------------------------
+$cmdNssm = Get-Command nssm.exe -ErrorAction SilentlyContinue
+$NssmExe = if ($cmdNssm) { $cmdNssm.Source } else { $null }
 if (-not $NssmExe) {
     $nssmDir  = Join-Path $ScriptDir "var\nssm"
     $NssmExe  = Join-Path $nssmDir "nssm.exe"
     if (-not (Test-Path $NssmExe)) {
-        Write-Host "[install] nssm not found — downloading..." -ForegroundColor Yellow
+        Write-Host "[install] nssm not found -- downloading..." -ForegroundColor Yellow
         $nssmZip = Join-Path $env:TEMP "nssm.zip"
         $nssmUrl = "https://nssm.cc/release/nssm-2.24.zip"
         New-Item -ItemType Directory -Force -Path $nssmDir | Out-Null
         try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri $nssmUrl -OutFile $nssmZip -UseBasicParsing
             Expand-Archive -LiteralPath $nssmZip -DestinationPath $env:TEMP -Force
             $extracted = Get-Item "$env:TEMP\nssm-2.24\win64\nssm.exe" -ErrorAction Stop
@@ -90,7 +97,7 @@ if (-not $NssmExe) {
 }
 Write-Host "[install] Using nssm: $NssmExe" -ForegroundColor Cyan
 
-# ── Common environment for both services ────────────────────────────────────
+# -- Common environment for both services ------------------------------------
 $envBlock = "TRADE_PORT=$TradePort`nTRADE_HOST=$TradeHost"
 
 function Install-NssmService {
@@ -116,7 +123,7 @@ function Install-NssmService {
     & $NssmExe set     $Name DisplayName  $DisplayName
     & $NssmExe set     $Name Description  $Description
 
-    # Stdout/stderr → log files
+    # Stdout/stderr -> log files
     $logDir = Join-Path $ScriptDir "logs"
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
     & $NssmExe set $Name AppStdout (Join-Path $logDir "$Name-stdout.log")
@@ -138,7 +145,7 @@ function Install-NssmService {
 }
 
 if ($Uninstall) {
-    # ── Uninstall mode ───────────────────────────────────────────────────
+    # -- Uninstall mode ---------------------------------------------------
     foreach ($svc in @($WatchdogServiceName, $ServiceName)) {
         $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($existing) {
@@ -147,21 +154,21 @@ if ($Uninstall) {
             & $NssmExe remove $svc confirm
             Write-Host "[uninstall] '$svc' removed." -ForegroundColor Green
         } else {
-            Write-Host "[uninstall] Service '$svc' not found — skipping." -ForegroundColor Gray
+            Write-Host "[uninstall] Service '$svc' not found -- skipping." -ForegroundColor Gray
         }
     }
     Write-Host "`n[uninstall] Done." -ForegroundColor Green
     exit 0
 }
 
-# ── Install Dashboard service ────────────────────────────────────────────────
+# -- Install Dashboard service ------------------------------------------------
 Install-NssmService `
     -Name        $ServiceName `
     -Script      (Join-Path $ScriptDir "trade_dashboard.py") `
     -DisplayName "Trade Dashboard" `
     -Description "Trading execution dashboard (trade_dashboard.py)"
 
-# ── Install Watchdog service ─────────────────────────────────────────────────
+# -- Install Watchdog service -------------------------------------------------
 Install-NssmService `
     -Name        $WatchdogServiceName `
     -Script      (Join-Path $ScriptDir "dashboard_watchdog.py") `
@@ -170,16 +177,16 @@ Install-NssmService `
 
 # The watchdog's WATCHDOG_AUTO_RESTART should be OFF when both run as services
 # (the service manager handles restart), but ON is safe because nssm's restart
-# also fires — just two restart mechanisms at once, which is harmless.
+# also fires -- just two restart mechanisms at once, which is harmless.
 & $NssmExe set $WatchdogServiceName AppEnvironmentExtra "$envBlock`nWATCHDOG_AUTO_RESTART=0"
 
-# ── Start both services ──────────────────────────────────────────────────────
+# -- Start both services ------------------------------------------------------
 Write-Host "`n[install] Starting services..." -ForegroundColor Cyan
 & $NssmExe start $ServiceName
 Start-Sleep -Seconds 15   # Give dashboard time to bind the port before watchdog polls it
 & $NssmExe start $WatchdogServiceName
 
-Write-Host "`n[install] ✅ Done! Both services installed and started." -ForegroundColor Green
+Write-Host "`n[install] [OK] Done! Both services installed and started." -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service status:"
 Get-Service -Name $ServiceName, $WatchdogServiceName | Format-Table Name, Status, StartType -AutoSize
