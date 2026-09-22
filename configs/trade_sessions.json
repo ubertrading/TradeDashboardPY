@@ -64,20 +64,7 @@
   },
   "6aabd97a-9212-4896-a13f-c4ec47ac8205": {
     "_rb_exec_history": [
-      1788919780.0819983,
-      1788919780.0840685,
-      1788919780.5786147,
-      1788919780.6061914,
-      1788919781.5296757,
-      1788919781.5437334,
-      1788919782.0968785,
-      1788919782.1162004,
-      1788919783.0060375,
-      1788919783.0217342,
-      1788919783.645172,
-      1788919783.6586742,
-      1788919784.5930238,
-      1788919784.5969925
+      1790092793.4093955
     ],
     "action": "monitor",
     "avoid_news": false,
@@ -929,11 +916,53 @@
         "ts": "2026-09-08 22:11:49",
         "ts_epoch": 1788919909.6167011,
         "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "external": true,
+        "lots": 0.1,
+        "price": null,
+        "ticket": 1918494809,
+        "ts": "2026-09-22 11:59:19",
+        "ts_epoch": 1790092759.6298265,
+        "verified": false
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1790092771.4999177,
+        "lots": 1.0,
+        "price": 0.82185,
+        "quote_price": 0.82185,
+        "ticket": 252112171,
+        "ts": "2026-09-22 11:59:31",
+        "ts_epoch": 1790092771.6853473,
+        "verified": true
+      },
+      {
+        "account": "DEMO-MT5-52769010",
+        "external": true,
+        "lots": 0.01,
+        "price": null,
+        "ticket": 1918494944,
+        "ts": "2026-09-22 11:59:53",
+        "ts_epoch": 1790092792.9253843,
+        "verified": false
+      },
+      {
+        "account": "DEMO-MT4-1218954455",
+        "cmd_ts": 1790092793.4103975,
+        "lots": 1.0,
+        "price": 0.82186,
+        "quote_price": 0.82186,
+        "ticket": 252112170,
+        "ts": "2026-09-22 11:59:53",
+        "ts_epoch": 1790092793.6305356,
+        "verified": true
       }
     ],
     "closed": {
-      "DEMO-MT4-1218954455": 0,
-      "DEMO-MT5-52769010": 0
+      "DEMO-MT4-1218954455": 2,
+      "DEMO-MT5-52769010": 2
     },
     "comment": "1218954455-52769010",
     "created_at": "2026-09-08 22:09:12",
@@ -1360,11 +1389,13 @@
         "ts_epoch": 1788919875.74649
       }
     ],
+    "hedge_mismatch_6aabd97a-9212-4896-a13f-c4ec47ac8205_DEMO-MT5-52769010": 4,
     "hedge_monitor_start_ts": 1788919838.37851,
     "id": "6aabd97a-9212-4896-a13f-c4ec47ac8205",
+    "imbalance_rebal_ts": 1790092792.9253843,
     "imported": true,
     "last_trade_ts": {
-      "DEMO-MT4-1218954455": 1788919909.9408867,
+      "DEMO-MT4-1218954455": 1790092793.6305356,
       "DEMO-MT5-52769010": 1788919875.7486026
     },
     "lot_size": 1.0,
@@ -1380,6 +1411,9 @@
     "require_diff_skew_open": "",
     "rollback_needed": {},
     "rollback_tickets": {},
+    "rollback_user_approved": {
+      "DEMO-MT4-1218954455": true
+    },
     "side1_lot_size": "",
     "side1_max_spread": 99,
     "side2_lot_size": "",
@@ -1410,7 +1444,7 @@
     "strategy_id": "558dadc8-2b67-4beb-b0e1-4e8ad9b28eaf",
     "total_positions": 21,
     "trade_pause": 0.0,
-    "updated_at": "2026-09-08 22:11:49"
+    "updated_at": "2026-09-22 11:59:53"
   },
   "86394929-80cb-45a6-b68a-ea73951cb8b9": {
     "action": "open",
@@ -1467,7 +1501,7 @@
       }
     },
     "spread_rejects": {
-      "DEMO-MT4-1218954455": 178420,
+      "DEMO-MT4-1218954455": 179561,
       "DUKA-DEMO-DEMO2uotdK": 0
     },
     "status": "active",

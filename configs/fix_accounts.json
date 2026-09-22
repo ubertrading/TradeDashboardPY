@@ -1,28 +1,4 @@
 {
-  "DUKA-DEMO-DEMO2uotdK": {
-    "label": "",
-    "group_label": "A",
-    "host": "demo-api.dukascopy.com",
-    "trade_port": 10443,
-    "quote_port": 9443,
-    "sender_comp_id": "DEMO2uotdK_DEMOFIX",
-    "target_comp_id": "DUKASCOPYFIX",
-    "username": "DEMO2uotdK",
-    "password": "uotdK",
-    "heartbeat_interval": 30,
-    "lot_multiplier": 100000,
-    "leverage": 200,
-    "use_ssl": true,
-    "implementation": "dukascopy",
-    "openapi_environment": "demo",
-    "auto_connect_start": false,
-    "cycle_reminder_enabled": false,
-    "cycle_reminder_days": null,
-    "cycle_max_days": null,
-    "auto_cycle_enabled": false,
-    "sender_comp_id_quote": "FEED_DEMO2uotdK_DEMOFIX",
-    "external_account_id": "1218954455"
-  },
   "DEMO-CT-OPENAPI-HDBCH2-9040256": {
     "label": "DEMO-CT-OPENAPI-HDBCH2-9040256",
     "group_label": "",

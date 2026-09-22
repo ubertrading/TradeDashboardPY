@@ -1,4 +1,28 @@
 {
+  "account_currencies": {
+    "HU-1-B-DER-80667134": "EUR",
+    "HU-1-B-ORBEX-808973": "EUR",
+    "HU-10-A-SQ2110248": "EUR",
+    "HU-10-B-ORBEX-808973": "EUR",
+    "HU-11-B-DER-80667134": "EUR",
+    "HU-11-SQ-651083": "EUR",
+    "HU-12-A-SQ-2200537": "EUR",
+    "HU-12-A-SQ-2200537b": "EUR",
+    "HU-8-A-DUKA1501836166": "EUR"
+  },
+  "account_intended_lots": {},
+  "adr_settings": {
+    "GBPCHF": 90,
+    "USDCHF": 65,
+    "default": 80
+  },
+  "auto_cycle_time_est": "",
+  "default_intended_lots": 0,
+  "disbalance_alert_email": true,
+  "disbalance_alert_enabled": false,
+  "disbalance_alert_period_sec": 30,
+  "disbalance_alert_telegram": true,
+  "disbalance_startup_grace_sec": 120,
   "ea_poll_enabled": true,
   "email": {
     "enabled": false,
@@ -9,6 +33,11 @@
     "smtp_user": "newstrade.alerts2@gmail.com",
     "to_addr": "ubertrading@gmail.com"
   },
+  "exec_alert_on_timeout": false,
+  "exec_halt_on_timeout": false,
+  "exec_retry_close": false,
+  "exec_retry_max": 5,
+  "exec_timeout_sec": 60,
   "fee_keywords_per_name": {},
   "fee_thresholds": {
     "1218954455": 0.0,
@@ -16,15 +45,25 @@
     "MT4-DIRECT-1218954455": 0.0,
     "MT5-DIRECT-52769010": 0.0
   },
+  "fund_email_enabled": true,
+  "fund_email_time": "08:00",
   "margin_alert_threshold": 85,
   "margin_alert_thresholds": {
     "DEMO-CT-OPENAPI-9040256": 80.0
   },
+  "nop_fm_alert_peak_throttle_sec": 0,
+  "nop_fm_alert_threshold": 100,
+  "nop_fm_alert_thresholds": {},
+  "nop_fm_alert_throttle_sec": 900,
   "position_change_alert": true,
   "position_change_closed": true,
+  "position_change_email": true,
   "position_change_opened": false,
+  "position_change_telegram": true,
   "prompt_on_rollbacks": false,
   "rebalance_close_delay": 1.0,
+  "rollback_rate_limit": 50,
+  "statement_retention_days": 7,
   "stats_log_accounts": [
     "52769010"
   ],
@@ -32,29 +71,20 @@
   "swap_alert_instruments": "AUDCHF,AUDJPY,GBPJPY,USDJPY,USDCHF,GBPCHF,USDCHF.b,GBPCHF.b",
   "swap_alert_interval_min": 60,
   "swap_alert_pct": 2.0,
+  "swap_missing_alert_enabled": true,
+  "swap_negative_alert_enabled": true,
   "telegram": {
     "bot_token": "8774851852:AAErEzzinXp9GJ4H12ICnOltp0LNys5jeeA",
     "chat_id": "6838817529",
     "enabled": true,
+    "quiet_end": "07:00",
     "quiet_hours_enabled": false,
-    "quiet_start": "22:00",
-    "quiet_end": "07:00"
+    "quiet_start": "22:00"
   },
   "telegram_red_alert": {
     "bot_token": "",
     "chat_id": "",
     "enabled": false
   },
-  "theme_colors": {},
-  "account_currencies": {
-    "HU-8-A-DUKA1501836166": "EUR",
-    "HU-10-A-SQ2110248": "EUR",
-    "HU-1-B-ORBEX-808973": "EUR",
-    "HU-1-B-DER-80667134": "EUR",
-    "HU-11-SQ-651083": "EUR",
-    "HU-12-A-SQ-2200537b": "EUR",
-    "HU-10-B-ORBEX-808973": "EUR",
-    "HU-11-B-DER-80667134": "EUR",
-    "HU-12-A-SQ-2200537": "EUR"
-  }
+  "theme_colors": {}
 }

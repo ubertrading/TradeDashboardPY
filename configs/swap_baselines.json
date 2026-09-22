@@ -83,19 +83,243 @@
     "symbol": "USDJPY",
     "ts": 1788781071.894979
   },
+  "AL-1-B-ICM11640257:AUDCHF": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.18219
+  },
+  "AL-1-B-ICM11640257:AUDJPY": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1837268
+  },
+  "AL-1-B-ICM11640257:GBPCHF": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1874366
+  },
+  "AL-1-B-ICM11640257:GBPJPY": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1847348
+  },
+  "AL-1-B-ICM11640257:USDCHF": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1868422
+  },
+  "AL-1-B-ICM11640257:USDJPY": {
+    "account": "AL-1-B-ICM11640257",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1857336
+  },
+  "AL-1-B-ICM7363966:AUDCHF": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1660888
+  },
+  "AL-1-B-ICM7363966:AUDJPY": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1671453
+  },
+  "AL-1-B-ICM7363966:GBPCHF": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1712282
+  },
+  "AL-1-B-ICM7363966:GBPJPY": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1681554
+  },
+  "AL-1-B-ICM7363966:USDCHF": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1691544
+  },
+  "AL-1-B-ICM7363966:USDJPY": {
+    "account": "AL-1-B-ICM7363966",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1681554
+  },
+  "AL-1-B-ICM7946310:AUDCHF": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.06268
+  },
+  "AL-1-B-ICM7946310:AUDJPY": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0636802
+  },
+  "AL-1-B-ICM7946310:GBPCHF": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0686822
+  },
+  "AL-1-B-ICM7946310:GBPJPY": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.064683
+  },
+  "AL-1-B-ICM7946310:USDCHF": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0677178
+  },
+  "AL-1-B-ICM7946310:USDJPY": {
+    "account": "AL-1-B-ICM7946310",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0657194
+  },
+  "ALEX-ICM-7415899:AUDCHF": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0697188
+  },
+  "ALEX-ICM-7415899:AUDJPY": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0697188
+  },
+  "ALEX-ICM-7415899:GBPCHF": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0737884
+  },
+  "ALEX-ICM-7415899:GBPJPY": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.0717015
+  },
+  "ALEX-ICM-7415899:USDCHF": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0726953
+  },
+  "ALEX-ICM-7415899:USDJPY": {
+    "account": "ALEX-ICM-7415899",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0726953
+  },
+  "ALEX-YCM:AUDCHF": {
+    "account": "ALEX-YCM",
+    "swap_long": 5.8013,
+    "swap_short": -8.7228,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.116195
+  },
+  "ALEX-YCM:AUDJPY": {
+    "account": "ALEX-YCM",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1171944
+  },
+  "ALEX-YCM:GBPCHF": {
+    "account": "ALEX-YCM",
+    "swap_long": 9.6135,
+    "swap_short": -14.145,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.121194
+  },
+  "ALEX-YCM:GBPCHF.b": {
+    "account": "ALEX-YCM",
+    "swap_long": 10.7445,
+    "swap_short": -12.915,
+    "symbol": "GBPCHF.b",
+    "ts": 1790092568.1222177
+  },
+  "ALEX-YCM:GBPJPY": {
+    "account": "ALEX-YCM",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.118194
+  },
+  "ALEX-YCM:USDCHF": {
+    "account": "ALEX-YCM",
+    "swap_long": 7.6245,
+    "swap_short": -11.0803,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1191936
+  },
+  "ALEX-YCM:USDCHF.b": {
+    "account": "ALEX-YCM",
+    "swap_long": 8.5215,
+    "swap_short": -10.1168,
+    "symbol": "USDCHF.b",
+    "ts": 1790092568.121194
+  },
+  "ALEX-YCM:USDJPY": {
+    "account": "ALEX-YCM",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDJPY",
+    "ts": 1790092568.118194
+  },
   "DEMO-MT4-1218954455:AUDCHF": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 10.52568431517063,
-    "swap_short": -13.842989372643126,
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
     "symbol": "AUDCHF",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT4-1218954455:AUDJPY": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 7.723257075684963,
-    "swap_short": -10.768725076184362,
+    "swap_long": -1.5,
+    "swap_short": -1.5,
     "symbol": "AUDJPY",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT4-1218954455:GBPCHF": {
     "account": "DEMO-MT4-1218954455",
@@ -106,38 +330,38 @@
   },
   "DEMO-MT4-1218954455:GBPJPY": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 6.172680882084928,
-    "swap_short": -9.351394257978495,
+    "swap_long": -1.5,
+    "swap_short": -1.5,
     "symbol": "GBPJPY",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT4-1218954455:USDCHF": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 8.801523602230988,
-    "swap_short": -12.123873010376343,
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
     "symbol": "USDCHF",
-    "ts": 1788556873.7039902
+    "ts": 1790092568.2430544
   },
   "DEMO-MT4-1218954455:USDJPY": {
     "account": "DEMO-MT4-1218954455",
-    "swap_long": 5.910864793257262,
-    "swap_short": -9.110769014120569,
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
     "symbol": "USDJPY",
-    "ts": 1788784532.5363019
+    "ts": 1790092568.2430544
   },
   "DEMO-MT5-52769010:AUDCHF": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 5.06,
-    "swap_short": -9.579,
+    "swap_long": 4.862,
+    "swap_short": -9.348,
     "symbol": "AUDCHF",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT5-52769010:AUDJPY": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 7.822,
-    "swap_short": -12.814,
+    "swap_long": 7.624,
+    "swap_short": -12.484,
     "symbol": "AUDJPY",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT5-52769010:GBPCHF": {
     "account": "DEMO-MT5-52769010",
@@ -148,23 +372,1003 @@
   },
   "DEMO-MT5-52769010:GBPJPY": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 10.775,
-    "swap_short": -22.152,
+    "swap_long": 10.019,
+    "swap_short": -21.184,
     "symbol": "GBPJPY",
-    "ts": 1788796840.0750053
+    "ts": 1790092568.2430544
   },
   "DEMO-MT5-52769010:USDCHF": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 5.5,
-    "swap_short": -12.308,
+    "swap_long": 6.121,
+    "swap_short": -13.045,
     "symbol": "USDCHF",
-    "ts": 1789352176.0468526
+    "ts": 1790092568.2430544
   },
   "DEMO-MT5-52769010:USDJPY": {
     "account": "DEMO-MT5-52769010",
-    "swap_long": 7.609,
-    "swap_short": -16.243,
+    "swap_long": 8.176,
+    "swap_short": -16.914,
     "symbol": "USDJPY",
-    "ts": 1788796840.0750053
+    "ts": 1790092568.2430544
+  },
+  "HU-1-A-SQ2200508:AUDCHF": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.110195
+  },
+  "HU-1-A-SQ2200508:AUDJPY": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1111941
+  },
+  "HU-1-A-SQ2200508:GBPCHF": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1151938
+  },
+  "HU-1-A-SQ2200508:GBPJPY": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.112193
+  },
+  "HU-1-A-SQ2200508:USDCHF": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1141937
+  },
+  "HU-1-A-SQ2200508:USDJPY": {
+    "account": "HU-1-A-SQ2200508",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.113195
+  },
+  "HU-1-AVA-88880855:AUDCHF": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 1.5899999999999999,
+    "swap_short": -5.16,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0471523
+  },
+  "HU-1-AVA-88880855:AUDJPY": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 0.78,
+    "swap_short": -4.31,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.048117
+  },
+  "HU-1-AVA-88880855:GBPCHF": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 1.78,
+    "swap_short": -5.27,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0511122
+  },
+  "HU-1-AVA-88880855:GBPJPY": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 0.97,
+    "swap_short": -4.42,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.048117
+  },
+  "HU-1-AVA-88880855:USDCHF": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 1.8,
+    "swap_short": -5.23,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0501115
+  },
+  "HU-1-AVA-88880855:USDJPY": {
+    "account": "HU-1-AVA-88880855",
+    "swap_long": 0.98,
+    "swap_short": -4.37,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0491374
+  },
+  "HU-1-B-DER-80667134:AUDCHF": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.2024767
+  },
+  "HU-1-B-DER-80667134:AUDJPY": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.204484
+  },
+  "HU-1-B-DER-80667134:GBPCHF": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.2094846
+  },
+  "HU-1-B-DER-80667134:GBPJPY": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.205484
+  },
+  "HU-1-B-DER-80667134:USDCHF": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDCHF",
+    "ts": 1790092568.2084863
+  },
+  "HU-1-B-DER-80667134:USDJPY": {
+    "account": "HU-1-B-DER-80667134",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDJPY",
+    "ts": 1790092568.2064834
+  },
+  "HU-1-B-ICM11271572:AUDCHF": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1263273
+  },
+  "HU-1-B-ICM11271572:AUDJPY": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1272254
+  },
+  "HU-1-B-ICM11271572:GBPCHF": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1301942
+  },
+  "HU-1-B-ICM11271572:GBPJPY": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1281939
+  },
+  "HU-1-B-ICM11271572:USDCHF": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1301942
+  },
+  "HU-1-B-ICM11271572:USDJPY": {
+    "account": "HU-1-B-ICM11271572",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1291935
+  },
+  "HU-10-A-SQ2110248:AUDCHF": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.2135043
+  },
+  "HU-10-A-SQ2110248:AUDJPY": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.2135043
+  },
+  "HU-10-A-SQ2110248:GBPCHF": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.221643
+  },
+  "HU-10-A-SQ2110248:GBPJPY": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.2145014
+  },
+  "HU-10-A-SQ2110248:USDCHF": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.2181993
+  },
+  "HU-10-A-SQ2110248:USDJPY": {
+    "account": "HU-10-A-SQ2110248",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.2181993
+  },
+  "HU-10-B-NOOR-9434198:USDCHF": {
+    "account": "HU-10-B-NOOR-9434198",
+    "swap_long": -4.25,
+    "swap_short": -6.7,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1627746
+  },
+  "HU-10-B-NOOR-9434198:USDJPY": {
+    "account": "HU-10-B-NOOR-9434198",
+    "swap_long": -13.4,
+    "swap_short": -19.32,
+    "symbol": "USDJPY",
+    "ts": 1790092568.159716
+  },
+  "HU-10-B-NOOR:USDCHF": {
+    "account": "HU-10-B-NOOR",
+    "swap_long": -4.25,
+    "swap_short": -6.7,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1452005
+  },
+  "HU-10-B-NOOR:USDJPY": {
+    "account": "HU-10-B-NOOR",
+    "swap_long": -13.4,
+    "swap_short": -19.32,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1422029
+  },
+  "HU-11-A-YCM2145011025:AUDCHF": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 5.8013,
+    "swap_short": -8.7228,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1019776
+  },
+  "HU-11-A-YCM2145011025:AUDJPY": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1029768
+  },
+  "HU-11-A-YCM2145011025:GBPCHF": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 9.6135,
+    "swap_short": -14.145,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1081975
+  },
+  "HU-11-A-YCM2145011025:GBPCHF.b": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 10.7445,
+    "swap_short": -12.915,
+    "symbol": "GBPCHF.b",
+    "ts": 1790092568.109194
+  },
+  "HU-11-A-YCM2145011025:GBPJPY": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.104196
+  },
+  "HU-11-A-YCM2145011025:USDCHF": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 7.6245,
+    "swap_short": -11.0803,
+    "symbol": "USDCHF",
+    "ts": 1790092568.107195
+  },
+  "HU-11-A-YCM2145011025:USDCHF.b": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 8.5215,
+    "swap_short": -10.1168,
+    "symbol": "USDCHF.b",
+    "ts": 1790092568.109194
+  },
+  "HU-11-A-YCM2145011025:USDJPY": {
+    "account": "HU-11-A-YCM2145011025",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1061947
+  },
+  "HU-11-SQ-651083:AUDCHF": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.236983
+  },
+  "HU-11-SQ-651083:AUDJPY": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.237934
+  },
+  "HU-11-SQ-651083:GBPCHF": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.2419589
+  },
+  "HU-11-SQ-651083:GBPJPY": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.238902
+  },
+  "HU-11-SQ-651083:USDCHF": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.2419589
+  },
+  "HU-11-SQ-651083:USDJPY": {
+    "account": "HU-11-SQ-651083",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.238902
+  },
+  "HU-2-B-ICM11531224:AUDCHF": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0909834
+  },
+  "HU-2-B-ICM11531224:AUDJPY": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0939765
+  },
+  "HU-2-B-ICM11531224:GBPCHF": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1009789
+  },
+  "HU-2-B-ICM11531224:GBPJPY": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.096991
+  },
+  "HU-2-B-ICM11531224:USDCHF": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0989764
+  },
+  "HU-2-B-ICM11531224:USDJPY": {
+    "account": "HU-2-B-ICM11531224",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.096991
+  },
+  "HU-3-B-ICM11535084:AUDCHF": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0370789
+  },
+  "HU-3-B-ICM11535084:AUDJPY": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0380807
+  },
+  "HU-3-B-ICM11535084:GBPCHF": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0451627
+  },
+  "HU-3-B-ICM11535084:GBPJPY": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.041203
+  },
+  "HU-3-B-ICM11535084:USDCHF": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0441146
+  },
+  "HU-3-B-ICM11535084:USDJPY": {
+    "account": "HU-3-B-ICM11535084",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.041203
+  },
+  "HU-4-B-ICM11535601:AUDCHF": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0753045
+  },
+  "HU-4-B-ICM11535601:AUDJPY": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0753045
+  },
+  "HU-4-B-ICM11535601:GBPCHF": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0803463
+  },
+  "HU-4-B-ICM11535601:GBPJPY": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.0773556
+  },
+  "HU-4-B-ICM11535601:USDCHF": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0794187
+  },
+  "HU-4-B-ICM11535601:USDJPY": {
+    "account": "HU-4-B-ICM11535601",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0783582
+  },
+  "HU-5-B-ICM11537237:AUDCHF": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1884441
+  },
+  "HU-5-B-ICM11537237:AUDJPY": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1894646
+  },
+  "HU-5-B-ICM11537237:GBPCHF": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1934452
+  },
+  "HU-5-B-ICM11537237:GBPJPY": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1894646
+  },
+  "HU-5-B-ICM11537237:USDCHF": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.192444
+  },
+  "HU-5-B-ICM11537237:USDJPY": {
+    "account": "HU-5-B-ICM11537237",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1914444
+  },
+  "HU-6-A-SQ2200537:AUDCHF": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.2240038
+  },
+  "HU-6-A-SQ2200537:AUDJPY": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.2249599
+  },
+  "HU-6-A-SQ2200537:GBPCHF": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.229862
+  },
+  "HU-6-A-SQ2200537:GBPJPY": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.2267323
+  },
+  "HU-6-A-SQ2200537:USDCHF": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.227808
+  },
+  "HU-6-A-SQ2200537:USDJPY": {
+    "account": "HU-6-A-SQ2200537",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.2267323
+  },
+  "HU-6-B-ICM11541997:AUDCHF": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1372008
+  },
+  "HU-6-B-ICM11541997:AUDJPY": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1382003
+  },
+  "HU-6-B-ICM11541997:GBPCHF": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1422029
+  },
+  "HU-6-B-ICM11541997:GBPJPY": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1382003
+  },
+  "HU-6-B-ICM11541997:USDCHF": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1412017
+  },
+  "HU-6-B-ICM11541997:USDJPY": {
+    "account": "HU-6-B-ICM11541997",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1392002
+  },
+  "HU-7-B-ICM11542790:AUDCHF": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1954432
+  },
+  "HU-7-B-ICM11542790:AUDJPY": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1954432
+  },
+  "HU-7-B-ICM11542790:GBPCHF": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.201443
+  },
+  "HU-7-B-ICM11542790:GBPJPY": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1994903
+  },
+  "HU-7-B-ICM11542790:USDCHF": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.2004707
+  },
+  "HU-7-B-ICM11542790:USDJPY": {
+    "account": "HU-7-B-ICM11542790",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1994903
+  },
+  "HU-8-A-DUKA1501836166:AUDCHF": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 6.0239199999999995,
+    "swap_short": -8.43057,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1472023
+  },
+  "HU-8-A-DUKA1501836166:AUDJPY": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.148201
+  },
+  "HU-8-A-DUKA1501836166:GBPCHF": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 10.043,
+    "swap_short": -13.66226,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1584387
+  },
+  "HU-8-A-DUKA1501836166:GBPJPY": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1509154
+  },
+  "HU-8-A-DUKA1501836166:USDCHF": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 7.8656,
+    "swap_short": -10.45623,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1553507
+  },
+  "HU-8-A-DUKA1501836166:USDJPY": {
+    "account": "HU-8-A-DUKA1501836166",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1542459
+  },
+  "HU-8-A-SQ2200548:AUDCHF": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.230946
+  },
+  "HU-8-A-SQ2200548:AUDJPY": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.2319684
+  },
+  "HU-8-A-SQ2200548:GBPCHF": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.236983
+  },
+  "HU-8-A-SQ2200548:GBPJPY": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.2329109
+  },
+  "HU-8-A-SQ2200548:USDCHF": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.235968
+  },
+  "HU-8-A-SQ2200548:USDJPY": {
+    "account": "HU-8-A-SQ2200548",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.2349653
+  },
+  "HU-8-B-ICM11545991:AUDCHF": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0511122
+  },
+  "HU-8-B-ICM11545991:AUDJPY": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.052111
+  },
+  "HU-8-B-ICM11545991:GBPCHF": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0541127
+  },
+  "HU-8-B-ICM11545991:GBPJPY": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.052111
+  },
+  "HU-8-B-ICM11545991:USDCHF": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0541127
+  },
+  "HU-8-B-ICM11545991:USDJPY": {
+    "account": "HU-8-B-ICM11545991",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0531385
+  },
+  "IR-1-B-NOOR9433406:USDCHF": {
+    "account": "IR-1-B-NOOR9433406",
+    "swap_long": -4.25,
+    "swap_short": -6.7,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0606847
+  },
+  "IR-1-B-NOOR9433406:USDJPY": {
+    "account": "IR-1-B-NOOR9433406",
+    "swap_long": -13.4,
+    "swap_short": -19.32,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0596747
+  },
+  "IRINA-ICM:AUDCHF": {
+    "account": "IRINA-ICM",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.0541127
+  },
+  "IRINA-ICM:AUDJPY": {
+    "account": "IRINA-ICM",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0541127
+  },
+  "IRINA-ICM:GBPCHF": {
+    "account": "IRINA-ICM",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.056679
+  },
+  "IRINA-ICM:GBPJPY": {
+    "account": "IRINA-ICM",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.0541127
+  },
+  "IRINA-ICM:USDCHF": {
+    "account": "IRINA-ICM",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.056679
+  },
+  "IRINA-ICM:USDJPY": {
+    "account": "IRINA-ICM",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0556595
+  },
+  "IRINA-dukascopy:AUDCHF": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 6.0239199999999995,
+    "swap_short": -8.43057,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.132194
+  },
+  "IRINA-dukascopy:AUDJPY": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1331947
+  },
+  "IRINA-dukascopy:GBPCHF": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 10.043,
+    "swap_short": -13.66226,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1372008
+  },
+  "IRINA-dukascopy:GBPJPY": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1331947
+  },
+  "IRINA-dukascopy:USDCHF": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 7.8656,
+    "swap_short": -10.45623,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1362002
+  },
+  "IRINA-dukascopy:USDJPY": {
+    "account": "IRINA-dukascopy",
+    "swap_long": 0,
+    "swap_short": 0,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1341949
+  },
+  "MM-1-A-SQ651485:AUDCHF": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.03208
+  },
+  "MM-1-A-SQ651485:AUDJPY": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0340798
+  },
+  "MM-1-A-SQ651485:GBPCHF": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0370789
+  },
+  "MM-1-A-SQ651485:GBPJPY": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.0350783
+  },
+  "MM-1-A-SQ651485:USDCHF": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0360785
+  },
+  "MM-1-A-SQ651485:USDJPY": {
+    "account": "MM-1-A-SQ651485",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.0360785
+  },
+  "MM-1-B-ICM:AUDCHF": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 4.862,
+    "swap_short": -9.348,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.081368
+  },
+  "MM-1-B-ICM:AUDJPY": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 7.624,
+    "swap_short": -12.484,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.0834115
+  },
+  "MM-1-B-ICM:GBPCHF": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 5.929,
+    "swap_short": -18.735,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.0899982
+  },
+  "MM-1-B-ICM:GBPJPY": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 10.019,
+    "swap_short": -21.184,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.0854075
+  },
+  "MM-1-B-ICM:USDCHF": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 6.121,
+    "swap_short": -13.045,
+    "symbol": "USDCHF",
+    "ts": 1790092568.0880272
+  },
+  "MM-1-B-ICM:USDJPY": {
+    "account": "MM-1-B-ICM",
+    "swap_long": 8.176,
+    "swap_short": -16.914,
+    "symbol": "USDJPY",
+    "ts": 1790092568.086967
+  },
+  "MS-1-A-SQ-:AUDCHF": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": 10.064078401809272,
+    "swap_short": -13.54602152011514,
+    "symbol": "AUDCHF",
+    "ts": 1790092568.1731539
+  },
+  "MS-1-A-SQ-:AUDJPY": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "AUDJPY",
+    "ts": 1790092568.1741586
+  },
+  "MS-1-A-SQ-:GBPCHF": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": 9.110134728628466,
+    "swap_short": -12.339331619537274,
+    "symbol": "GBPCHF",
+    "ts": 1790092568.1811595
+  },
+  "MS-1-A-SQ-:GBPJPY": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": -1.5,
+    "swap_short": -1.5,
+    "symbol": "GBPJPY",
+    "ts": 1790092568.1761546
+  },
+  "MS-1-A-SQ-:USDCHF": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": 9.690475319704007,
+    "swap_short": -13.021480993831224,
+    "symbol": "USDCHF",
+    "ts": 1790092568.1782582
+  },
+  "MS-1-A-SQ-:USDJPY": {
+    "account": "MS-1-A-SQ-",
+    "swap_long": -1.5,
+    "swap_short": -1.5000031772862163,
+    "symbol": "USDJPY",
+    "ts": 1790092568.1771972
   }
 }
