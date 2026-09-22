@@ -81,7 +81,7 @@ def _bootstrap_dependencies():
 
 _bootstrap_dependencies()
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import time
 import json
 import threading
@@ -9799,14 +9799,18 @@ def _should_issue_command(session, account):
                 else:
                     session.setdefault("rollback_start_ts", {})[account] = time.time()
                 return "rollback"
+            session.get("rollback_user_approved", {}).pop(account, None)
+            _rollback_pending_confirmations.pop((session.get("id", ""), account), None)
             return False  # No more rollbacks
 
         # PROMPT GATE: if prompt_on_rollbacks is enabled, pause and await UI confirmation
         if dashboard_settings.get("prompt_on_rollbacks"):
             key = (session.get("id", ""), account)
-            confirmed = _rollback_pending_confirmations.get(key)  # True/False/None
+            batch_approved = session.get("rollback_user_approved", {}).get(account, False)
+            confirmed = True if batch_approved else _rollback_pending_confirmations.get(key)  # True/False/None
             if confirmed is True:
-                # User approved — clear the flag and proceed
+                # User approved — remember approval for this rollback batch and clear pending prompt
+                session.setdefault("rollback_user_approved", {})[account] = True
                 _rollback_pending_confirmations.pop(key, None)
             elif confirmed is False:
                 # User denied — clear rollback and suppress future re-queuing for
@@ -9814,6 +9818,7 @@ def _should_issue_command(session, account):
                 # re-prompt for the same account until the session is reimported
                 # or the user manually resets the rejection.
                 _rollback_pending_confirmations.pop(key, None)
+                session.get("rollback_user_approved", {}).pop(account, None)
                 rollback[account] = 0
                 session["rollback_needed"] = rollback
                 session.get("rollback_tickets", {}).pop(account, None)
@@ -12057,7 +12062,10 @@ def unblock_session(session_id):
         if not s:
             return jsonify({"error": "Session not found"}), 404
         s["rollback_needed"] = {}
+        s.pop("rollback_user_rejected", None)
+        s.pop("rollback_user_approved", None)
         for acc in s.get("sides", {}):
+            _rollback_pending_confirmations.pop((session_id, acc), None)
             s["errors"][acc] = []
             s["spread_rejects"][acc] = 0
         s["status"] = "draft"
@@ -12088,7 +12096,10 @@ def reset_cycle(session_id):
                 "message": "iFOREX market is currently closed. Cannot reset session to OPEN mode.",
                 "accounts": blocked_accounts
             }), 400
+        s.pop("rollback_user_rejected", None)
+        s.pop("rollback_user_approved", None)
         for acc in s.get("sides", {}):
+            _rollback_pending_confirmations.pop((session_id, acc), None)
             s["filled"][acc] = 0
             s["closed"][acc] = 0
             s["errors"][acc] = []
@@ -13228,6 +13239,8 @@ def trade_result():
                     # Clear or reset rollback timeout timer
                     if rb.get(account, 0) <= 0:
                         session.get("rollback_start_ts", {}).pop(account, None)
+                        session.get("rollback_user_approved", {}).pop(account, None)
+                        _rollback_pending_confirmations.pop((session_id, account), None)
                         _log_event(session_id, account, "rollback_complete",
                                    "Hedge rebalance complete for this account.")
                     else:
@@ -17127,11 +17140,20 @@ def api_confirm_rollback():
         account = data.get("account", "")
         approved = bool(data.get("approved", False))
         key = (sid, account)
-        if key in _rollback_pending_confirmations:
-            _rollback_pending_confirmations[key] = approved
-            app.logger.info("[ROLLBACK-PROMPT] User %s rollback for %s sid=%s",
-                            'APPROVED' if approved else 'DENIED', account, sid[:8])
-            return jsonify({"ok": True, "approved": approved})
+        with lock:
+            if key in _rollback_pending_confirmations:
+                _rollback_pending_confirmations[key] = approved
+                session = sessions.get(sid)
+                if session:
+                    if approved:
+                        session.setdefault("rollback_user_approved", {})[account] = True
+                    else:
+                        session.setdefault("rollback_user_rejected", {})[account] = True
+                        session.get("rollback_user_approved", {}).pop(account, None)
+                    _save_sessions()
+                app.logger.info("[ROLLBACK-PROMPT] User %s rollback for %s sid=%s",
+                                'APPROVED' if approved else 'DENIED', account, sid[:8])
+                return jsonify({"ok": True, "approved": approved})
         return jsonify({"ok": False, "error": "No pending rollback for this account"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -17145,13 +17167,17 @@ def api_pending_rollbacks():
         for (sid, account), state in list(_rollback_pending_confirmations.items()):
             if state is None:  # awaiting answer
                 session = sessions.get(sid, {})
+                rb_count = session.get("rollback_needed", {}).get(account, 0)
+                if not session or rb_count <= 0:
+                    _rollback_pending_confirmations.pop((sid, account), None)
+                    continue
                 rb_tickets = session.get("rollback_tickets", {}).get(account, [])
                 reason = session.get("rollback_reason", {}).get(account, "")
                 pending.append({
                     "sid": sid,
                     "account": account,
-                    "count": session.get("rollback_needed", {}).get(account, 0),
-                    "tickets": rb_tickets[:5],  # preview first 5
+                    "count": rb_count,
+                    "tickets": rb_tickets[:10],
                     "pair": session.get("pair", ""),
                     "sid_short": sid[:8],
                     "reason": reason,  # Why the rollback was triggered
@@ -17252,7 +17278,16 @@ def service_worker():
 
 @app.route('/')
 def dashboard():
-    return DASHBOARD_HTML
+    popout_strat = request.args.get('strategy_id')
+    html = DASHBOARD_HTML
+    if popout_strat:
+        html = html.replace('<body', '<body class="popout-strategy"')
+        html = html.replace('<div id="cycleReminderBanner" style="display:none;margin-bottom:12px;"></div>', '')
+    resp = make_response(html)
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -17293,8 +17328,16 @@ body {
   line-height: 1.5;
   min-height: 100vh;
 }
-body.popout-strategy #cycleReminderBanner {
+body.popout-strategy #cycleReminderBanner,
+body.popout-strategy .cycle-reminder-banner,
+#cycleReminderBanner[data-popout="true"] {
   display: none !important;
+  visibility: hidden !important;
+  height: 0 !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 .container { max-width: 100%; margin: 0 auto; padding: 20px; }
 
@@ -17748,6 +17791,22 @@ body.popout-strategy #cycleReminderBanner {
 <body>
 <div class="refresh-bar" id="refreshBar"></div>
 <div class="container">
+
+<!-- Rollback Confirmation Banner (shown when rollbacks require user approval) -->
+<div id="rollbackAlertBanner" style="display:none;margin-bottom:14px;padding:12px 18px;background:rgba(255,82,82,0.18);border:1px solid #ff5252;border-radius:8px;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 0 16px rgba(255,82,82,0.25);">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span style="font-size:1.5rem;">🚨</span>
+    <div>
+      <div style="font-weight:700;color:#ff5252;font-size:0.95rem;letter-spacing:0.3px;">ROLLBACK CONFIRMATION REQUIRED</div>
+      <div id="rbBannerText" style="color:var(--text);font-size:0.85rem;margin-top:2px;"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+    <button class="btn btn-sm btn-danger" style="font-weight:600;padding:6px 14px;" onclick="submitRollbackDecision(false)">❌ Deny</button>
+    <button class="btn btn-sm btn-success" style="background:#00e676;color:#0f1117;font-weight:700;padding:6px 16px;box-shadow:0 0 8px rgba(0,230,118,0.4);" onclick="submitRollbackDecision(true)">✅ Approve</button>
+    <button class="btn btn-sm" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:6px 12px;" onclick="openModalOverlay('rollbackPromptModal')">📋 Review Details</button>
+  </div>
+</div>
 
 <!-- Combined Header + Tab Navigation -->
 <div class="tab-nav">
@@ -24095,32 +24154,164 @@ async function testNegativeSwapAlert() {
   }
 }
 
-// ── Rollback confirmation polling & popup ────────────────────────────────────
-let _rollbackPromptActive = false;
-async function _checkPendingRollbacks() {
-  if (_rollbackPromptActive) return;
+// ── Rollback confirmation polling & in-page popup modal ──────────────────────
+let _currentPendingRollback = null;
+let _lastRollbackChimeTs = 0;
+let _rbTitleBlinkTimer = null;
+const _origDashboardDocTitle = document.title || 'Trade Execution Dashboard';
+const _dismissedRollbackKeys = {};
+
+function playRollbackAlertSound() {
   try {
-    const res = await fetch('/api/pending_rollbacks?_t=' + Date.now());
-    const data = await res.json();
-    const pending = data.pending || [];
-    if (pending.length === 0) return;
-    // Show prompt for the first pending rollback
-    _rollbackPromptActive = true;
-    const rb = pending[0];
-    const ticketPreview = rb.tickets && rb.tickets.length
-      ? `\nFirst tickets: ${rb.tickets.join(', ')}${rb.count > rb.tickets.length ? ` ... (+${rb.count - rb.tickets.length} more)` : ''}`
-      : '';
-    const reasonLine = rb.reason ? `\n\nReason: ${rb.reason}` : '';
-    const msg = `⚠️ ROLLBACK CONFIRMATION REQUIRED\n\nAccount: ${rb.account}\nSession: ${rb.sid_short}\nPair: ${rb.pair || 'N/A'}\nPositions to close: ${rb.count}${ticketPreview}${reasonLine}\n\nApprove this rollback?`;
-    const approved = confirm(msg);
-    await fetch('/api/confirm_rollback', {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15); // A5
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+  } catch(e) {}
+}
+
+function startRollbackTitleBlink(label) {
+  if (_rbTitleBlinkTimer) return;
+  let state = false;
+  _rbTitleBlinkTimer = setInterval(() => {
+    document.title = state ? `🚨 ACTION REQUIRED: ${label}` : _origDashboardDocTitle;
+    state = !state;
+  }, 1000);
+}
+
+function stopRollbackTitleBlink() {
+  if (_rbTitleBlinkTimer) {
+    clearInterval(_rbTitleBlinkTimer);
+    _rbTitleBlinkTimer = null;
+    document.title = _origDashboardDocTitle;
+  }
+}
+
+function dismissRollbackPromptModal() {
+  if (_currentPendingRollback) {
+    const key = _currentPendingRollback.sid + '_' + _currentPendingRollback.account;
+    _dismissedRollbackKeys[key] = true;
+  }
+  closeModalOverlay('rollbackPromptModal');
+}
+
+async function submitRollbackDecision(approved) {
+  if (!_currentPendingRollback) return;
+  const rb = _currentPendingRollback;
+  if (!approved) {
+    if (!confirm(`Are you sure you want to DENY the rollback for ${rb.account}?\n\nThe unhedged position will remain open and future prompts for this account will be suppressed.`)) {
+      return;
+    }
+  }
+
+  const btnApprove = document.getElementById('rbModalApproveBtn');
+  const btnDeny = document.getElementById('rbModalDenyBtn');
+  if (btnApprove) btnApprove.disabled = true;
+  if (btnDeny) btnDeny.disabled = true;
+
+  try {
+    const res = await fetch('/api/confirm_rollback', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ sid: rb.sid, account: rb.account, approved })
     });
-    _rollbackPromptActive = false;
+    const result = await res.json();
+    if (!result.ok && result.error) {
+      alert('Rollback confirmation notice: ' + result.error);
+    }
+    closeModalOverlay('rollbackPromptModal');
+    delete _dismissedRollbackKeys[rb.sid + '_' + rb.account];
+    _currentPendingRollback = null;
+    stopRollbackTitleBlink();
+
+    // Immediate refresh
+    setTimeout(_checkPendingRollbacks, 300);
+    if (typeof refreshData === 'function') refreshData();
   } catch(e) {
-    _rollbackPromptActive = false;
+    alert('Failed to send rollback decision: ' + e);
+  } finally {
+    if (btnApprove) btnApprove.disabled = false;
+    if (btnDeny) btnDeny.disabled = false;
+  }
+}
+
+async function _checkPendingRollbacks() {
+  try {
+    const res = await fetch('/api/pending_rollbacks?_t=' + Date.now());
+    const data = await res.json();
+    const pending = (data && data.pending) || [];
+
+    const banner = document.getElementById('rollbackAlertBanner');
+    const bannerText = document.getElementById('rbBannerText');
+    const modal = document.getElementById('rollbackPromptModal');
+
+    if (pending.length === 0) {
+      _currentPendingRollback = null;
+      if (banner) banner.style.display = 'none';
+      if (modal && modal.classList.contains('active')) {
+        closeModalOverlay('rollbackPromptModal');
+      }
+      stopRollbackTitleBlink();
+      return;
+    }
+
+    const rb = pending[0];
+    _currentPendingRollback = rb;
+    const promptKey = rb.sid + '_' + rb.account;
+
+    // Update banner
+    if (banner) {
+      banner.style.display = 'flex';
+      if (bannerText) {
+        bannerText.innerHTML = `Account <b>${rb.account}</b> (${rb.pair || 'N/A'}) — <b style="color:#ff5252">${rb.count} position(s)</b> queued to close for session <code>${rb.sid_short}</code>`;
+      }
+    }
+
+    // Flash tab title
+    startRollbackTitleBlink(rb.account);
+
+    // Play alert chime once every 12 seconds
+    const now = Date.now();
+    if (now - _lastRollbackChimeTs > 12000) {
+      _lastRollbackChimeTs = now;
+      playRollbackAlertSound();
+    }
+
+    // Populate modal
+    const elAcc = document.getElementById('rbModalAccount');
+    const elPair = document.getElementById('rbModalPair');
+    const elSid = document.getElementById('rbModalSession');
+    const elCount = document.getElementById('rbModalCount');
+    const elTickets = document.getElementById('rbModalTickets');
+    const elReason = document.getElementById('rbModalReason');
+
+    if (elAcc) elAcc.textContent = rb.account || 'Unknown';
+    if (elPair) elPair.textContent = rb.pair || 'N/A';
+    if (elSid) elSid.textContent = rb.sid_short || (rb.sid ? rb.sid.slice(0, 8) : '');
+    if (elCount) elCount.textContent = `${rb.count} position(s)`;
+    if (elTickets) {
+      elTickets.textContent = rb.tickets && rb.tickets.length
+        ? rb.tickets.join(', ') + (rb.count > rb.tickets.length ? ` ... (+${rb.count - rb.tickets.length} more)` : '')
+        : 'Auto-detected tickets';
+    }
+    if (elReason) elReason.textContent = rb.reason || 'Structural imbalance / missing counterparty';
+
+    // Show modal if not manually dismissed during this cycle
+    if (!_dismissedRollbackKeys[promptKey]) {
+      openModalOverlay('rollbackPromptModal');
+    }
+  } catch(e) {
+    // Silent fail on polling errors
   }
 }
 // Poll for pending rollbacks every 2 seconds
@@ -24414,9 +24605,14 @@ function renderCycleReminders(reminders) {
   const banner = document.getElementById('cycleReminderBanner');
   if (!banner) return;
   // Never show alerts in individual strategy windows (?strategy_id=...)
-  if (new URLSearchParams(window.location.search).get('strategy_id') || document.body.classList.contains('popout-strategy')) {
-    banner.style.display = 'none';
+  const _isPopout = !!(new URLSearchParams(window.location.search).get('strategy_id') ||
+                       window.location.search.indexOf('strategy_id') !== -1 ||
+                       window.location.href.indexOf('strategy_id=') !== -1 ||
+                       document.body.classList.contains('popout-strategy'));
+  if (_isPopout) {
+    banner.style.setProperty('display', 'none', 'important');
     banner.innerHTML = '';
+    banner.remove();
     return;
   }
   const entries = Object.entries(reminders)
@@ -26802,11 +26998,11 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
 // Pop-out window support: detect ?strategy_id= parameter BEFORE first data load
 (function checkPopoutParam() {
   const params = new URLSearchParams(window.location.search);
-  const popoutStratId = params.get('strategy_id');
+  const popoutStratId = params.get('strategy_id') || (window.location.href.match(/[?&]strategy_id=([^&#]+)/) || [])[1];
   if (popoutStratId) {
     document.body.classList.add('popout-strategy');
     const crb = document.getElementById('cycleReminderBanner');
-    if (crb) { crb.style.display = 'none'; crb.innerHTML = ''; }
+    if (crb) { crb.style.setProperty('display', 'none', 'important'); crb.innerHTML = ''; crb.remove(); }
     document.title = 'Strategy \u2014 Loading...';
     // ─── Save window geometry on resize/move/close ───
     function savePopoutGeo() {
@@ -26828,12 +27024,18 @@ document.getElementById('refreshInterval').addEventListener('change', startRefre
     let firstLoad = true;
     refreshData = async function() {
       await origRefresh();
+      const _crbCheck = document.getElementById('cycleReminderBanner');
+      if (_crbCheck) _crbCheck.remove();
       if (firstLoad) {
         firstLoad = false;
         // Hide header, main tab-nav, footer, and alert banners — but NOT strategy sub-tab nav
-        document.querySelectorAll('.header, .tab-nav:not(#stratTabNav), .refresh-bar-wrap, #cycleReminderBanner').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.header, .tab-nav:not(#stratTabNav), .refresh-bar-wrap, #cycleReminderBanner').forEach(el => {
+          el.style.setProperty('display', 'none', 'important');
+          if (el.id === 'cycleReminderBanner') el.remove();
+        });
         // Hide only main dashboard tab panels (not strategy sub-tabs)
         document.querySelectorAll('.tab-panel[id^="tab-"]').forEach(p => p.style.display = 'none');
+
 
         // Auto-open the strategy
         editStrategy(popoutStratId);
@@ -28778,6 +28980,50 @@ function copyApiTesterCurl(btn) {
         </div>
       </div>
       <pre id="apiTesterResponseBody" style="margin:0;max-height:350px;overflow:auto;padding:12px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);font-family:Consolas,monospace;font-size:0.82rem;color:var(--text);white-space:pre-wrap;word-break:break-all;">Click "Send Request" to test this endpoint.</pre>
+    </div>
+  </div>
+</div>
+
+<!-- Rollback / Rebalance Prompt Modal -->
+<div class="modal-overlay" id="rollbackPromptModal" style="z-index:10005;display:none;">
+  <div class="modal" style="max-width:540px;border:1px solid #ff5252;box-shadow:0 0 30px rgba(255,82,82,0.35);padding:24px;border-radius:10px;background:var(--surface);">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:12px;">
+      <span style="font-size:1.8rem;">🚨</span>
+      <div>
+        <h3 style="margin:0;color:#ff5252;font-size:1.2rem;font-weight:700;">REBALANCE / ROLLBACK PROMPT</h3>
+        <div style="font-size:0.8rem;color:var(--text2);margin-top:2px;">Hedge monitor flagged an unhedged position requiring confirmation</div>
+      </div>
+    </div>
+    
+    <div style="display:grid;grid-template-columns:130px 1fr;gap:8px 12px;font-size:0.88rem;margin-bottom:16px;background:var(--surface2);padding:14px;border-radius:8px;border:1px solid var(--border);">
+      <div style="color:var(--text2);">Account:</div>
+      <div id="rbModalAccount" style="font-family:monospace;font-weight:700;color:var(--accent2);font-size:0.95rem;"></div>
+
+      <div style="color:var(--text2);">Pair / Instrument:</div>
+      <div id="rbModalPair" style="font-weight:600;color:var(--text);"></div>
+
+      <div style="color:var(--text2);">Session ID:</div>
+      <div id="rbModalSession" style="font-family:monospace;color:var(--text2);"></div>
+
+      <div style="color:var(--text2);">Pending Closes:</div>
+      <div id="rbModalCount" style="font-weight:700;color:#ff5252;font-size:1.05rem;"></div>
+
+      <div style="color:var(--text2);">Tickets Preview:</div>
+      <div id="rbModalTickets" style="font-family:monospace;font-size:0.82rem;color:var(--text2);word-break:break-all;"></div>
+
+      <div style="color:var(--text2);">Trigger Reason:</div>
+      <div id="rbModalReason" style="font-size:0.82rem;color:var(--text);line-height:1.35;background:rgba(255,82,82,0.1);padding:6px 10px;border-radius:4px;border-left:3px solid #ff5252;"></div>
+    </div>
+
+    <p style="font-size:0.84rem;color:var(--text2);margin-bottom:20px;line-height:1.45;">
+      <b>Approve</b> will immediately issue close orders to liquidate this unhedged position and restore balance.<br>
+      <b>Deny</b> will cancel the rollback and keep the position open.
+    </p>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;align-items:center;">
+      <button class="btn" id="rbModalLaterBtn" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);font-size:0.84rem;" onclick="dismissRollbackPromptModal()">Decide Later</button>
+      <button class="btn btn-danger" id="rbModalDenyBtn" style="min-width:110px;font-weight:600;" onclick="submitRollbackDecision(false)">❌ Deny Rollback</button>
+      <button class="btn btn-success" id="rbModalApproveBtn" style="min-width:140px;background:#00e676;color:#0f1117;font-weight:700;box-shadow:0 0 12px rgba(0,230,118,0.35);" onclick="submitRollbackDecision(true)">✅ Approve Rollback</button>
     </div>
   </div>
 </div>
