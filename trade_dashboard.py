@@ -17473,6 +17473,32 @@ body.popout-strategy .cycle-reminder-banner,
 .sessions-table tr:hover td { background: var(--surface2); }
 /* Hidden columns */
 .sessions-table .col-hidden { display: none; }
+/* Actions cell horizontal layout */
+.actions-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.actions-cell .btn {
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.actions-cell select {
+  width: 95px;
+  max-width: 95px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.actions-cell input {
+  flex-shrink: 0;
+}
 /* Column toggle dropdown */
 .col-toggle-wrap { position: relative; display: inline-block; }
 .col-toggle-btn {
@@ -20650,7 +20676,9 @@ function applyColWidths() {
   localStorage.removeItem('instrColWidths_v4');
   localStorage.removeItem('instrColWidths_v5');
   localStorage.removeItem('instrColWidths_v6');
-  const STORAGE_KEY = 'instrColWidths_v7';
+  localStorage.removeItem('instrColWidths_v7');
+  localStorage.removeItem('instrColWidths_v8');
+  const STORAGE_KEY = 'instrColWidths_v9';
   const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
 
   // Helper: expand inputs to fill cells after fixing layout
@@ -20670,10 +20698,7 @@ function applyColWidths() {
     const PAD = 8;
 
     // Max pixel widths per column to keep table compact
-    // Most columns auto-size from content; only cap the Actions column (buttons)
-    const MAX_COL_W = {
-      '15':160                                        // Actions (buttons wrap)
-    };
+    const MAX_COL_W = {};
 
     // Temporarily set auto layout to allow scrollWidth measurement
     table.style.tableLayout = 'auto';
@@ -20702,7 +20727,7 @@ function applyColWidths() {
         const hasBr = td.querySelector('br') || td.querySelector('span');
         if (btns.length > 0 || hasBr) {
           // For button/multi-line cells, measure actual rendered width
-          const sw = td.scrollWidth;
+          const sw = td.firstElementChild ? Math.max(td.scrollWidth, td.firstElementChild.scrollWidth, td.firstElementChild.offsetWidth) : td.scrollWidth;
           if (sw > maxW) maxW = sw;
         } else {
           ctx.font = cFont;
@@ -22033,7 +22058,7 @@ function renderInstrumentsTable() {
       <option value="side2_first" ${eo==='side2_first'?'selected':''}>S2 1st</option>
     </select></td>
     <td data-col="14">${renderProgress(s)}</td>
-    <td data-col="15" style="white-space:normal">${renderActions(s)}</td>
+    <td data-col="15"><div class="actions-cell">${renderActions(s)}</div></td>
     <td data-col="16"><input class="inl" type="number" min="0" value="${s.max_ticks_per_5s||0}" style="width:50px" onchange="inlineEditSession('${s.id}','max_ticks_per_5s',parseInt(this.value)||0)" title="Block if either side has more ticks/5s than this (0=off)"></td>
     <td data-col="17"><input class="inl" type="number" min="0" step="0.1" value="${s.max_price_jump||0}" style="width:55px" onchange="inlineEditSession('${s.id}','max_price_jump',parseFloat(this.value)||0)" title="Block if bid jumped > X pips since last tick (0=off)"></td>
     <td data-col="18"><select class="inl" style="font-size:0.65rem" onchange="inlineEditSkew('${s.id}','require_diff_skew_open',this.value)" title="DIFF skew requirement for opening">
@@ -22685,15 +22710,15 @@ function renderActions(session) {
   let html = '';
   // Get account labels by side_number to match backend cycle logic
   const accs = Object.keys(session.sides || {});
-  let acc1Label = accs[0] || 'ACC1';
-  let acc2Label = accs[1] || 'ACC2';
+  let acc1Label = accs[0] ? getAccountLabel(accs[0]) : 'ACC1';
+  let acc2Label = accs[1] ? getAccountLabel(accs[1]) : 'ACC2';
   // Use side_number to ensure labels match backend's cycle_acc1/cycle_acc2 mapping
   for (const [acc, info] of Object.entries(session.sides || {})) {
-    if (info.side_number === 1) acc1Label = acc;
-    if (info.side_number === 2) acc2Label = acc;
+    if (info.side_number === 1) acc1Label = getAccountLabel(acc);
+    if (info.side_number === 2) acc2Label = getAccountLabel(acc);
   }
   // Mode dropdown
-  html += `<select class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:2px 4px;font-size:0.7rem;cursor:pointer" onchange="confirmSetMode('${session.id}', this, '${mode}')" title="Session Mode">`;
+  html += `<select class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:2px 4px;font-size:0.7rem;cursor:pointer;width:95px;max-width:95px;text-overflow:ellipsis" onchange="confirmSetMode('${session.id}', this, '${mode}')" title="Session Mode: ${mode.toUpperCase()}">`;
   html += `<option value="monitor"${mode==='monitor'?' selected':''}>MONITOR</option>`;
   html += `<option value="open"${mode==='open'?' selected':''}>OPEN</option>`;
   html += `<option value="close"${mode==='close'?' selected':''}>CLOSE</option>`;
