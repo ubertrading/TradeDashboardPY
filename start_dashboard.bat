@@ -16,8 +16,8 @@ if exist "var\watchdog.stop" (
 
 :: 2. Check if running as Windows Service; if so, start the service
 powershell -NoProfile -Command "$svc = Get-Service 'TradeDashboard' -ErrorAction SilentlyContinue; if ($svc) { Start-Service 'TradeDashboard'; Write-Host '[2/2] Started TradeDashboard Windows Service.' } else { exit 42 }"
-if %ERRORLEVEL% EQU 0 (
-    echo.
+set SVCERR=%ERRORLEVEL%
+if "%SVCERR%"=="0" (
     echo Trade Dashboard started via Windows Service.
     goto :end
 )
