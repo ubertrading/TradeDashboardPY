@@ -9736,6 +9736,27 @@ def _get_net_open(session, account, ea_info=None):
             return max(0, filled_count - closed_count)
 
 
+def _is_completing_hedge(session, account=None):
+    """
+    Check if an account (or any account in session if account=None) is executing
+    a matching order to complete an open hedge pair in OPEN mode.
+    """
+    action = session.get("action", "")
+    if action not in ("open", "open_limit"):
+        return False
+    sides = session.get("sides", {})
+    if len(sides) < 2:
+        return False
+    if account is None:
+        counts = [_get_net_open(session, a) for a in sides]
+        return min(counts) < max(counts)
+    else:
+        if account not in sides:
+            return False
+        my_net = _get_net_open(session, account)
+        return any(_get_net_open(session, o_a) > my_net for o_a in sides if o_a != account)
+
+
 def _should_issue_command(session, account):
     """
     Determine if a command should be issued to this account based on
@@ -10140,6 +10161,18 @@ def _should_issue_command(session, account):
             if acct_lots + acct_lot > max_accum + 1e-9:
                 # print(f"[OPEN-BLOCK] {account} max_accum={max_accum} lots={acct_lots}")
                 return False
+
+        # ── Fast-path for completing matching hedge leg in OPEN mode ──
+        # When one leg has already filled (e.g. Side 2 in S2 1st, or Side 1 in S1 1st),
+        # this matching order is required to hedge existing risk exposure.
+        # Both spreads and DIFF1 were already validated at the start of opening the pair.
+        # Immediately open the matching leg with NO checking or waiting
+        # (bypassing diff_to_open, execution filters, and spread gating).
+        if _is_completing_hedge(session, account):
+            other_nets = {o_a: _get_net_open(session, o_a) for o_a in sides if o_a != account}
+            print(f"[OPEN-HEDGE-COMPLETE] {account}: Bypassing diff, filters, and spread gates to complete hedge pair "
+                  f"(my_net={current} vs other_net={other_nets})")
+            return "open"
 
         # Diff-to-open gating: only open when price diff >= threshold
         # None/blank = disabled — do NOT open (user must set a value to trade).
@@ -12805,8 +12838,9 @@ def poll_command():
             else:
                 action_for_cmd = action
                 cycle_lots = side_lots
-            # During cycle open phase, bypass spread check — open immediately
-            cmd_max_spread = 9999 if (action.startswith("cycle_") and should is True) else side_max_spread
+            # During cycle open phase or completing matching hedge leg, bypass spread check — open immediately
+            is_completing = _is_completing_hedge(session, account)
+            cmd_max_spread = 9999 if ((action.startswith("cycle_") and should is True) or is_completing) else side_max_spread
 
             cmd = {
                 "session_id": sid,
@@ -29072,6 +29106,7 @@ if __name__ == '__main__':
     if fix_manager:
         _fix_dashboard_data["sessions"] = sessions  # re-set after _load_sessions replaced it
         _fix_dashboard_data["should_issue_command"] = _should_issue_command
+        _fix_dashboard_data["is_completing_hedge"] = _is_completing_hedge
         fix_manager.start()
         app.logger.info("FIX Account Manager started")
 
@@ -29079,6 +29114,7 @@ if __name__ == '__main__':
     if mt_direct_manager:
         _mt_direct_dashboard_data["sessions"] = sessions
         _mt_direct_dashboard_data["should_issue_command"] = _should_issue_command
+        _mt_direct_dashboard_data["is_completing_hedge"] = _is_completing_hedge
         _mt_direct_dashboard_data["log_event"] = _log_event
         _mt_direct_dashboard_data["save_sessions"] = _save_sessions
         _mt_direct_dashboard_data["normalize_ticket"] = _normalize_ticket
@@ -29502,6 +29538,7 @@ if __name__ == '__main__':
         _iforex_dashboard_data["lock"] = lock
         _iforex_dashboard_data["in_flight_commands"] = in_flight_commands
         _iforex_dashboard_data["should_issue_command"] = _should_issue_command
+        _iforex_dashboard_data["is_completing_hedge"] = _is_completing_hedge
         _iforex_dashboard_data["report_trade_result"] = _mt_direct_report_result  # reuse same result handler
         iforex_manager.dd = _iforex_dashboard_data  # ensure dd is the wired one
         iforex_manager.start()

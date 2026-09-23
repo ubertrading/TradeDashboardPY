@@ -1446,7 +1446,10 @@ class IForexAccountManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
-                    if action in ("open", "open_limit") and max_spread is not None and pair:
+                    is_completing_fn = self.dd.get("is_completing_hedge")
+                    is_completing = is_completing_fn(session, account_id) if is_completing_fn else False
+
+                    if action in ("open", "open_limit") and max_spread is not None and pair and not is_completing:
                         q = acct.get_quote(pair, allow_live=False)
                         if q is None:
                             _gate_key = ("iforex_gate_noquote", account_id, session_id)

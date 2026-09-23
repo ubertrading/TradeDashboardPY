@@ -299,12 +299,30 @@ def _should_issue_command(session, account):
         if current >= target:
             return False
 
-        # Cross-account hedge sync
+        # Cross-account hedge sync: don't open next position until the previous hedge is complete.
+        exec_order = session.get("execution_order", "simultaneous")
+        my_side_num = sides[account].get("side_number", 0)
+
         for other_acc in sides:
             if other_acc != account:
-                other_filled = session["filled"].get(other_acc, 0)
-                if current > other_filled:
-                    return False
+                other_filled = session.get("filled", {}).get(other_acc, 0) - session.get("closed", {}).get(other_acc, 0)
+                if exec_order == "simultaneous":
+                    if current > other_filled:
+                        return False
+                elif exec_order == "side1_first":
+                    if my_side_num == 1:
+                        if current > other_filled:
+                            return False
+                    elif my_side_num == 2:
+                        if current >= other_filled:
+                            return False
+                elif exec_order == "side2_first":
+                    if my_side_num == 2:
+                        if current > other_filled:
+                            return False
+                    elif my_side_num == 1:
+                        if current >= other_filled:
+                            return False
 
         # Check max_accum_deals
         max_deals = session.get("max_accum_deals", 0)
@@ -321,6 +339,16 @@ def _should_issue_command(session, account):
             acct_lots = acct_net * acct_lot
             if acct_lots + acct_lot > max_accum + 1e-9:
                 return False
+
+        # Fast-path for completing matching hedge leg in OPEN mode:
+        # If another account has more net open positions, this matching order
+        # must open immediately without diff, filters, or spread gating.
+        is_completing = any(
+            (session.get("filled", {}).get(o_a, 0) - session.get("closed", {}).get(o_a, 0)) > current
+            for o_a in sides if o_a != account
+        )
+        if is_completing:
+            return "open"
 
         # Diff-to-open gating
         diff_to_open = session.get("diff_to_open")

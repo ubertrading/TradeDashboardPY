@@ -4631,7 +4631,12 @@ class MTDirectManager:
 
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
                 # Block command issuance for ALL linked accounts if ANY leg fails spread gate.
-                if action in ("open", "open_limit"):
+                # BUT if an uncompleted hedge pair exists (one side is already filled ahead),
+                # bypass the atomic spread check so the matching leg can open immediately!
+                is_completing_fn = self.dd.get("is_completing_hedge")
+                has_lagging = is_completing_fn(session) if is_completing_fn else False
+
+                if action in ("open", "open_limit") and not has_lagging:
                     atomic_spread_ok = True
                     for check_aid in sides:
                         # Skip accounts not managed by this MT Direct loop (e.g. iFOREX, FIX).
@@ -4782,10 +4787,12 @@ class MTDirectManager:
 
                     # Check spread gating — but bypass for rollback (safety rebalancing must execute)
                     # and bypass for cycle reopen (once closed, must reopen immediately)
+                    # and bypass for completing matching hedge leg (once first leg is open, must complete hedge immediately)
                     # cycle_limit_close (TP setting) IS subject to spread check; reopen always bypasses
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not action.startswith("close_limit"):
+                    is_completing_hedge = (is_completing_fn(session, account_id) if is_completing_fn else False)
+                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not is_completing_hedge and not action.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)

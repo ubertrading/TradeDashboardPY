@@ -3694,7 +3694,13 @@ class FixAccountManager:
                             _pre_acct.subscribe_symbol(_pre_pair)
 
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
-                if action in ("open", "open_limit"):
+                # Block command issuance for ALL linked accounts if ANY leg fails spread gate.
+                # BUT if an uncompleted hedge pair exists (one side is already filled ahead),
+                # bypass the atomic spread check so the matching leg can open immediately!
+                is_completing_fn = self.dd.get("is_completing_hedge")
+                has_lagging = is_completing_fn(session) if is_completing_fn else False
+
+                if action in ("open", "open_limit") and not has_lagging:
                     atomic_spread_ok = True
                     for check_aid in sides:
                         # Skip accounts not managed by this FIX loop (e.g. iFOREX, MT Direct)
@@ -3771,9 +3777,12 @@ class FixAccountManager:
 
                     # Check spread gating using FIX market data.
                     # Skip spread check for: rollback (emergency close), cycle reopen phase
-                    # (reopen must be immediate after close — no spread wait).
+                    # (reopen must be immediate after close — no spread wait), and completing matching hedge leg.
+                    _is_completing_hedge = (self.dd.get("is_completing_hedge")(session, account_id)
+                                            if self.dd.get("is_completing_hedge") else False)
                     _bypass_spread = (result == "rollback" or
-                                      (action.startswith("cycle_") and result is True))
+                                      (action.startswith("cycle_") and result is True) or
+                                      _is_completing_hedge)
                     current_spread = None
                     ea_info = self.dd["ea_account_info"].get(account_id, {})
                     try:

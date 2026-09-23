@@ -1205,7 +1205,12 @@ class MtBridgeManager:
 
                 # ── Atomic Session-wide Spread Check for OPEN mode ─────────────
                 # Block command issuance for ALL linked accounts if ANY leg fails spread gate.
-                if action in ("open", "open_limit"):
+                # BUT if an uncompleted hedge pair exists (one side is already filled ahead),
+                # bypass the atomic spread check so the matching leg can open immediately!
+                is_completing_fn = self.dd.get("is_completing_hedge")
+                has_lagging = is_completing_fn(session) if is_completing_fn else False
+
+                if action in ("open", "open_limit") and not has_lagging:
                     atomic_spread_ok = True
                     for check_aid in sides:
                         check_side = sides[check_aid]
@@ -1321,12 +1326,13 @@ class MtBridgeManager:
                     except (ValueError, TypeError):
                         max_spread = None
 
-                    # Check spread gating — bypass for rollback, cycle close, cycle_limit_open (reopen), and close_limit
+                    # Check spread gating — bypass for rollback, cycle close, cycle_limit_open (reopen), close_limit, and completing matching hedge leg
                     # cycle_limit_close (TP setting) IS subject to spread check; market reopen always bypasses
                     is_cycle_reopen = (session.get("action", "").startswith("cycle_") and
                                        session.get("cycle_progress", {}).get("phase") == "open")
+                    is_completing_hedge = (is_completing_fn(session, account_id) if is_completing_fn else False)
                     act_check = session.get("action", "")
-                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not act_check.startswith("close_limit"):
+                    if result not in ("rollback", "cycle_close", "cycle_limit_open") and not is_cycle_reopen and not is_completing_hedge and not act_check.startswith("close_limit"):
                         current_spread = None
                         session_pair = pair
                         acct_obj = self.accounts.get(account_id)
