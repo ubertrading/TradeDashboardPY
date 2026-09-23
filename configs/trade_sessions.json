@@ -1389,10 +1389,8 @@
         "ts_epoch": 1788919875.74649
       }
     ],
-    "hedge_mismatch_6aabd97a-9212-4896-a13f-c4ec47ac8205_DEMO-MT5-52769010": 4,
     "hedge_monitor_start_ts": 1788919838.37851,
     "id": "6aabd97a-9212-4896-a13f-c4ec47ac8205",
-    "imbalance_rebal_ts": 1790092792.9253843,
     "imported": true,
     "last_trade_ts": {
       "DEMO-MT4-1218954455": 1790092793.6305356,
@@ -1450,12 +1448,15 @@
     "action": "open",
     "avoid_news": false,
     "close_count": null,
+    "close_limit_fills": [],
     "closed": {
       "DEMO-MT4-1218954455": 0,
       "DUKA-DEMO-DEMO2uotdK": 0
     },
     "comment": "1218954455-DUKA-DEMO-DEMO2uotdK / 1218954455-DUKA-DEMO-DEMO2uotdK",
     "created_at": "2026-05-19 10:22:53",
+    "cycle_limit_open_fills": [],
+    "cycle_progress": {},
     "diff_to_close": 0,
     "diff_to_open": 0,
     "errors": {
@@ -1477,6 +1478,7 @@
     "max_price_jump": 0.0,
     "max_spread_points": 0,
     "max_ticks_per_5s": 0,
+    "open_limit_fills": [],
     "pair": "EURUSD",
     "require_diff_skew_close": "",
     "require_diff_skew_open": "",
@@ -1501,14 +1503,14 @@
       }
     },
     "spread_rejects": {
-      "DEMO-MT4-1218954455": 179561,
+      "DEMO-MT4-1218954455": 180116,
       "DUKA-DEMO-DEMO2uotdK": 0
     },
     "status": "active",
     "strategy_id": "3e569fe6-607a-4b79-9f17-6d7dc1c72e80",
     "total_positions": 1,
     "trade_pause": 0.0,
-    "updated_at": "2026-05-19 10:22:53"
+    "updated_at": "2026-09-22 18:25:49"
   },
   "a3a3df48-5e82-492e-98af-f81350994c8f": {
     "action": "monitor",

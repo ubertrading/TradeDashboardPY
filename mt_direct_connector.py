@@ -5388,36 +5388,56 @@ class MTDirectManager:
                         if o_sym and (o_sym == pair_clean or o_sym.startswith(pair_clean) or pair_clean.startswith(o_sym)):
                             matching_orders.append(o)
 
-                if matching_orders:
-                    # Live position(s) for this pair STILL exist on the broker!
-                    # Do NOT auto-skip or increment closed count. Pick the oldest live order and retry closing it right then.
-                    live_order = matching_orders[0]
+                # Collect all other pending (unclosed) tickets for this account in this session
+                other_pending_tickets = {
+                    str(f.get("ticket")) for f in session.get("fills", [])
+                    if f.get("account") == account_id
+                    and str(f.get("ticket")) not in {str(t) for t in closed_tickets}
+                    and f is not fill
+                }
+
+                # Find live orders on the broker not already claimed by another pending fill
+                untracked_live_orders = [
+                    o for o in matching_orders
+                    if str(o.get("Ticket") or o.get("ticket") or "") not in other_pending_tickets
+                ]
+
+                if untracked_live_orders:
+                    # An untracked live order exists on the broker for this pair!
+                    # Map this fill to the untracked live order and close it.
+                    live_order = untracked_live_orders[0]
                     live_ticket = live_order.get("Ticket") or live_order.get("ticket")
                     if live_ticket:
                         if live_order.get("Lots"):
                             actual_lots = float(live_order["Lots"])
                         elif live_order.get("Volume"):
                             actual_lots = float(live_order["Volume"])
-                        logger.info("[%s] LIVE-RETRY: Tracked ticket %s not found, but live ticket %s is OPEN for %s — retrying close on live ticket (lots=%s)",
-                                    account_id, ticket, live_ticket, pair, actual_lots)
-                        print(f"[LIVE-RETRY] {account_id}: ticket {ticket} not found, retrying close on live ticket {live_ticket}")
+                        orig_ticket = ticket
+                        logger.info("[%s] LIVE-RETRY: Tracked ticket %s not found, mapped to live untracked ticket %s for %s (lots=%s)",
+                                    account_id, orig_ticket, live_ticket, pair, actual_lots)
+                        print(f"[LIVE-RETRY] {account_id}: ticket {orig_ticket} mapped to live ticket {live_ticket}")
+                        fill["ticket"] = live_ticket
+                        fill["orig_ticket"] = orig_ticket
                         ticket = live_ticket
                         ticket_found = True
                     else:
                         break
                 else:
-                    # Broker has ZERO open orders for this pair on this account.
-                    if len(orders) <= 0 and not direct_acct.connected:
+                    # Either the broker has 0 open orders for this pair, OR all remaining open orders
+                    # on the broker already belong to other pending fills.
+                    # In either case, THIS specific fill has 0 open positions on the broker.
+                    if len(orders) <= 0 and not getattr(direct_acct, "connected", True):
                         logger.warning("[%s] SKIP ABORTED: broker disconnected, not marking ticket %s as closed", account_id, ticket)
                         break
 
-                    logger.info("[%s] VERIFIED-ZERO: ticket=%s not found and broker has 0 open orders for %s — marking fill closed",
-                                account_id, ticket, pair)
-                    print(f"[VERIFIED-ZERO] {account_id}: ticket {ticket} not on broker, 0 live positions for {pair} — marking closed")
+                    reason = "verified-zero: 0 live broker open orders for pair" if not matching_orders else f"verified-gone: all {len(matching_orders)} broker orders match other fills"
+                    logger.info("[%s] %s: ticket=%s not on broker — marking fill closed",
+                                account_id, "VERIFIED-ZERO" if not matching_orders else "VERIFIED-GONE", ticket)
+                    print(f"[{'VERIFIED-ZERO' if not matching_orders else 'VERIFIED-GONE'}] {account_id}: ticket {ticket} not on broker — marking closed ({reason})")
                     session.setdefault("close_fills", []).append({
                         "ticket": ticket, "account": account_id,
                         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "note": "verified-zero: 0 live broker open orders for pair"
+                        "note": reason
                     })
                     session["closed"][account_id] = session.get("closed", {}).get(account_id, 0) + 1
 
