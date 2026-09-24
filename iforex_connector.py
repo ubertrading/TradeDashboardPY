@@ -1036,16 +1036,13 @@ class IForexAccount:
     def _sync_account_balance_http(self):
         """Query latest balance from /webpl4/api/accountingactions/GetData.
 
-        NOTE: actions[0][9] is the running balance *after the last accounting entry*
-        (i.e. a historical ledger figure), NOT the live current balance.  It is only
-        used as a last-resort fallback when the browser-scraped summary hasn't
-        populated a balance yet.  A valid browser-scraped balance must never be
-        overwritten by this stale ledger value.
+        actions[0][9] is the running balance *after the last accounting entry*.
+        This reflects all deposits, withdrawals, and closed-trade P/L — exactly
+        the figure that should be used as the account balance.  We poll this
+        every cycle so that deposits/withdrawals are picked up without needing
+        a browser re-scrape.
         """
         if not self.connected and (time.time() - self._last_401_ts) < 15:
-            return
-        # Only update if we don't already have a live browser-scraped balance.
-        if self._account_summary.get("balance", 0.0) > 0:
             return
         try:
             url = f"{self.base_url}/api/accountingactions/GetData"
@@ -1057,7 +1054,11 @@ class IForexAccount:
                     bal_str = str(actions[0][9]).replace(",", "")
                     bal = float(bal_str)
                     if bal > 0:
+                        old_bal = self._account_summary.get("balance", 0.0)
                         self._account_summary["balance"] = bal
+                        if old_bal > 0 and abs(bal - old_bal) > 0.01:
+                            logger.info("[%s] Balance updated via HTTP: %.2f -> %.2f (delta: %+.2f)",
+                                        self.account_id, old_bal, bal, bal - old_bal)
         except Exception:
             pass
 
@@ -1149,14 +1150,10 @@ class IForexAccount:
         info["lots_by_instrument"] = _lbi
         info["total_lots"] = round(tot_lots, 2)
         info["profit"] = round(tot_open_pl, 2)
-        # Prefer the browser-scraped equity (accSummaryEquity DOM value) — it is the
-        # authoritative figure shown on the iForex platform.  Fall back to
-        # balance + floating P/L only when no scraped equity is available.
-        scraped_equity = summ.get("equity")
-        if scraped_equity and float(scraped_equity) > 0:
-            info["equity"] = round(float(scraped_equity), 2)
-        else:
-            info["equity"] = round(bal + tot_open_pl, 2)
+        # Always compute equity from the continuously-updated HTTP balance +
+        # calculated floating P/L.  The one-time browser-scraped equity goes stale
+        # immediately after login (deposits, withdrawals, P/L changes all invalidate it).
+        info["equity"] = round(bal + tot_open_pl, 2)
         pos_details = []
         oldest_epoch = None
         sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
