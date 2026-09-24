@@ -208,36 +208,62 @@ def ensure_bridge_running():
         logger.error("MtBridgeService not found at %s — run 'dotnet build -c Release' first", BRIDGE_EXE)
         return False
 
-    logger.info("Starting MtBridgeService from %s", BRIDGE_EXE)
-    _bridge_process = subprocess.Popen(
-        [BRIDGE_EXE],
-        cwd=os.path.dirname(BRIDGE_EXE),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    )
+    logger.info("Starting MtBridgeService from %s (detached daemon)", BRIDGE_EXE)
+    log_dir = os.path.join(_bridge_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    bridge_log_path = os.path.join(log_dir, "MtBridgeService.log")
+
+    creation_flags = 0
+    if sys.platform == "win32":
+        creation_flags = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) |
+            getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
+
+    try:
+        bridge_log_file = open(bridge_log_path, "a", encoding="utf-8")
+        _bridge_process = subprocess.Popen(
+            [BRIDGE_EXE],
+            cwd=os.path.dirname(BRIDGE_EXE),
+            stdout=bridge_log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creation_flags
+        )
+    except Exception as launch_err:
+        logger.error("Failed to spawn MtBridgeService: %s", launch_err)
+        return False
 
     # Wait for it to become ready
     for i in range(15):
         if _bridge_process.poll() is not None:
-            try:
-                stdout, _ = _bridge_process.communicate(timeout=2)
-                msg = stdout.decode("utf-8", errors="replace").strip() if stdout else "process exited"
-            except Exception:
-                msg = "process exited"
-            logger.error("MtBridgeService exited immediately (code %s): %s", _bridge_process.returncode, msg)
+            logger.error("MtBridgeService exited immediately (code %s) — check %s",
+                         _bridge_process.returncode, bridge_log_path)
             _bridge_process = None
+            try:
+                bridge_log_file.close()
+            except Exception:
+                pass
             return False
         time.sleep(1)
         try:
             result = _get("/api/status", timeout=2)
             if result.get("status") == "ok":
-                logger.info("MtBridgeService started (PID %d)", _bridge_process.pid)
+                logger.info("MtBridgeService started (PID %d) — running detached from dashboard", _bridge_process.pid)
+                try:
+                    bridge_log_file.close()
+                except Exception:
+                    pass
                 return True
         except Exception:
             pass
 
-    logger.error("MtBridgeService failed to start within 15s")
+    logger.error("MtBridgeService failed to start within 15s — check %s", bridge_log_path)
+    try:
+        bridge_log_file.close()
+    except Exception:
+        pass
     return False
 
 

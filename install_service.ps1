@@ -35,7 +35,8 @@ param(
     [int]   $TradePort   = 80,
     [string]$TradeHost   = "127.0.0.2",
     [string]$ServiceName = "TradeDashboard",
-    [string]$WatchdogServiceName = "TradeDashboardWatchdog"
+    [string]$WatchdogServiceName = "TradeDashboardWatchdog",
+    [string]$BridgeServiceName = "MtBridgeService"
 )
 
 $ErrorActionPreference = "Stop"
@@ -138,6 +139,11 @@ function Install-NssmService {
     & $NssmExe set $Name AppExit   Default Restart | Out-Null
     & $NssmExe set $Name AppRestartDelay 10000 | Out-Null   # 10 000 ms
 
+    # Do not kill child processes when stopping/restarting this service.
+    # This keeps independent background daemons (like MtBridgeService)
+    # alive across dashboard restarts without dropping broker connections.
+    & $NssmExe set $Name AppKillProcessTree 0 | Out-Null
+
     # Start type = Automatic
     & $NssmExe set $Name Start SERVICE_AUTO_START | Out-Null
 
@@ -146,7 +152,7 @@ function Install-NssmService {
 
 if ($Uninstall) {
     # -- Uninstall mode ---------------------------------------------------
-    foreach ($svc in @($WatchdogServiceName, $ServiceName)) {
+    foreach ($svc in @($WatchdogServiceName, $ServiceName, $BridgeServiceName)) {
         $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "[uninstall] Stopping and removing '$svc'..." -ForegroundColor Yellow
@@ -159,6 +165,37 @@ if ($Uninstall) {
     }
     Write-Host "`n[uninstall] Done." -ForegroundColor Green
     exit 0
+}
+
+# -- Install MtBridgeService (if binary exists) -------------------------------
+$bridgeExe = Join-Path $ScriptDir "MtBridgeService\bin\Release\net8.0\MtBridgeService.exe"
+if (Test-Path $bridgeExe) {
+    $existingBridge = Get-Service -Name $BridgeServiceName -ErrorAction SilentlyContinue
+    if ($existingBridge) {
+        Write-Host "[install] Removing existing service '$BridgeServiceName'..." -ForegroundColor Yellow
+        & $NssmExe stop   $BridgeServiceName confirm 2>$null | Out-Null
+        & $NssmExe remove $BridgeServiceName confirm 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+    }
+    Write-Host "[install] Installing dedicated service '$BridgeServiceName'..." -ForegroundColor Cyan
+    & $NssmExe install $BridgeServiceName $bridgeExe | Out-Null
+    & $NssmExe set     $BridgeServiceName AppDirectory (Split-Path $bridgeExe) | Out-Null
+    & $NssmExe set     $BridgeServiceName DisplayName  "MT Bridge Service" | Out-Null
+    & $NssmExe set     $BridgeServiceName Description  "Maintains MT4/MT5 broker connections for Trade Dashboard" | Out-Null
+    $logDir = Join-Path $ScriptDir "logs"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    & $NssmExe set     $BridgeServiceName AppStdout (Join-Path $logDir "MtBridgeService.log") | Out-Null
+    & $NssmExe set     $BridgeServiceName AppStderr (Join-Path $logDir "MtBridgeService.log") | Out-Null
+    & $NssmExe set     $BridgeServiceName AppRotateFiles 1 | Out-Null
+    & $NssmExe set     $BridgeServiceName AppRotateBytes 10485760 | Out-Null  # 10 MB rotate
+    & $NssmExe set     $BridgeServiceName AppExit   Default Restart | Out-Null
+    & $NssmExe set     $BridgeServiceName AppRestartDelay 5000 | Out-Null
+    & $NssmExe set     $BridgeServiceName Start SERVICE_AUTO_START | Out-Null
+    Write-Host "[install] Service '$BridgeServiceName' configured." -ForegroundColor Green
+
+    Write-Host "`n[install] Starting $BridgeServiceName..." -ForegroundColor Cyan
+    Start-Service $BridgeServiceName -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
 }
 
 # -- Install Dashboard service ------------------------------------------------
@@ -180,8 +217,8 @@ Install-NssmService `
 # also fires -- just two restart mechanisms at once, which is harmless.
 & $NssmExe set $WatchdogServiceName AppEnvironmentExtra "$envBlock`nWATCHDOG_AUTO_RESTART=0" | Out-Null
 
-# -- Start both services ------------------------------------------------------
-Write-Host "`n[install] Starting services..." -ForegroundColor Cyan
+# -- Start dashboard services -------------------------------------------------
+Write-Host "`n[install] Starting dashboard services..." -ForegroundColor Cyan
 Start-Service $ServiceName -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
 Start-Service $WatchdogServiceName -ErrorAction SilentlyContinue
@@ -189,10 +226,11 @@ Start-Service $WatchdogServiceName -ErrorAction SilentlyContinue
 Write-Host "`n[install] [OK] Done! Services configured." -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service status:"
-Get-Service -Name $ServiceName, $WatchdogServiceName | Format-Table Name, Status, StartType -AutoSize
+Get-Service -Name $BridgeServiceName, $ServiceName, $WatchdogServiceName -ErrorAction SilentlyContinue | Format-Table Name, Status, StartType -AutoSize
 
 Write-Host ""
 Write-Host "  Useful commands:"
-Write-Host "    Restart dashboard:  Restart-Service $ServiceName"
-Write-Host "    View logs:          Get-Content '$ScriptDir\logs\dashboard.log' -Tail 50 -Wait"
-Write-Host "    Uninstall:          .\install_service.ps1 -Uninstall"
+Write-Host "    Restart dashboard (leaves accounts connected):  Restart-Service $ServiceName"
+Write-Host "    View dashboard logs:                            Get-Content '$ScriptDir\logs\dashboard.log' -Tail 50 -Wait"
+Write-Host "    View bridge logs:                               Get-Content '$ScriptDir\logs\MtBridgeService.log' -Tail 50 -Wait"
+Write-Host "    Uninstall services:                             .\install_service.ps1 -Uninstall"
