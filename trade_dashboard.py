@@ -732,22 +732,66 @@ def _check_cycle_reminders():
             positions = list(acct._open_orders)
         if not positions or not isinstance(positions, list):
             continue
-        # Find oldest position open time
+        # Find oldest position open time and symbol breakdown
         oldest_epoch = None
+        oldest_symbol = None
+        sym_epochs = {}  # sym -> {"oldest_epoch": float, "count": int}
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
-            oe = pos.get("open_epoch") or pos.get("ts_epoch")
+            oe = pos.get("open_epoch")
             if not oe:
-                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime")
+                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime") or pos.get("ts_epoch")
                 if oe_str:
                     try:
                         from iforex_connector import _parse_iforex_epoch
                         oe = _parse_iforex_epoch(oe_str)
                     except Exception:
                         oe = _parse_broker_timestamp(oe_str)
-            if oe and (oldest_epoch is None or oe < oldest_epoch):
-                oldest_epoch = oe
+            sym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
+            if oe:
+                if oldest_epoch is None or oe < oldest_epoch:
+                    oldest_epoch = oe
+                    if sym:
+                        oldest_symbol = sym
+                if sym:
+                    if sym not in sym_epochs:
+                        sym_epochs[sym] = {"oldest_epoch": oe, "count": 1}
+                    else:
+                        sym_epochs[sym]["count"] += 1
+                        if oe < sym_epochs[sym]["oldest_epoch"]:
+                            sym_epochs[sym]["oldest_epoch"] = oe
+
+        if oldest_epoch is None and acct_info.get("open_tickets"):
+            open_tickets = set(acct_info.get("open_tickets", []))
+            for sid, sess in list(sessions.items()):
+                if sess.get("status") not in ("active", "paused", "partial_close"):
+                    continue
+                sess_sides = sess.get("sides", {})
+                if acct_id not in sess_sides and getattr(acct, 'label', None) not in sess_sides and str(getattr(acct, 'account_number', '')) not in sess_sides:
+                    continue
+                match_key = acct_id if acct_id in sess_sides else (acct.label if getattr(acct, 'label', None) in sess_sides else str(acct.account_number))
+                sess_sym = (sess_sides.get(match_key, {}).get("pair") or sess.get("pair", "")).strip().upper()
+                for f in sess.get("fills", []):
+                    if f.get("account") not in (acct_id, getattr(acct, 'label', None), str(getattr(acct, 'account_number', ''))):
+                        continue
+                    ft = f.get("ticket")
+                    if ft and ft not in open_tickets:
+                        continue
+                    fe = f.get("ts_epoch") or f.get("open_epoch")
+                    if fe:
+                        if oldest_epoch is None or fe < oldest_epoch:
+                            oldest_epoch = fe
+                            if sess_sym:
+                                oldest_symbol = sess_sym
+                        if sess_sym:
+                            if sess_sym not in sym_epochs:
+                                sym_epochs[sess_sym] = {"oldest_epoch": fe, "count": 1}
+                            else:
+                                sym_epochs[sess_sym]["count"] += 1
+                                if fe < sym_epochs[sess_sym]["oldest_epoch"]:
+                                    sym_epochs[sess_sym]["oldest_epoch"] = fe
+
         if oldest_epoch is None:
             continue
 
@@ -780,7 +824,26 @@ def _check_cycle_reminders():
         else:
             continue  # Don't include OK-level accounts in reminders
 
-        msg = f"{label}: positions held {days_held:.1f} rollover days (remind {remind_days} / max {max_days})"
+        # Determine which instrument(s) triggered this reminder level
+        triggering_symbols = []
+        for s_name, s_data in sorted(sym_epochs.items(), key=lambda x: x[1]["oldest_epoch"]):
+            s_age = _count_rollover_days(s_data["oldest_epoch"], now_epoch=now_ts, day_schedule=day_sched)
+            s_proj = _count_rollover_days(s_data["oldest_epoch"], now_epoch=next_rollover_ts, day_schedule=day_sched)
+            s_crit = (s_age >= max_days) or ((s_proj > max_days) and (s_age < max_days))
+            if is_friday_period:
+                s_mon = _get_upcoming_monday_open(now_dt)
+                if _count_rollover_days(s_data["oldest_epoch"], now_epoch=s_mon, day_schedule=day_sched) > max_days:
+                    s_crit = True
+            if is_critical and s_crit:
+                triggering_symbols.append(s_name)
+            elif not is_critical and is_warning and s_age >= remind_days:
+                triggering_symbols.append(s_name)
+
+        if not triggering_symbols and oldest_symbol:
+            triggering_symbols = [oldest_symbol]
+
+        sym_tag = f" [{', '.join(triggering_symbols)}]" if triggering_symbols else ""
+        msg = f"{label}{sym_tag}: positions held {days_held:.1f} rollover days (remind {remind_days} / max {max_days})"
         if wont_survive_eod:
             # Determine the next rollover day name for the message
             next_rollover_dt = datetime.fromtimestamp(next_rollover_ts, tz=NY_TZ)
@@ -795,6 +858,10 @@ def _check_cycle_reminders():
             msg += " — CYCLE SOON"
 
         new_reminders[acct_id] = {
+            "account_id": acct_id,
+            "account_label": label,
+            "symbol": oldest_symbol or (triggering_symbols[0] if triggering_symbols else ""),
+            "triggering_symbols": triggering_symbols,
             "days_held": days_held,
             "remind_days": remind_days,
             "max_days": max_days,
@@ -806,10 +873,6 @@ def _check_cycle_reminders():
             "wont_survive_weekend": wont_survive_weekend,
             "proj_monday_days": proj_monday_days
         }
-        if getattr(acct, 'label', None) and acct.label != acct_id:
-            new_reminders[acct.label] = new_reminders[acct_id]
-        if getattr(acct, 'account_number', None) and str(acct.account_number) != acct_id:
-            new_reminders[str(acct.account_number)] = new_reminders[acct_id]
 
         # ── Auto-Cycle Trigger ──────────────────────────────────────
         if is_critical and cfg.get("auto_cycle_enabled"):
@@ -823,13 +886,13 @@ def _check_cycle_reminders():
                 except Exception:
                     pass
             if trigger:
-                _trigger_auto_cycle(acct_id, label, days_held, max_days)
+                _trigger_auto_cycle(acct_id, label, days_held, max_days, triggering_symbols=triggering_symbols)
 
     cycle_reminders = new_reminders
 
 
 
-def _trigger_auto_cycle(acct_id, label, days_held, max_days):
+def _trigger_auto_cycle(acct_id, label, days_held, max_days, triggering_symbols=None):
     """Find active sessions containing acct_id and set them to cycle mode."""
     with lock:
         for sid, session in sessions.items():
@@ -842,6 +905,11 @@ def _trigger_auto_cycle(acct_id, label, days_held, max_days):
             sides = session.get("sides", {})
             if acct_id not in sides:
                 continue
+            # If triggering_symbols specified, only cycle sessions for matching instrument
+            if triggering_symbols:
+                sess_pair = (session.get("pair") or sides.get(acct_id, {}).get("pair") or "").strip().upper()
+                if sess_pair and sess_pair not in [s.upper() for s in triggering_symbols]:
+                    continue
             # Determine which cycle action to set based on side_number
             side_info = sides[acct_id]
             side_num = side_info.get("side_number", 1)
@@ -849,14 +917,15 @@ def _trigger_auto_cycle(acct_id, label, days_held, max_days):
             session["action"] = cycle_action
             session["cycle_days"] = max_days  # so per-position age check passes
             session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sym_label = f" [{', '.join(triggering_symbols)}]" if triggering_symbols else ""
             _log_event(sid, acct_id, "auto_cycle_triggered",
                        f"Positions held {days_held:.1f} rollover days (max={max_days}). "
-                       f"Auto-cycling {label} (side {side_num}).")
-            print(f"[AUTO-CYCLE] sid={sid[:8]}: triggered {cycle_action} on {label} "
+                       f"Auto-cycling {label}{sym_label} (side {side_num}).")
+            print(f"[AUTO-CYCLE] sid={sid[:8]}: triggered {cycle_action} on {label}{sym_label} "
                   f"(held={days_held:.1f}d, max={max_days}d)")
             # Send notification
             tg_msg = (f"<b>🔄 Auto-Cycle Triggered</b>\n\n"
-                      f"Account: {label}\n"
+                      f"Account: {label}{sym_label}\n"
                       f"Session: {sid[:8]}\n"
                       f"Days held: {days_held:.1f} (max: {max_days})\n"
                       f"Action: {cycle_action}")
@@ -894,10 +963,24 @@ def _friday_weekend_check():
         if not positions or not isinstance(positions, list):
             continue
         oldest_epoch = None
+        oldest_symbol = None
         for pos in positions:
+            if not isinstance(pos, dict):
+                continue
             oe = pos.get("open_epoch") or pos.get("ts_epoch")
+            if not oe:
+                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime")
+                if oe_str:
+                    try:
+                        from iforex_connector import _parse_iforex_epoch
+                        oe = _parse_iforex_epoch(oe_str)
+                    except Exception:
+                        oe = _parse_broker_timestamp(oe_str)
+            sym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
             if oe and (oldest_epoch is None or oe < oldest_epoch):
                 oldest_epoch = oe
+                if sym:
+                    oldest_symbol = sym
         if oldest_epoch is None:
             continue
         day_sched = cfg
@@ -905,7 +988,8 @@ def _friday_weekend_check():
         proj_age = _count_rollover_days(oldest_epoch, now_epoch=mon_open_ts, day_schedule=day_sched)
         if proj_age > max_days:
             label = get_account_label(acct_id)
-            alerts.append(f"{label}: current age={age:.1f}d, max={max_days}d, "
+            sym_tag = f" [{oldest_symbol}]" if oldest_symbol else ""
+            alerts.append(f"{label}{sym_tag}: current age={age:.1f}d, max={max_days}d, "
                           f"will reach {proj_age:.1f}d on Monday open — won't survive weekend!")
     if alerts:
         subject = "\u26a0\ufe0f URGENT: Cycle before weekend!"
@@ -1735,7 +1819,7 @@ def _check_missing_swap_alerts():
         subject = f"⚠️ Missing Swap Alert: {missing_str}"
         body = (
             f"Missing Swap Alert:\n\n"
-            f"The following active, connected non-swapfree account(s) with open positions received NO daily swap (Î” SWAP is blank/zero) after the 5:00 PM rollover:\n"
+            f"The following active, connected non-swapfree account(s) with open positions received NO daily swap (Δ SWAP is blank/zero) after the 5:00 PM rollover:\n"
             f"  - {missing_str}\n\n"
             f"Meanwhile, other non-swapfree account(s) DID receive swap:\n"
             f"  - {paid_str}\n\n"
@@ -5670,6 +5754,206 @@ def _send_red_alert_telegram(message, account_id=None):
     """Helper to send high-priority Red Alert notifications to the dedicated Red Alert Telegram bot."""
     return _send_telegram(message, account_id=account_id, red_alert=True)
 
+def _fmt_lot(lots):
+    """Format lots cleanly: 121.0 -> '121', 71.0 -> '71', 1.5 -> '1.5'."""
+    try:
+        f = float(lots)
+        if abs(f - round(f)) < 1e-4:
+            return str(int(round(f)))
+        return f"{f:g}"
+    except Exception:
+        return str(lots)
+
+
+def _parse_breakdown_from_comment(comment, total_amount=0.0):
+    """Parse per-instrument breakdown from a fee comment string.
+    Matches patterns like:
+      - 'Storage Fees USDCHF. 71.00 GBPCHF. 50.00'
+      - 'Storage Fees GBPCHF. 50.00; Storage Fees USDCHF. 71.00'
+      - 'Storage Fees 121 (USDCHF. 71.00, GBPCHF. 50)'
+      - 'Storage Fees 3days USDCHF. 71.'
+    """
+    if not comment:
+        return []
+    pat = re.compile(r'([A-Za-z]{3,}[A-Za-z0-9._/-]*)[.\s]+([0-9]+(?:\.[0-9]*)?)')
+    ignore_words = {'STORAGE', 'FEES', 'HOLDING', 'DAYS', 'CHARGE', 'DEBIT', 'CREDIT', 'FOR', 'TOTAL'}
+    pairs = []
+    seen_syms = set()
+    for sym_raw, val_raw in pat.findall(str(comment)):
+        clean_sym = sym_raw.strip()
+        u = clean_sym.upper()
+        if u.rstrip('.') not in ignore_words and any(ch.isalpha() for ch in clean_sym):
+            try:
+                v = float(val_raw)
+                if u not in seen_syms:
+                    seen_syms.add(u)
+                    pairs.append((u, v))
+            except ValueError:
+                pass
+    if not pairs:
+        return []
+    total_lots = sum(lots for _, lots in pairs)
+    total_amt = float(total_amount or 0.0)
+    per_lot = (abs(total_amt) / total_lots) if total_lots > 0 else 0.0
+    sign = -1.0 if total_amt < 0 else (1.0 if total_amt > 0 else -1.0)
+
+    breakdown = []
+    for sym, lots in pairs:
+        item_amt = round(sign * per_lot * lots, 2) if total_amt != 0.0 else 0.0
+        breakdown.append({
+            "symbol": sym,
+            "amount": item_amt,
+            "lots": lots,
+            "per_lot": round(per_lot, 2),
+            "comment": str(comment),
+        })
+    breakdown.sort(key=lambda x: abs(x["amount"]), reverse=True)
+    return breakdown
+
+
+def _format_composite_storage_comment(breakdown):
+    """Format composite storage comment e.g.:
+    Storage Fees USDCHF. 71.00 GBPCHF. 50.00
+    or Storage Fees 3days USDCHF. 71.00 GBPCHF. 50.00
+    """
+    if not breakdown:
+        return ""
+    if len(breakdown) == 1:
+        c = breakdown[0].get("comment", "")
+        if c:
+            return c
+        sym = breakdown[0].get("symbol", "")
+        lots = breakdown[0].get("lots", 0.0)
+        return f"Storage Fees {sym} {lots:.2f}" if lots > 0 else f"Storage Fees {sym}"
+
+    all_comments = [b.get("comment", "") for b in breakdown]
+    is_3days = any("3days" in str(c).lower() for c in all_comments)
+    prefix = "Storage Fees 3days" if is_3days else "Storage Fees"
+
+    parts = []
+    for b in breakdown:
+        sym = b.get("symbol", "")
+        lots = float(b.get("lots", 0.0) or 0.0)
+        c = b.get("comment", "")
+        m = re.search(re.escape(sym) + r'[.\s]+([0-9]+(?:\.[0-9]*)?)', str(c), re.IGNORECASE) if c else None
+        if m:
+            lot_str = m.group(1)
+            if "." in lot_str:
+                decimals = lot_str.split(".")[1]
+                if len(decimals) == 0 or len(decimals) == 1:
+                    lot_str = f"{float(lot_str):.2f}"
+            else:
+                lot_str = f"{float(lot_str):.2f}"
+        else:
+            lot_str = f"{lots:.2f}" if lots > 0 else ""
+
+        if lot_str:
+            parts.append(f"{sym} {lot_str}")
+        else:
+            parts.append(sym)
+    return f"{prefix} {' '.join(parts)}"
+
+
+def _build_fee_breakdown_from_deals(deals, account=None, total_delta=None):
+    """Build a structured per-instrument breakdown from a list of broker fee/charge deals.
+
+    Returns a list of dicts sorted by abs(amount) descending:
+    [
+        {
+            "symbol": "USDCHF.",
+            "amount": -311.69,
+            "lots": 71.0,
+            "per_lot": 4.39,
+            "comment": "Storage Fees USDCHF. 71.00"
+        },
+        ...
+    ]
+    """
+    if not deals:
+        return []
+
+    # If single deal whose comment contains multiple instruments:
+    if len(deals) == 1:
+        d0 = deals[0]
+        c0 = str(d0.get("comment", "") or "").strip()
+        amt0 = float(d0.get("profit", 0.0) or 0.0) + float(d0.get("commission", 0.0) or 0.0) + float(d0.get("fee", 0.0) or 0.0)
+        if total_delta is not None and amt0 == 0.0:
+            amt0 = float(total_delta)
+        multi_check = _parse_breakdown_from_comment(c0, amt0)
+        if len(multi_check) > 1:
+            return multi_check
+
+    by_sym = {}
+    for d in deals:
+        amt = float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0) + float(d.get("fee", 0.0) or 0.0)
+        comm = str(d.get("comment", "") or "").strip()
+        sym = str(d.get("symbol", "") or "").strip().upper()
+        if not sym or sym == "FEES":
+            sym = _extract_fee_symbol(comm, sym)
+
+        lots = float(d.get("lots", 0.0) or d.get("volume", 0.0) or 0.0)
+        if lots <= 0 and comm:
+            m = re.search(re.escape(sym) + r'[.\s]+([0-9]+(?:\.[0-9]*)?)', comm, re.IGNORECASE)
+            if m:
+                try:
+                    lots = float(m.group(1))
+                except ValueError:
+                    pass
+            if lots <= 0:
+                m2 = re.search(r'(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?(?:[A-Za-z0-9._/-]+)[.\s]+([0-9]+(?:\.[0-9]*)?)', comm, re.IGNORECASE)
+                if m2:
+                    try:
+                        lots = float(m2.group(1))
+                    except ValueError:
+                        pass
+
+        if lots <= 0 and account and account in ea_account_info:
+            info = ea_account_info.get(account, {})
+            pos_list = info.get("position_details") or info.get("positions", [])
+            if isinstance(pos_list, list):
+                clean_sym = sym.rstrip('.').upper()
+                for p in pos_list:
+                    p_sym = str(p.get("symbol", "") or "").rstrip('.').upper()
+                    if p_sym == clean_sym:
+                        lots += float(p.get("lots", 0.0) or p.get("volume", 0.0) or 0.0)
+
+        by_sym.setdefault(sym, {"amount": 0.0, "lots": 0.0, "comment": comm})
+        by_sym[sym]["amount"] += amt
+        by_sym[sym]["lots"] += lots
+        if comm and not by_sym[sym]["comment"]:
+            by_sym[sym]["comment"] = comm
+
+    breakdown = []
+    for s, data in by_sym.items():
+        s_amt = round(data["amount"], 2)
+        s_lots = data["lots"]
+        s_per_lot = round(abs(s_amt) / s_lots, 2) if s_lots > 0 else 0.0
+        breakdown.append({
+            "symbol": s,
+            "amount": s_amt,
+            "lots": s_lots,
+            "per_lot": s_per_lot,
+            "comment": data["comment"],
+        })
+
+    # If total_delta is provided and breakdown amounts sum to 0 (e.g. deals had 0 profit):
+    if total_delta is not None and breakdown:
+        cur_sum = sum(b["amount"] for b in breakdown)
+        if abs(cur_sum) < 0.001 and abs(total_delta) > 0.001:
+            tot_l = sum(b["lots"] for b in breakdown)
+            if tot_l > 0:
+                p_lot = abs(total_delta) / tot_l
+                sign = -1.0 if total_delta < 0 else 1.0
+                for b in breakdown:
+                    b["amount"] = round(sign * p_lot * b["lots"], 2)
+                    b["per_lot"] = round(p_lot, 2)
+            elif len(breakdown) == 1:
+                breakdown[0]["amount"] = round(total_delta, 2)
+
+    breakdown.sort(key=lambda x: abs(x["amount"]), reverse=True)
+    return breakdown
+
+
 def _send_fee_alert(account, fee_entry):
     """Check threshold and send fee alert via enabled channels (in background)."""
     thresholds = dashboard_settings.get("fee_thresholds", {})
@@ -5682,22 +5966,66 @@ def _send_fee_alert(account, fee_entry):
     fee_type = fee_entry.get("fee_type", "fee")
     is_storage = fee_type == "storage_fee" or "storage" in fee_entry.get("label", "").lower()
     title = "Storage Fee Alert" if is_storage else "Fee Alert"
+
+    amount = float(fee_entry.get("amount", 0) or 0.0)
+    abs_amt = abs(amount)
+
+    breakdown = fee_entry.get("breakdown")
+    if not breakdown and is_storage:
+        breakdown = _parse_breakdown_from_comment(fee_entry.get("comment", ""), amount)
+
     sym = fee_entry.get("symbol", "")
+    if breakdown and len(breakdown) > 0:
+        symbols_list = [b["symbol"] for b in breakdown if b.get("symbol")]
+        if symbols_list:
+            sym = " ".join(symbols_list)
+
     sym_str = f" ({sym})" if sym and sym != "FEES" else ""
     comment = fee_entry.get("comment", "")
     comment_str = f"\nComment: {comment}" if comment else ""
     tg_comment_str = f"\nComment: <code>{comment}</code>" if comment else ""
 
+    # Build amount lines
+    if is_storage and breakdown:
+        total_lots = sum(float(b.get("lots", 0) or 0) for b in breakdown)
+        if total_lots > 0:
+            total_per_lot = abs_amt / total_lots
+            lots_str = _fmt_lot(total_lots)
+            total_line_plain = f"Amount total: {amount:.2f} ; per lot {total_per_lot:.2f} ({abs_amt:.2f}/{lots_str})"
+            total_line_tg = f"Amount total: <b>{amount:.2f}</b> ; per lot {total_per_lot:.2f} ({abs_amt:.2f}/{lots_str})"
+        else:
+            total_line_plain = f"Amount total: {amount:.2f}" if len(breakdown) > 1 else f"Amount: {amount:.2f}"
+            total_line_tg = f"Amount total: <b>{amount:.2f}</b>" if len(breakdown) > 1 else f"Amount: <b>{amount:.2f}</b>"
+
+        sub_lines = []
+        if len(breakdown) > 1:
+            for b in breakdown:
+                b_sym = b.get("symbol", "")
+                b_amt = float(b.get("amount", 0) or 0.0)
+                b_lots = float(b.get("lots", 0) or 0.0)
+                if b_lots > 0:
+                    b_per_lot = abs(b_amt) / b_lots
+                    b_lots_str = _fmt_lot(b_lots)
+                    sub_lines.append(f"  Amount {b_sym} total {b_amt:.2f} ; per lot {b_per_lot:.2f} ({abs(b_amt):.2f}/{b_lots_str})")
+                else:
+                    sub_lines.append(f"  Amount {b_sym} total {b_amt:.2f}")
+
+        amt_block_plain = "\n".join([total_line_plain] + sub_lines)
+        amt_block_tg = "\n".join([total_line_tg] + sub_lines)
+    else:
+        amt_block_plain = f"Amount: {amount:.2f}"
+        amt_block_tg = f"Amount: <b>{amount:.2f}</b>"
+
     subject = f"⚠️ {title}: {account}{sym_str}"
     body = (f"{title} detected on account {account}{sym_str}\n"
             f"Group: {grp}\n"
-            f"Amount: {fee_entry.get('amount', 0):.2f}\n"
+            f"{amt_block_plain}\n"
             f"Balance: {fee_entry.get('balance_before', 0):.2f} → {fee_entry.get('balance_after', 0):.2f}\n"
             f"Time: {fee_entry.get('ts', '')}{comment_str}")
     tg_msg = (f"<b>⚠️ {title}</b>\n"
               f"Account: <code>{account}</code>{sym_str}\n"
               f"Group: {grp}\n"
-              f"Amount: <b>{fee_entry.get('amount', 0):.2f}</b>\n"
+              f"{amt_block_tg}\n"
               f"Balance: {fee_entry.get('balance_before', 0):.2f} → {fee_entry.get('balance_after', 0):.2f}\n"
               f"Time: {fee_entry.get('ts', '')}{tg_comment_str}")
 
@@ -6315,7 +6643,7 @@ def _disbalance_alert_loop():
             _cycle_actions = ("cycle_", "open", "close", "close_limit")
             with lock:
                 for _sid, _sess in sessions.items():
-                    if _sess.get("status") not in ("active", "partial_close"):
+                    if _sess.get("status") not in ("active", "partial_close", "pausing"):
                         continue
                     _act = _sess.get("action", "")
                     if _act.startswith("cycle_") or _act in ("open", "close", "close_limit"):
@@ -7267,6 +7595,8 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
         except Exception as verify_err:
             print(f"[CYCLE-VERIFY] Error during verification: {verify_err}")
     _save_sessions()
+    if session.get("status") == "pausing":
+        _check_and_apply_pending_pause(session, session_id)
     return True
 
 # ─── Session helpers ────────────────────────────────────────────────────────
@@ -7451,22 +7781,37 @@ def _has_position_changed(prev_pos, new_pos):
     return False
 
 def _extract_fee_symbol(comment, deal_symbol=""):
-    """Extract symbol from storage fee or fee comment if deal symbol is missing or generic."""
+    """Extract symbol(s) from storage fee or fee comment if deal symbol is missing or generic."""
     if deal_symbol and deal_symbol.upper() != "FEES":
         return deal_symbol.upper().strip()
     if not comment:
         return "FEES"
+    # Check for multiple symbols in comment (e.g. Storage Fees USDCHF. 71.00 GBPCHF. 50.00)
+    pat = re.compile(r'([A-Za-z]{3,}[A-Za-z0-9._/-]*)[.\s]+([0-9]+(?:\.[0-9]*)?)')
+    ignore_words = {'STORAGE', 'FEES', 'HOLDING', 'DAYS', 'CHARGE', 'DEBIT', 'CREDIT', 'FOR', 'TOTAL'}
+    symbols = []
+    for s, _ in pat.findall(str(comment)):
+        clean = s.strip()
+        if clean.upper().rstrip('.') not in ignore_words and any(c.isalpha() for c in clean):
+            u = clean.upper()
+            if u not in symbols:
+                symbols.append(u)
+    if len(symbols) > 1:
+        return " ".join(symbols)
+    if len(symbols) == 1:
+        return symbols[0]
+
     # Match: Storage Fees [optional Ndays] <SYMBOL> [optional volume]
     m = re.search(r'(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
     if m:
         sym = m.group(1).strip()
-        if any(c.isalpha() for c in sym):
+        if any(c.isalpha() for c in sym) and sym.upper().rstrip('.') not in ignore_words:
             return sym.upper()
     # Match generic: Fee [for] <SYMBOL>
     m2 = re.search(r'fees?\s+(?:for\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
     if m2:
         sym = m2.group(1).strip()
-        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR"):
+        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR") and sym.upper().rstrip('.') not in ignore_words:
             return sym.upper()
     return "FEES"
 
@@ -7513,7 +7858,11 @@ def _find_recent_balance_deal(account, delta, now_ts):
         for d in reversed(non_trade):
             deal_amt = float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
             if abs(deal_amt - delta) < 0.05:
-                return d
+                res = dict(d)
+                res["_breakdown"] = _build_fee_breakdown_from_deals([d], account, total_delta=deal_amt)
+                if res["_breakdown"]:
+                    res["symbol"] = " ".join(b["symbol"] for b in res["_breakdown"])
+                return res
 
         # ── Pass 2: cluster of fee/charge deals whose SUM matches delta ──
         # (Orbex rolls over multiple per-symbol storage fee deals simultaneously)
@@ -7540,20 +7889,28 @@ def _find_recent_balance_deal(account, delta, now_ts):
                     or d.get("fee_type") == "storage_fee"
                     for d in fee_cluster
                 )
-                composite_comment = "; ".join(
-                    str(d.get("comment", "") or "") for d in fee_cluster if d.get("comment")
-                )
-                logger.info("[FEE-DETECT] %s: fee cluster of %d deals sums to %.2f (delta=%.2f)",
-                            account, len(fee_cluster), cluster_sum, delta)
+                breakdown = _build_fee_breakdown_from_deals(fee_cluster, account, total_delta=cluster_sum)
+                if all_storage and breakdown:
+                    composite_comment = _format_composite_storage_comment(breakdown)
+                    symbols_str = " ".join(b["symbol"] for b in breakdown)
+                else:
+                    composite_comment = "; ".join(
+                        str(d.get("comment", "") or "") for d in fee_cluster if d.get("comment")
+                    )
+                    symbols_str = " ".join(b["symbol"] for b in breakdown) if breakdown else ""
+
+                logger.info("[FEE-DETECT] %s: fee cluster of %d deals sums to %.2f (delta=%.2f) syms=%s",
+                            account, len(fee_cluster), cluster_sum, delta, symbols_str)
                 return {
                     "type": "charge",
                     "profit": cluster_sum,
                     "commission": 0.0,
                     "comment": composite_comment,
-                    "symbol": "",
+                    "symbol": symbols_str,
                     "is_fee": True,
                     "fee_type": "storage_fee" if all_storage else "fee",
                     "_matched_deals": fee_cluster,
+                    "_breakdown": breakdown,
                 }
 
         # ── Pass 3: best approximate single-deal match (within 10 %) ──
@@ -7566,11 +7923,30 @@ def _find_recent_balance_deal(account, delta, now_ts):
                 best_diff = diff
                 best_deal = d
 
-        # ── Pass 4: fallback — most recent non-trade deal ──
-        if not best_deal and non_trade:
-            best_deal = non_trade[-1]
+        if best_deal:
+            res = dict(best_deal)
+            res["_breakdown"] = _build_fee_breakdown_from_deals([best_deal], account, total_delta=delta)
+            if res["_breakdown"]:
+                res["symbol"] = " ".join(b["symbol"] for b in res["_breakdown"])
+            return res
 
-        return best_deal
+        # ── Pass 4: fallback — most recent fee/charge-typed non-trade deal only ──
+        # IMPORTANT: Never return a balance/credit/deposit deal as a fallback. If the most
+        # recent non-trade deal is a deposit (fee_type=="balance"), its comment would
+        # contaminate the alert text for an unrelated storage-fee balance change.
+        fee_type_non_trade = [
+            d for d in non_trade
+            if str(d.get("type", "")).lower() not in ("balance", "credit", "2", "3", "op_balance", "op_credit")
+            and d.get("fee_type") != "balance"
+        ]
+        if fee_type_non_trade:
+            best_deal = dict(fee_type_non_trade[-1])
+            best_deal["_breakdown"] = _build_fee_breakdown_from_deals([best_deal], account, total_delta=delta)
+            if best_deal["_breakdown"]:
+                best_deal["symbol"] = " ".join(b["symbol"] for b in best_deal["_breakdown"])
+            return best_deal
+
+        return None
     except Exception as e:
         logger.warning("[FEE-DETECT] Error querying broker deals for %s: %s", account, e)
         return None
@@ -7678,10 +8054,23 @@ def _check_fee_alerts():
                                 is_deal_fee = True
                                 is_storage = "STORAGE" in comment_upper or matched_deal.get("fee_type") == "storage_fee"
                                 fee_type = "storage_fee" if is_storage else "fee"
-                                deal_sym = _extract_fee_symbol(comment, deal_sym)
+                                if not deal_sym or deal_sym == "FEES":
+                                    deal_sym = _extract_fee_symbol(comment, deal_sym)
 
                         # If matched deal confirms fee, or if comment has fee keywords:
                         if is_deal_fee:
+                            breakdown = matched_deal.get("_breakdown") if matched_deal else None
+                            if not breakdown and matched_deal:
+                                sub_deals = matched_deal.get("_matched_deals") or [matched_deal]
+                                breakdown = _build_fee_breakdown_from_deals(sub_deals, account, total_delta=delta)
+                            if not breakdown and comment:
+                                breakdown = _parse_breakdown_from_comment(comment, delta)
+
+                            if breakdown and len(breakdown) > 0:
+                                deal_sym = " ".join(b["symbol"] for b in breakdown)
+                            elif not deal_sym or deal_sym == "FEES":
+                                deal_sym = _extract_fee_symbol(comment, deal_sym)
+
                             fee_entry = {
                                 "id": str(uuid.uuid4())[:8],
                                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -7694,6 +8083,7 @@ def _check_fee_alerts():
                                 "fee_type": fee_type,
                                 "symbol": deal_sym or "FEES",
                                 "comment": comment,
+                                "breakdown": breakdown,
                             }
                             reporting_data["fees"].append(fee_entry)
                             _save_reporting()
@@ -7701,11 +8091,15 @@ def _check_fee_alerts():
                                             fee_type, account, delta, prev_bal, new_bal, deal_sym, comment)
 
                             # If it's a storage fee, integrate into live swap delta.
-                            # For composite deals (_matched_deals), record each symbol's fee individually.
+                            # For composite deals (_matched_deals) or breakdown, record each symbol's fee individually.
                             if fee_type == "storage_fee":
-                                sub_deals = matched_deal.get("_matched_deals") if matched_deal else None
-                                if sub_deals:
-                                    for sub in sub_deals:
+                                if breakdown and len(breakdown) > 0:
+                                    for b_item in breakdown:
+                                        b_amt = float(b_item.get("amount", 0.0) or 0.0)
+                                        b_sym = str(b_item.get("symbol", "") or "")
+                                        _add_storage_fee_to_swap_delta(account, b_amt, b_sym)
+                                elif matched_deal and matched_deal.get("_matched_deals"):
+                                    for sub in matched_deal["_matched_deals"]:
                                         sub_amt = float(sub.get("profit", 0.0) or 0.0) + float(sub.get("commission", 0.0) or 0.0)
                                         sub_comment = str(sub.get("comment", "") or "")
                                         sub_sym = _extract_fee_symbol(sub_comment, str(sub.get("symbol", "") or ""))
@@ -8321,6 +8715,9 @@ def _run_hedge_monitor_all():
     with lock:
         _check_fee_alerts()
         for sid, session in list(sessions.items()):
+            if session.get("status") == "pausing":
+                _check_and_apply_pending_pause(session, sid)
+
             # ── BROKER SOURCE-OF-TRUTH: REVIVE COMPLETED/PAUSED SESSIONS WITH OPEN POSITIONS ──
             # If a session was marked 'completed' or 'paused' (e.g. because of a false-close cascade
             # or partial disconnect), but live broker position reports prove that session tickets
@@ -9757,14 +10154,98 @@ def _is_completing_hedge(session, account=None):
         return any(_get_net_open(session, o_a) > my_net for o_a in sides if o_a != account)
 
 
+def _is_session_mid_flight(session, session_id=None):
+    """
+    Check if a session has any in-flight orders or uncompleted hedge/cycle legs.
+    Returns True if mid-flight, False if clean and safe to pause.
+    """
+    if not session:
+        return False
+    if not session_id:
+        session_id = session.get("id", "")
+        if not session_id:
+            for _sk, _sv in sessions.items():
+                if _sv is session:
+                    session_id = _sk
+                    break
+
+    sides = session.get("sides", {})
+    now_ts = time.time()
+    exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
+
+    # 1. Any active in_flight_commands for this session
+    if session_id:
+        for a in sides:
+            flight_ts = in_flight_commands.get((session_id, a), 0)
+            if flight_ts > 0 and (now_ts - flight_ts) < exec_timeout:
+                return True
+
+    # 2. Cycle in open phase (closed position, waiting to reopen replacement)
+    action = session.get("action", "")
+    if action.startswith(("cycle_", "cycle_lm_", "cycle_limit_")):
+        progress = session.get("cycle_progress", {})
+        if progress.get("phase") == "open":
+            return True
+
+    # 3. Open mode: completing hedge leg pending
+    if action in ("open", "open_limit"):
+        if _is_completing_hedge(session):
+            return True
+
+    # 4. Close mode: completing close leg pending (unbalanced closes)
+    if action in ("close", "close_limit"):
+        if len(sides) >= 2:
+            closed_counts = [session.get("closed", {}).get(a, 0) for a in sides]
+            if closed_counts and min(closed_counts) < max(closed_counts):
+                return True
+
+    return False
+
+
+def _check_and_apply_pending_pause(session, session_id=None):
+    """
+    If session status is 'pausing' and all in-flight operations are complete
+    (or safety timeout reached), transition status to 'paused'.
+    """
+    if not session or session.get("status") != "pausing":
+        return False
+
+    if not session_id:
+        session_id = session.get("id", "")
+        if not session_id:
+            for _sk, _sv in sessions.items():
+                if _sv is session:
+                    session_id = _sk
+                    break
+
+    pause_ts = session.get("pause_requested_ts", 0)
+    exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
+    timed_out = pause_ts > 0 and (time.time() - pause_ts) > (exec_timeout + 30)
+
+    if not _is_session_mid_flight(session, session_id) or timed_out:
+        session["status"] = "paused"
+        session.pop("pause_requested", None)
+        session.pop("pause_requested_ts", None)
+        old_mode = session.get("action", "monitor")
+        if _is_limit_mode(old_mode):
+            _clear_limit_tps_for_session(session_id, session)
+        session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _save_sessions()
+        reason = f"safety timeout ({int(time.time() - pause_ts)}s)" if timed_out else "in-flight orders settled"
+        _log_event(session_id, None, "session_paused", f"Status -> paused ({reason})")
+        print(f"[PAUSE] Session {session_id[:8] if session_id else 'UNKNOWN'} transitioned from 'pausing' to 'paused' ({reason})")
+        return True
+    return False
+
+
 def _should_issue_command(session, account):
     """
     Determine if a command should be issued to this account based on
     session status, fill counts, execution order, time window, and per-account limits.
     Returns: True (normal command), False (skip), or "rollback" (issue close command for rollback).
     """
-    # HARD BLOCK: paused/draft sessions must never issue commands
-    if session.get("status") not in ("active", "partial_close"):
+    # HARD BLOCK: paused/draft sessions must never issue commands (pausing allowed only for completing in-flight legs)
+    if session.get("status") not in ("active", "partial_close", "pausing"):
         return False
 
     # Rollback takes priority — but only if parent strategy is running
@@ -9971,15 +10452,48 @@ def _should_issue_command(session, account):
         return "rollback"
 
     _action_check = session.get("action", "")
-    if session["status"] not in ("active", "partial_close"):
+    if session["status"] not in ("active", "partial_close", "pausing"):
         if _action_check.startswith("cycle_"):
             print(f"[CYCLE-GATE] {account}: BLOCKED by status={session['status']}")
         return False
 
+    # ── PAUSING GATE: strictly allow ONLY operations that complete in-flight risk ──
+    if session.get("status") == "pausing":
+        is_allowed = False
+        if _action_check.startswith(("cycle_", "cycle_lm_", "cycle_limit_")):
+            phase = session.get("cycle_progress", {}).get("phase", "")
+            if phase == "open":
+                is_allowed = True
+            else:
+                print(f"[PAUSING-GATE] {account}: BLOCKED — cycle phase is '{phase}', waiting to pause")
+        elif _action_check in ("open", "open_limit"):
+            if _is_completing_hedge(session, account):
+                is_allowed = True
+            else:
+                print(f"[PAUSING-GATE] {account}: BLOCKED — not completing hedge leg, waiting to pause")
+        elif _action_check in ("close", "close_limit"):
+            sides = session.get("sides", {})
+            my_closed = session.get("closed", {}).get(account, 0)
+            if any(session.get("closed", {}).get(oa, 0) > my_closed for oa in sides if oa != account):
+                is_allowed = True
+            else:
+                print(f"[PAUSING-GATE] {account}: BLOCKED — close legs balanced, waiting to pause")
+
+        if not is_allowed:
+            _sid = session.get("id", "")
+            if not _sid:
+                for _sk, _sv in sessions.items():
+                    if _sv is session:
+                        _sid = _sk
+                        break
+            if _sid:
+                _check_and_apply_pending_pause(session, _sid)
+            return False
+
     # Check if the parent strategy is running
-    # Bypass for: cycle operations (maintenance), monitor mode (rebalancing)
+    # Bypass for: cycle operations (maintenance), monitor mode (rebalancing), or completing hedge leg
     strat_id = session.get("strategy_id")
-    if strat_id and not _action_check.startswith("cycle_") and _action_check != "monitor":
+    if strat_id and not _action_check.startswith("cycle_") and _action_check != "monitor" and not _is_completing_hedge(session, account):
         strat = strategies.get(strat_id)
         if strat and not strat.get("running", False):
             return False
@@ -11496,6 +12010,7 @@ def _calc_curr_diff(session, direction):
 
     bid1, ask1, sym1_ok = 0, 0, False
     bid2, ask2, sym2_ok = 0, 0, False
+    quote_ts1, quote_ts2 = 0, 0
 
     for i, (acc, pair_i, info, is_direct, is_fix) in enumerate([
         (acc1, pair1, info1, is_direct1, is_fix1),
@@ -11504,6 +12019,7 @@ def _calc_curr_diff(session, direction):
         q_bid, q_ask = 0, 0
         got_quote = False
         quote_src = "none"
+        quote_ts = 0  # track when this quote was obtained
 
         direct_acct = None
         iforex_acct = None
@@ -11514,12 +12030,9 @@ def _calc_curr_diff(session, direction):
         elif 'iforex_manager' in globals() and iforex_manager and acc in iforex_manager.accounts:
             iforex_acct = iforex_manager.accounts.get(acc)
 
-        # Check direct quote cache first if fresh (< 1.5s) to avoid redundant broker calls
-        cached = _direct_quote_cache.get((acc, pair_i))
-        if cached and (time.time() - cached.get("ts", 0)) < 1.5:
-            q_bid, q_ask = cached["bid"], cached["ask"]
-            got_quote = True
-            quote_src = "direct_cache_fresh"
+        # DIFF calculations ALWAYS fetch live quotes — never serve from cache first.
+        # Stale/cached quotes cause temporal misalignment between the two sides,
+        # producing wildly incorrect DIFF values (e.g. -18.5 instead of -0.9).
 
         # 0. iFOREX Direct quote lookup
         if not got_quote and iforex_acct and pair_i:
@@ -11528,7 +12041,8 @@ def _calc_curr_diff(session, direction):
                 q_bid, q_ask = q[0], q[1]
                 got_quote = True
                 quote_src = "iforex_direct"
-                _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
+                quote_ts = time.time()
+                _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": quote_ts}
 
         # 1. Direct quote lookup — query live price via get_quote_direct
         if not got_quote and direct_acct and pair_i:
@@ -11539,7 +12053,8 @@ def _calc_curr_diff(session, direction):
                         q_bid, q_ask = dq["bid"], dq["ask"]
                         got_quote = True
                         quote_src = "get_quote_direct"
-                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
+                        quote_ts = time.time()
+                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": quote_ts}
 
                 if not got_quote and hasattr(direct_acct, 'get_symbol_info'):
                     sym_info = direct_acct.get_symbol_info(pair_i)
@@ -11547,9 +12062,21 @@ def _calc_curr_diff(session, direction):
                         q_bid, q_ask = sym_info["bid"], sym_info["ask"]
                         got_quote = True
                         quote_src = "symbol_cache"
-                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": time.time()}
+                        quote_ts = time.time()
+                        _direct_quote_cache[(acc, pair_i)] = {"bid": q_bid, "ask": q_ask, "ts": quote_ts}
             except Exception:
                 pass
+
+        # Last-resort fallback: use _direct_quote_cache only if all live sources failed
+        if not got_quote:
+            cached = _direct_quote_cache.get((acc, pair_i))
+            if cached and cached.get("bid") and cached.get("ask"):
+                cache_age = time.time() - cached.get("ts", 0)
+                if cache_age < 5.0:  # accept up to 5s old as emergency fallback
+                    q_bid, q_ask = cached["bid"], cached["ask"]
+                    got_quote = True
+                    quote_src = f"direct_cache_fallback({cache_age:.1f}s)"
+                    quote_ts = cached.get("ts", 0)
 
         # 3. Fallback to ea_account_info (info dict)
         if not got_quote and info:
@@ -11566,6 +12093,7 @@ def _calc_curr_diff(session, direction):
                 q_bid, q_ask = sym_data["bid"], sym_data["ask"]
                 got_quote = True
                 quote_src = "ea_symbols_dict"
+                quote_ts = info.get("last_update", 0)
 
             # 3b) Fallback to root info ONLY if root symbol matches pair_i (and is non-empty)
             if not got_quote:
@@ -11579,14 +12107,17 @@ def _calc_curr_diff(session, direction):
                         q_bid, q_ask = ea_bid, ea_ask
                         got_quote = True
                         quote_src = "ea_root_info"
+                        quote_ts = info.get("last_update", 0)
 
         if i == 0:
             bid1, ask1, sym1_ok = q_bid, q_ask, got_quote
+            quote_ts1 = quote_ts
         else:
             bid2, ask2, sym2_ok = q_bid, q_ask, got_quote
+            quote_ts2 = quote_ts
 
-        logger.debug("[DIFF-DIAG] side%d acc=%s pair=%s src=%s bid=%.6f ask=%.6f",
-                     i+1, acc, pair_i, quote_src, q_bid, q_ask)
+        logger.debug("[DIFF-DIAG] side%d acc=%s pair=%s src=%s bid=%.6f ask=%.6f ts=%.3f",
+                     i+1, acc, pair_i, quote_src, q_bid, q_ask, quote_ts)
 
     # Original symbol checks for EA-polled accounts
     ea_sym1 = (info1.get("symbol") or "").upper()
@@ -11605,6 +12136,13 @@ def _calc_curr_diff(session, direction):
         if not bid2 or not ask2:
             reasons.append(f"Side 2 ({acc2}) quote stale/missing")
         return (None, ", ".join(reasons))
+
+    # Temporal skew check: reject DIFF if the two sides' quotes are from
+    # too far apart in time (e.g. one cached, one live).
+    if quote_ts1 > 0 and quote_ts2 > 0:
+        skew = abs(quote_ts1 - quote_ts2)
+        if skew > 3.0:
+            return (None, f"quote skew {skew:.1f}s — rejecting stale DIFF")
 
     # Determine which side buys and which sells
     s1_action = sides[acc1].get("action", "buy").lower()
@@ -11790,6 +12328,9 @@ def _check_session_completion(session):
                                    f"ALERT: Side(s) {done_accounts} closed but {pending_accounts} still open! Hedge is unbalanced.")
                         print(f"[ALERT] PARTIAL CLOSE: {done_accounts} closed, {pending_accounts} NOT closed. Hedge unbalanced!")
                         _save_sessions()
+
+    if session.get("status") == "pausing":
+        _check_and_apply_pending_pause(session, session.get("id", ""))
 
 
 # ── Startup: check for sessions stuck in close mode after restart ───────────
@@ -11992,9 +12533,12 @@ def start_session(session_id):
         s = sessions.get(session_id)
         if not s:
             return jsonify({"error": "Session not found"}), 404
-        if s["status"] not in ("draft", "paused"):
+        if s["status"] not in ("draft", "paused", "pausing"):
             return jsonify({"error": f"Cannot start session in status '{s['status']}'"}), 400
+        was_pausing = (s["status"] == "pausing")
         s["status"] = "active"
+        s.pop("pause_requested", None)
+        s.pop("pause_requested_ts", None)
         s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         s["hedge_monitor_start_ts"] = time.time()  # Cooldown: hedge monitor waits 30s (non-imported only)
         # Clear stale rollback data from previous runs
@@ -12003,7 +12547,8 @@ def start_session(session_id):
         s.pop("rollback_start_ts", None)
         s.pop("imbalance_rebal_ts", None)
         _save_sessions()
-        _log_event(session_id, None, "session_started", f"Status -> active")
+        ev_msg = "Pause cancelled -> active" if was_pausing else "Status -> active"
+        _log_event(session_id, None, "session_started", ev_msg)
     return jsonify(s)
 
 @app.route('/api/sessions/<session_id>/stop', methods=['POST'])
@@ -12013,12 +12558,25 @@ def stop_session(session_id):
         if not s:
             return jsonify({"error": "Session not found"}), 404
         old_mode = s.get("action", "monitor")
-        s["status"] = "paused"
-        if _is_limit_mode(old_mode):
-            _clear_limit_tps_for_session(session_id, s)
-        s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _save_sessions()
-        _log_event(session_id, None, "session_paused", f"Status -> paused")
+        if _is_session_mid_flight(s, session_id):
+            s["status"] = "pausing"
+            s["pause_requested"] = True
+            s["pause_requested_ts"] = time.time()
+            s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_sessions()
+            _log_event(session_id, None, "session_pausing",
+                       "Pause requested — waiting for in-flight orders / hedge completion before pausing")
+            print(f"[PAUSE] Session {session_id[:8]}: mid-flight detected, transitioning to 'pausing'")
+        else:
+            s["status"] = "paused"
+            s.pop("pause_requested", None)
+            s.pop("pause_requested_ts", None)
+            if _is_limit_mode(old_mode):
+                _clear_limit_tps_for_session(session_id, s)
+            s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_sessions()
+            _log_event(session_id, None, "session_paused", f"Status -> paused")
+            print(f"[PAUSE] Session {session_id[:8]}: clean state, paused immediately")
     return jsonify(s)
 
 @app.route('/api/sessions/<session_id>/clear_errors', methods=['POST'])
@@ -12289,6 +12847,11 @@ def set_session_mode(session_id):
                             str(f.get("ticket")) for f in s.get("close_fills", [])
                             if f.get("account") == trim_acct
                         )
+                        # Check broker open tickets to avoid trimming real broker positions
+                        ea_info = ea_account_info.get(trim_acct, {})
+                        ea_open_raw = ea_info.get("open_tickets")
+                        ea_open_set = set(_normalize_ticket(t) for t in ea_open_raw) if ea_open_raw is not None else None
+
                         # Only count active fill indices (not in close_fills)
                         acct_active_indices = [
                             i for i, f in enumerate(s.get("fills", []))
@@ -12296,10 +12859,20 @@ def set_session_mode(session_id):
                             and str(f.get("ticket")) not in trim_closed_set
                         ]
                         if len(acct_active_indices) > trim_target:
-                            # Remove excess active fills from the end
+                            # Only trim if the position is NOT confirmed open on the broker!
+                            # If broker confirms the ticket is open, trimming it creates a false imbalance.
+                            to_remove = []
                             for remove_idx in reversed(acct_active_indices[trim_target:]):
-                                s["fills"].pop(remove_idx)
-                            print(f"[CYCLE] Trimmed {len(acct_active_indices) - trim_target} excess active fills for {trim_acct}")
+                                fill_rec = s["fills"][remove_idx]
+                                fill_tk = _normalize_ticket(fill_rec.get("ticket"))
+                                if ea_open_set is not None and fill_tk in ea_open_set:
+                                    print(f"[CYCLE-TRIM-GUARD] NOT trimming ticket={fill_tk} on {trim_acct} — confirmed OPEN on broker")
+                                    continue
+                                to_remove.append(remove_idx)
+                            for r_idx in to_remove:
+                                s["fills"].pop(r_idx)
+                            if to_remove:
+                                print(f"[CYCLE] Trimmed {len(to_remove)} excess active fills for {trim_acct}")
                 s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
                 _log_event(session_id, cycle_account, "cycle_started",
                            f"Cycling {cycle_total} positions on {cycle_account}")
@@ -12985,7 +13558,7 @@ def poll_command():
                 _sides = _sess.get("sides", {})
                 if account in _sides and paired_account in _sides:
                     has_any_session = True
-                    if _sess.get("status") in ("active", "partial_close"):
+                    if _sess.get("status") in ("active", "partial_close", "pausing"):
                         has_active_session = True
                         break
 
@@ -12999,7 +13572,7 @@ def poll_command():
                     # Rebalancing is a safety mechanism — allow regardless of
                     # strategy running state. Only block during cycling.
                     if (_sess.get("imported")
-                            and _sess.get("status") in ("active", "partial_close")
+                            and _sess.get("status") in ("active", "partial_close", "pausing")
                             and not sess_action.startswith("cycle_")):
                         is_imported_active = True
                     break
@@ -13606,6 +14179,8 @@ def trade_result():
 
             session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _save_sessions()
+            if session.get("status") == "pausing":
+                _check_and_apply_pending_pause(session, session_id)
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -13658,7 +14233,21 @@ def api_recalculate_fund_distributions():
 
     return jsonify({"status": "ok"})
 
+# ─── Health / Ping Endpoint ──────────────────────────────────────────────────
+
+@app.route('/api/ping', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
+def api_ping():
+    """Lightweight liveness check for watchdog and uptime monitoring."""
+    return jsonify({
+        "status": "ok",
+        "pid": os.getpid(),
+        "uptime": round(time.time() - globals().get('_dashboard_start_time', time.time()), 1),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
 # ─── Status Endpoint ────────────────────────────────────────────────────────
+
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
@@ -13759,6 +14348,14 @@ def api_status():
                 # CLR (mt_direct_connector) GetQuote() is a fast native call.
                 if not got_direct and direct_acct and side_pair:
                     mult = 1000 if "JPY" in side_pair.upper() else 100000
+                    # Check recent cache first (< 2.5s) to avoid redundant synchronous bridge calls
+                    cached = _direct_quote_cache.get((acc, side_pair))
+                    if cached and (time.time() - cached.get("ts", 0)) < 2.5:
+                        sc[f"curr_bid_{sn}"] = cached["bid"]
+                        sc[f"curr_ask_{sn}"] = cached["ask"]
+                        sc[f"curr_spread_{sn}"] = round((cached["ask"] - cached["bid"]) * mult, 1)
+                        got_direct = True
+
                     # Priority 1: get_quote_direct — same live source the engine uses; always reflects
                     # what the spread gate will actually evaluate, never a polled/periodic cache.
                     if not got_direct and hasattr(direct_acct, 'get_quote_direct'):
@@ -17563,6 +18160,7 @@ body.popout-strategy .cycle-reminder-banner,
 }
 .badge-draft { background: var(--blue-bg); color: var(--blue); }
 .badge-active { background: var(--green-bg); color: var(--green); animation: pulse 2s infinite; }
+.badge-pausing { background: rgba(251,191,36,0.2); color: #fbbf24; animation: pulse 1s infinite; font-weight: 700; }
 .badge-paused { background: var(--orange-bg); color: var(--orange); }
 .badge-completed { background: rgba(108,92,231,0.15); color: var(--accent2); }
 .badge-partial_close { background: rgba(255,71,87,0.2); color: #ff4757; animation: pulse-alert 1s infinite; font-weight: 700; }
@@ -17956,7 +18554,7 @@ body.popout-strategy .cycle-reminder-banner,
 
             <th data-acol="17" title="Margin alert threshold (%)">Marg.Alrt%</th>
             <th data-acol="18">Swap</th>
-            <th data-acol="19" title="Swap change at last 5 PM ET rollover">Î” Swap</th>
+            <th data-acol="19" title="Swap change at last 5 PM ET rollover">Δ Swap</th>
             <th data-acol="20">Last Poll</th>
             <th data-acol="21" title="Auto connect account at start">Auto Conn</th>
             <th data-acol="22" title="Alert Email(s) Override">Email Alert</th>
@@ -20398,7 +20996,7 @@ const ACCT_COLUMNS = [
   {idx:'8', name:'Opt Eq'}, {idx:'9', name:'Shift'}, {idx:'10', name:'TGT Lots'},
   {idx:'11', name:'PnL'}, {idx:'12', name:'Leverage'}, {idx:'13', name:'Pos.'}, {idx:'14', name:'Lots'},
   {idx:'15', name:'Margin Use'}, {idx:'17', name:'Marg.Alrt%'},
-  {idx:'18', name:'Swap'}, {idx:'19', name:'Î” Swap'}, {idx:'20', name:'Last Poll'},
+  {idx:'18', name:'Swap'}, {idx:'19', name:'Δ Swap'}, {idx:'20', name:'Last Poll'},
   {idx:'21', name:'Auto Conn'}, {idx:'22', name:'Email Alert'}, {idx:'23', name:'Telegram Alert'},
   {idx:'24', name:'Stats'}, {idx:'25', name:'Actions'},
 ];
@@ -22060,7 +22658,7 @@ function renderInstrumentsTable() {
     tbody.innerHTML = '<tr><td colspan="21" style="text-align:center;color:var(--text2);padding:30px;">No instruments yet — click "+ Add Instrument"</td></tr>';
     return;
   }
-  const order = { partial_close:0, active:1, paused:1, draft:2, completed:3 };
+  const order = { partial_close:0, active:1, pausing:1, paused:1, draft:2, completed:3 };
   stratSessions.sort((a,b) => (order[a.status]||9) - (order[b.status]||9));
   tbody.innerHTML = stratSessions.map(s => {
     const isDraft = (s.status === 'draft' || s.status === 'paused');
@@ -22586,7 +23184,7 @@ async function saveEdit() {
 function closeModal() { closeModalOverlay('editModal'); }
 
 function badgeClass(status) {
-  const m = { draft:'badge-draft', active:'badge-active', paused:'badge-paused', completed:'badge-completed', partial_close:'badge-partial_close' };
+  const m = { draft:'badge-draft', active:'badge-active', pausing:'badge-pausing', paused:'badge-paused', completed:'badge-completed', partial_close:'badge-partial_close' };
   return m[status] || 'badge-draft';
 }
 
@@ -22816,6 +23414,10 @@ function renderActions(session) {
   }
   if (s === 'active') {
     html += `<button class="btn btn-warning btn-sm" onclick="stopSession('${session.id}')" title="Pause">⏸</button> `;
+  }
+  if (s === 'pausing') {
+    html += `<button class="btn btn-warning btn-sm" style="opacity:0.8;cursor:wait" disabled title="Waiting for in-flight orders / hedge completion before pausing">⏳ Pausing...</button> `;
+    html += `<button class="btn btn-success btn-sm" onclick="startSession('${session.id}')" title="Resume / Cancel Pause">▶</button> `;
   }
   // Close All button — always show (netOpen may be 0 for imported sessions with untracked fills)
   html += `<button class="btn btn-sm" style="background:var(--surface);color:var(--red);border:1px solid var(--red);font-size:0.7rem" onclick="closeAllDeals('${session.id}')" title="Close All Positions">✕ Close All</button> `;
@@ -24674,8 +25276,15 @@ function renderCycleReminders(reminders) {
     banner.remove();
     return;
   }
+  const seenKeys = new Set();
   const entries = Object.entries(reminders)
-    .filter(([acct, r]) => !_dismissedReminders.has(acct) && r.level !== 'OK');
+    .filter(([acct, r]) => {
+      if (!r || r.level === 'OK') return false;
+      const dedupeKey = r.message || (r.account_label || r.account_id || acct);
+      if (seenKeys.has(dedupeKey)) return false;
+      seenKeys.add(dedupeKey);
+      return !_dismissedReminders.has(acct) && !_dismissedReminders.has(dedupeKey);
+    });
   if (entries.length === 0) {
     banner.style.display = 'none';
     return;
@@ -24685,11 +25294,12 @@ function renderCycleReminders(reminders) {
     const pct = Math.min(100, (r.days_held / r.max_days) * 100);
     const color = r.level === 'CRITICAL' ? '#ef4444' : '#f59e0b';
     const icon = r.level === 'CRITICAL' ? '🚨' : '⚠️';
+    const msgEsc = (r.message || '').replace(/'/g, "\\'");
     return `<div style="background:${color}18;border-left:3px solid ${color};border-radius:4px;padding:3px 8px 3px 10px;margin-bottom:3px;display:flex;align-items:center;gap:8px;">
       <span style="font-size:0.8rem;flex-shrink:0;line-height:1;">${icon}</span>
       <span style="flex:1;font-size:0.8rem;color:${color};font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.message}</span>
       <span style="font-size:0.68rem;color:${color};opacity:0.7;flex-shrink:0;">${Math.round(pct)}%</span>
-      <button onclick="_dismissedReminders.add('${acct}');this.parentElement.remove();if(!document.getElementById('cycleReminderBanner').children.length)document.getElementById('cycleReminderBanner').style.display='none';" style="background:none;border:none;color:${color};font-size:0.9rem;cursor:pointer;padding:0 2px;line-height:1;opacity:0.7;font-weight:bold;flex-shrink:0;" title="Dismiss" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">&times;</button>
+      <button onclick="_dismissedReminders.add('${acct}');if('${msgEsc}')_dismissedReminders.add('${msgEsc}');this.parentElement.remove();if(!document.getElementById('cycleReminderBanner').children.length)document.getElementById('cycleReminderBanner').style.display='none';" style="background:none;border:none;color:${color};font-size:0.9rem;cursor:pointer;padding:0 2px;line-height:1;opacity:0.7;font-weight:bold;flex-shrink:0;" title="Dismiss" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">&times;</button>
     </div>`;
   }).join('');
 }
@@ -25605,7 +26215,7 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
           }
         }
       }
-      // Î” Swap
+      // Δ Swap
       const sd = swapDelta[m.id];
       if (sd != null) { sumSwapDelta += sd; hasSwapDelta = true; }
       // Age — only for accounts with Cycle Reminder enabled
@@ -25970,8 +26580,8 @@ function _renderSwapBreakdownModal(title, data) {
           <thead><tr style="border-bottom:1px solid var(--border);text-align:right;">
             <th style="text-align:left;padding:4px 8px;">Instrument</th>
             <th style="padding:4px 8px;">Lots</th>
-            <th style="padding:4px 8px;">Total Î” Swap</th>
-            <th style="padding:4px 8px;">Per Lot Î” Swap</th>
+            <th style="padding:4px 8px;">Total Δ Swap</th>
+            <th style="padding:4px 8px;">Per Lot Δ Swap</th>
           </tr></thead><tbody>`;
     let gLots = 0, gDeltaSwap = 0;
     data.forEach(r => {
@@ -29517,6 +30127,8 @@ if __name__ == '__main__':
 
                 session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 _save_sessions()
+                if session.get("status") == "pausing":
+                    _check_and_apply_pending_pause(session, session_id)
 
         _mt_direct_dashboard_data["report_trade_result"] = _mt_direct_report_result
         _mt_direct_dashboard_data["save_sessions"] = _save_sessions

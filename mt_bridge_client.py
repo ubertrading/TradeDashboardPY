@@ -857,16 +857,19 @@ class MtBridgeAccount:
             return result
         return None
 
-    def get_symbol_info(self, symbol):
-        """Get bid/ask/spread for a symbol."""
+    def get_symbol_info(self, symbol, force_fresh=False):
+        """Get bid/ask/spread for a symbol.
+        force_fresh: if True, bypass the local cache and always hit the bridge HTTP API.
+        Used by get_quote_direct() so DIFF calculations get live prices."""
         if not getattr(self, '_connected', False):
             return None
         now = time.time()
         if not hasattr(self, '_quote_cache'):
             self._quote_cache = {}
-        cached = self._quote_cache.get(symbol)
-        if cached and (now - cached.get("ts", 0)) < 1.0:
-            return cached.get("data")
+        if not force_fresh:
+            cached = self._quote_cache.get(symbol)
+            if cached and (now - cached.get("ts", 0)) < 2.5:
+                return cached.get("data")
 
         encoded = urllib.parse.quote(symbol, safe='')
         result = _get(f"/api/accounts/{self.account_id}/quote/{encoded}", timeout=2)
@@ -884,8 +887,8 @@ class MtBridgeAccount:
         return None
 
     def get_quote_direct(self, symbol):
-        """Get live bid/ask — same as get_symbol_info via bridge."""
-        return self.get_symbol_info(symbol)
+        """Get live bid/ask — always fetches fresh from bridge (bypasses cache)."""
+        return self.get_symbol_info(symbol, force_fresh=True)
 
     def get_swap_rates(self, symbols):
         """Get swap rates for symbols."""

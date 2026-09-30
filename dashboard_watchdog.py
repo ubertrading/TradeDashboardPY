@@ -63,7 +63,9 @@ RESTART_CMD = os.environ.get("WATCHDOG_RESTART_CMD", "py trade_dashboard.py")
 RESTART_DELAY = int(os.environ.get("WATCHDOG_RESTART_DELAY", "10"))
 MAX_RESTARTS = int(os.environ.get("WATCHDOG_MAX_RESTARTS", "0"))
 
-DASHBOARD_URL = f"http://{TRADE_HOST}:{TRADE_PORT}/api/status"
+DASHBOARD_PING_URL = os.environ.get("WATCHDOG_PING_URL", f"http://{TRADE_HOST}:{TRADE_PORT}/api/ping")
+DASHBOARD_STATUS_URL = os.environ.get("WATCHDOG_STATUS_URL", f"http://{TRADE_HOST}:{TRADE_PORT}/api/status")
+DASHBOARD_URL = DASHBOARD_PING_URL
 
 # PID file written by trade_dashboard.py (or we track it ourselves after a restart)
 PID_FILE = os.path.join(SCRIPT_DIR, "var", "dashboard.pid")
@@ -156,14 +158,23 @@ def _notify(settings, subject, body):
 
 
 def _check_dashboard():
-    """Check if dashboard is responding via HTTP. Returns True if healthy."""
-    try:
-        req = urllib.request.Request(DASHBOARD_URL)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        return True
-    except Exception:
-        return False
+    """Check if dashboard is responding via HTTP. Returns True if healthy.
+    Prefers lightweight /api/ping (<1ms), falls back to /api/status if ping is not available.
+    """
+    for url in (DASHBOARD_PING_URL, DASHBOARD_STATUS_URL):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "TradeDashboardWatchdog/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status in (200, 204):
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and url == DASHBOARD_PING_URL:
+                continue  # Fallback to status endpoint if running on older dashboard version
+            return False
+        except Exception:
+            pass
+    return False
+
 
 
 def _read_pid():
@@ -302,29 +313,41 @@ def main():
                       + (f" — PID {last_known_pid} still alive" if pid_alive else ""))
 
             if consecutive_failures >= FAILURE_THRESHOLD and not alerted:
-                # Confirmed down — collect crash context from faulthandler log
                 settings = _load_settings()
                 down_since = datetime.now()
-                crash_context = ""
-                fh_tail = _tail_faulthandler_log(40)
-                if fh_tail:
-                    crash_context = f"\n\n─── faulthandler.log (last 40 lines) ───\n{fh_tail}"
-
                 restart_info = ""
                 if AUTO_RESTART:
                     restart_info = "\nAuto-restart: ENABLED — attempting restart..."
-                msg = (
-                    f"🚨 <b>Dashboard CRASH DETECTED</b>\n"
-                    f"Unreachable since {now}\n"
-                    f"URL: {DASHBOARD_URL}\n"
-                    f"Failed {consecutive_failures} consecutive health checks"
-                    f"{restart_info}"
-                    f"{crash_context}"
-                )
-                result = _notify(settings, "🚨 Dashboard Crash Detected", msg)
-                print(f"[WATCHDOG] {now} — CRASH ALERT SENT. Notified: {result}")
-                if crash_context:
-                    print(f"[WATCHDOG] faulthandler tail included in alert.")
+
+                if pid_crashed:
+                    # Confirmed process death — collect crash context from faulthandler log
+                    crash_context = ""
+                    fh_tail = _tail_faulthandler_log(40)
+                    if fh_tail:
+                        crash_context = f"\n\n─── faulthandler.log (last 40 lines) ───\n{fh_tail}"
+
+                    subject = "🚨 Dashboard Crash Detected (Process Terminated)"
+                    msg = (
+                        f"🚨 <b>Dashboard CRASH DETECTED</b>\n"
+                        f"Process PID {last_known_pid} has terminated.\n"
+                        f"Detected at: {now}\n"
+                        f"Failed {consecutive_failures} consecutive health checks"
+                        f"{restart_info}"
+                        f"{crash_context}"
+                    )
+                else:
+                    subject = "⚠️ Dashboard Unresponsive (High Latency)"
+                    msg = (
+                        f"⚠️ <b>Dashboard UNRESPONSIVE</b>\n"
+                        f"Process PID {last_known_pid} is still running, but HTTP health check timed out (>15s).\n"
+                        f"Unresponsive since: {now}\n"
+                        f"URL: {DASHBOARD_URL}\n"
+                        f"Failed {consecutive_failures} consecutive health checks"
+                        f"{restart_info}"
+                    )
+
+                result = _notify(settings, subject, msg)
+                print(f"[WATCHDOG] {now} — ALERT SENT ({'CRASH' if pid_crashed else 'UNRESPONSIVE'}). Notified: {result}")
                 alerted = True
 
             # Auto-restart logic

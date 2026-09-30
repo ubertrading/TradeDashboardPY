@@ -77,24 +77,40 @@ _registry_lock = threading.Lock()
 
 
 def extract_fee_symbol(comment, deal_symbol=""):
-    """Extract symbol from storage fee or fee comment if deal symbol is missing or generic."""
+    """Extract symbol(s) from storage fee or fee comment if deal symbol is missing or generic."""
     if deal_symbol and deal_symbol.upper() != "FEES":
         return deal_symbol.upper().strip()
     if not comment:
         return "FEES"
+    # Check for multiple symbols in comment (e.g. Storage Fees USDCHF. 71.00 GBPCHF. 50.00)
+    pat = re.compile(r'([A-Za-z]{3,}[A-Za-z0-9._/-]*)[.\s]+([0-9]+(?:\.[0-9]*)?)')
+    ignore_words = {'STORAGE', 'FEES', 'HOLDING', 'DAYS', 'CHARGE', 'DEBIT', 'CREDIT', 'FOR', 'TOTAL'}
+    symbols = []
+    for s, _ in pat.findall(str(comment)):
+        clean = s.strip()
+        if clean.upper().rstrip('.') not in ignore_words and any(c.isalpha() for c in clean):
+            u = clean.upper()
+            if u not in symbols:
+                symbols.append(u)
+    if len(symbols) > 1:
+        return " ".join(symbols)
+    if len(symbols) == 1:
+        return symbols[0]
+
     # Match: Storage Fees [optional Ndays] <SYMBOL> [optional volume]
     m = re.search(r'(?:storage|holding)\s+fees?\s+(?:\d+\s*days?\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
     if m:
         sym = m.group(1).strip()
-        if any(c.isalpha() for c in sym):
+        if any(c.isalpha() for c in sym) and sym.upper().rstrip('.') not in ignore_words:
             return sym.upper()
     # Match generic: Fee [for] <SYMBOL>
     m2 = re.search(r'fees?\s+(?:for\s+)?([A-Za-z0-9._/-]+)', str(comment), re.IGNORECASE)
     if m2:
         sym = m2.group(1).strip()
-        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR"):
+        if any(c.isalpha() for c in sym) and sym.upper() not in ("DEBIT", "CREDIT", "CHARGE", "FOR") and sym.upper().rstrip('.') not in ignore_words:
             return sym.upper()
     return "FEES"
+
 
 
 def _pause_all_callbacks():
@@ -1332,7 +1348,7 @@ class MT4DirectAccount:
                         })
                     else:
                         comment_upper = comment.upper()
-                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('FEE' in otype.upper())
+                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('FEE' in otype.upper()) or ('CHARGE' in otype.upper())
                         if is_fee:
                             fee_amount = profit + commission + taxes + fee
                             total_fees += fee_amount
@@ -3155,7 +3171,7 @@ class MT5DirectAccount:
                         })
                     else:
                         comment_upper = comment.upper()
-                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('fee' in deal_type)
+                        is_fee = any(kw in comment_upper for kw in fee_kw_upper) or ('fee' in deal_type) or ('charge' in deal_type)
                         if is_fee:
                             fee_amount = profit + commission + fee
                             total_fees += fee_amount

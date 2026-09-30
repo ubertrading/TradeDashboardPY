@@ -15,19 +15,16 @@ echo [1/3] Created var\watchdog.stop sentinel.
 powershell -NoProfile -Command "if (Get-Service 'TradeDashboard' -ErrorAction SilentlyContinue) { Stop-Service 'TradeDashboard' -Force -ErrorAction SilentlyContinue; Write-Host '[2/3] Stopped TradeDashboard Windows Service.' } else { Write-Host '[2/3] TradeDashboard Windows Service not running.' }"
 
 :: 3. Kill running process by PID if PID file exists
-if not exist "var\dashboard.pid" (
-    echo [3/3] No var\dashboard.pid found.
-    goto :done_pid
-)
-
-set /p DASH_PID=<"var\dashboard.pid"
-if not defined DASH_PID goto :done_pid
-
-echo [3/3] Terminating dashboard process (PID %DASH_PID%)...
-taskkill /PID %DASH_PID% /F 2>nul
-del /f /q "var\dashboard.pid" 2>nul
-
-:done_pid
+powershell -NoProfile -Command ^
+  "$pidFile = 'var\dashboard.pid';" ^
+  "if (Test-Path $pidFile) {" ^
+  "  $pid = (Get-Content $pidFile -Raw).Trim();" ^
+  "  if ($pid -match '^\d+$') {" ^
+  "    Write-Host \"[3/3] Terminating dashboard process (PID $pid)...\";" ^
+  "    taskkill /PID $pid /F 2>$null;" ^
+  "  } else { Write-Host '[3/3] Invalid PID in dashboard.pid, skipping.'; }" ^
+  "  Remove-Item $pidFile -Force -ErrorAction SilentlyContinue;" ^
+  "} else { Write-Host '[3/3] No var\dashboard.pid found.'; }"
 
 echo.
 echo Trade Dashboard stopped. Watchdog auto-restart is SUPPRESSED.
