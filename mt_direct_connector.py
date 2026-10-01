@@ -2300,6 +2300,7 @@ class MT5DirectAccount:
                 except Exception as cto_err:
                     logger.warning("[%s] Could not set ConnectTimeout: %s", self.account_id, cto_err)
 
+                _prog_handler = None
                 try:
                     def _prog_handler(sender, args):
                         p = getattr(args, 'Progress', args)
@@ -2335,10 +2336,12 @@ class MT5DirectAccount:
                     logger.warning("[%s] Connect() timed out after %ds — will retry later", self.account_id, join_timeout)
                     self._last_error = f"MT5 Connect() timed out after {join_timeout}s"
                     self._connected = False
-                    # Tear down the stuck client's .NET resources to prevent
-                    # orphaned thread pool work items from causing AccessViolationException
                     stuck = self._client
                     self._client = None
+                    try:
+                        stuck.OnConnectProgress -= _prog_handler
+                    except Exception:
+                        pass
                     try:
                         stuck.Disconnect()
                     except Exception:
@@ -2348,13 +2351,22 @@ class MT5DirectAccount:
                             stuck.Dispose()
                     except Exception:
                         pass
+                    # Give the broker 5s to fully close the TCP session before
+                    # the next attempt — without this, single-session brokers (FP Markets)
+                    # reject the next login at "waiting account info" because the old
+                    # session is still alive server-side.
+                    logger.info("[%s] Waiting 5s for server session close...", self.account_id)
+                    time.sleep(5)
                 elif connect_result[0] is not None:
                     logger.error("[%s] Connect() raised: %s", self.account_id, connect_result[0])
                     self._last_error = f"MT5 Connect() error: {connect_result[0]}"
                     self._connected = False
-                    # Immediately tear down failed client and socket so it does not hold ports/state
                     stuck = self._client
                     self._client = None
+                    try:
+                        stuck.OnConnectProgress -= _prog_handler
+                    except Exception:
+                        pass
                     try:
                         stuck.Disconnect()
                     except Exception:
@@ -2364,6 +2376,12 @@ class MT5DirectAccount:
                             stuck.Dispose()
                     except Exception:
                         pass
+                    # Give the broker 5s to fully close the TCP session before
+                    # the next attempt — without this, single-session brokers (FP Markets)
+                    # reject the next login at "waiting account info" because the old
+                    # session is still alive server-side.
+                    logger.info("[%s] Waiting 5s for server session close...", self.account_id)
+                    time.sleep(5)
                 else:
                     _is_connected = self._client.Connected
 
