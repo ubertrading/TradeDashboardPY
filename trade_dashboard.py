@@ -26,11 +26,290 @@ import os
 import subprocess
 import importlib.util
 
+def _log_startup(msg):
+    """Log startup message to console and directly to logs/dashboard.log before Flask logging initializes."""
+    print(msg, flush=True)
+    try:
+        _d = os.path.dirname(os.path.abspath(__file__))
+        _ld = os.path.join(_d, "logs")
+        os.makedirs(_ld, exist_ok=True)
+        with open(os.path.join(_ld, "dashboard.log"), "a", encoding="utf-8") as _f:
+            from datetime import datetime
+            _f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} [STARTUP] {msg}\n")
+    except Exception:
+        pass
+
+# ─── .NET Runtime Presence Check & Auto-Installer ───────────────────────────
+# pythonnet (used by MT4/MT5 direct connectors) requires .NET 8+ to be
+# installed on the host. On a fresh server this is often missing and produces
+# the cryptic "CLR failed to initialize" error. We detect and offer to fix it
+# here, before any third-party imports run.
+
+_DOTNET_MIN_MAJOR = 8  # minimum .NET major version required by the DLLs
+
+# Microsoft's stable redirect URLs — always resolve to the latest patch of the
+# given major.minor release band (see https://aka.ms/dotnet-download).
+# MtBridgeService.exe is built with Microsoft.NET.Sdk.Web and therefore requires
+# Microsoft.AspNetCore.App (not just the base .NET runtime).  The ASP.NET Core
+# Runtime installer is a superset — it satisfies both the bridge AND pythonnet.
+_DOTNET_RUNTIME_URLS = {
+    "x64":   "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe",
+    "x86":   "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x86.exe",
+    "arm64": "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-arm64.exe",
+}
+
+
+def _detect_dotnet_runtimes():
+    """Return list of (name, major, minor) tuples for all installed .NET runtimes.
+
+    Tries three detection methods in order:
+    1. ``dotnet --list-runtimes`` CLI  (fastest, most reliable)
+    2. ``clr_loader.find_runtimes()`` (works even without dotnet on PATH)
+    3. Known Windows Registry / filesystem locations (last-resort)
+    """
+    import re
+
+    runtimes = []
+
+    # --- Method 1: dotnet CLI ---
+    try:
+        res = subprocess.run(
+            ["dotnet", "--list-runtimes"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                # e.g.  "Microsoft.NETCore.App 8.0.17 [C:\...]"
+                m = re.match(r"(\S+)\s+(\d+)\.(\d+)", line.strip())
+                if m:
+                    runtimes.append((m.group(1), int(m.group(2)), int(m.group(3))))
+    except Exception:
+        pass
+
+    if runtimes:
+        return runtimes
+
+    # --- Method 2: clr_loader ---
+    try:
+        import clr_loader  # ships with pythonnet
+        for rt in clr_loader.find_runtimes():
+            m = re.match(r"(\d+)\.(\d+)", getattr(rt, "version", "") or "")
+            if m:
+                runtimes.append((getattr(rt, "name", "Microsoft.NETCore.App"),
+                                 int(m.group(1)), int(m.group(2))))
+    except Exception:
+        pass
+
+    if runtimes:
+        return runtimes
+
+    # --- Method 3: filesystem probe ---
+    candidates = [
+        r"C:\Program Files\dotnet\shared\Microsoft.NETCore.App",
+        r"C:\Program Files (x86)\dotnet\shared\Microsoft.NETCore.App",
+    ]
+    for base in candidates:
+        if os.path.isdir(base):
+            try:
+                for entry in os.listdir(base):
+                    m = re.match(r"(\d+)\.(\d+)", entry)
+                    if m:
+                        runtimes.append(("Microsoft.NETCore.App",
+                                         int(m.group(1)), int(m.group(2))))
+            except OSError:
+                pass
+
+    return runtimes
+
+
+def _dotnet_runtime_ok():
+    """Return True if a suitable .NET runtime (>= _DOTNET_MIN_MAJOR) is found.
+
+    We check for Microsoft.AspNetCore.App specifically because MtBridgeService.exe
+    is an SDK.Web app and needs AspNetCore — the base NETCore.App alone isn't enough.
+    """
+    for name, major, _minor in _detect_dotnet_runtimes():
+        if name == "Microsoft.AspNetCore.App" and major >= _DOTNET_MIN_MAJOR:
+            return True
+    return False
+
+
+def _prompt_install_dotnet(timeout_seconds=30):
+    """Prompt the user (or auto-accept after *timeout_seconds* for headless/service runs).
+
+    Returns True if the user (or timeout) chose to install, False otherwise.
+    """
+    msg = (
+        "\n"
+        "╔══════════════════════════════════════════════════════════════════╗\n"
+        "║     ⚠  MISSING DEPENDENCY: ASP.NET Core Runtime                 ║\n"
+        "╠══════════════════════════════════════════════════════════════════╣\n"
+        "║  The Trade Dashboard requires the Microsoft ASP.NET Core        ║\n"
+        f"║  {_DOTNET_MIN_MAJOR}.x Runtime (needed by MtBridgeService + pythonnet).      ║\n"
+        "║  It was NOT found on this machine.                               ║\n"
+        "║                                                                  ║\n"
+        "║  Without it you will see:                                        ║\n"
+        "║    • pythonnet CLR failed to initialize                          ║\n"
+        "║    • MtBridgeService exits immediately (no frameworks found)     ║\n"
+        "║                                                                  ║\n"
+        "║  The installer will be downloaded from Microsoft and run         ║\n"
+        f"║  silently (~30 MB).  Download URL:                              ║\n"
+        "║    https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe     ║\n"
+        "╚══════════════════════════════════════════════════════════════════╝\n"
+    )
+    print(msg, flush=True)
+
+    # Detect whether we have an interactive console (no console in service mode)
+    is_interactive = sys.stdin is not None and sys.stdin.isatty()
+
+    if not is_interactive:
+        print(
+            f"[STARTUP] Running non-interactively (service/headless). "
+            f"Auto-installing .NET {_DOTNET_MIN_MAJOR} runtime in {timeout_seconds}s "
+            f"(set DOTNET_AUTO_INSTALL=0 to suppress)...",
+            flush=True,
+        )
+        if os.environ.get("DOTNET_AUTO_INSTALL", "1").strip() == "0":
+            print("[STARTUP] DOTNET_AUTO_INSTALL=0 — skipping .NET install.", flush=True)
+            return False
+        return True
+
+    # Interactive: timed prompt using msvcrt on Windows
+    try:
+        import msvcrt
+        import time
+        print(
+            f"  Install .NET {_DOTNET_MIN_MAJOR} Runtime now? "
+            f"[Y/n]  (auto-YES in {timeout_seconds}s) ",
+            end="", flush=True,
+        )
+        deadline = time.monotonic() + timeout_seconds
+        response = ""
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print("", flush=True)
+                    break
+                if ch in ("\x03", "\x1b"):   # Ctrl-C / Esc → decline
+                    print("\n[STARTUP] .NET install skipped by user.", flush=True)
+                    return False
+                response += ch
+                print(ch, end="", flush=True)
+            else:
+                time.sleep(0.1)
+        else:
+            print(" (timed out — proceeding with install)", flush=True)
+    except Exception:
+        # Fallback: blocking input with no timeout
+        try:
+            response = input(f"Install .NET {_DOTNET_MIN_MAJOR} Runtime now? [Y/n] ").strip()
+        except Exception:
+            response = ""
+
+    return response.lower() not in ("n", "no")
+
+
+def _install_dotnet_runtime():
+    """Download and silently install the .NET 8 runtime. Returns True on success."""
+    import tempfile
+    import platform
+
+    machine = platform.machine().lower()
+    if "arm" in machine:
+        url = _DOTNET_RUNTIME_URLS["arm64"]
+    elif platform.architecture()[0] == "32bit":
+        url = _DOTNET_RUNTIME_URLS["x86"]
+    else:
+        url = _DOTNET_RUNTIME_URLS["x64"]
+
+    tmp_dir = tempfile.mkdtemp(prefix="dotnet_installer_")
+    installer_path = os.path.join(tmp_dir, "dotnet_runtime_installer.exe")
+
+    _log_startup(f"Downloading .NET runtime installer from:\n  {url}")
+    try:
+        # Use urllib so we have no third-party dep at this stage
+        import urllib.request
+        urllib.request.urlretrieve(url, installer_path)
+        size_mb = os.path.getsize(installer_path) / (1024 * 1024)
+        _log_startup(f"Download complete ({size_mb:.1f} MB). Running installer...")
+    except Exception as e:
+        _log_startup(f"❌ Download failed: {e}")
+        _log_startup(
+            f"Please install .NET {_DOTNET_MIN_MAJOR}.x Runtime manually:\n"
+            f"  https://dotnet.microsoft.com/download/dotnet/{_DOTNET_MIN_MAJOR}.0\n"
+            f"  (Direct link: {url})"
+        )
+        return False
+
+    try:
+        result = subprocess.run(
+            [installer_path, "/install", "/quiet", "/norestart"],
+            timeout=300,
+        )
+        if result.returncode in (0, 3010):   # 3010 = success, reboot required
+            _log_startup(
+                f"✅ .NET {_DOTNET_MIN_MAJOR} Runtime installed successfully"
+                + (" (reboot may be required)" if result.returncode == 3010 else "")
+                + "."
+            )
+            return True
+        else:
+            _log_startup(
+                f"⚠ .NET installer exited with code {result.returncode}. "
+                f"If the error persists, install manually from:\n"
+                f"  https://dotnet.microsoft.com/download/dotnet/{_DOTNET_MIN_MAJOR}.0"
+            )
+            return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        _log_startup("❌ .NET installer timed out after 5 minutes.")
+        return False
+    except Exception as e:
+        _log_startup(f"❌ Failed to run .NET installer: {e}")
+        return False
+    finally:
+        try:
+            os.remove(installer_path)
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+
+def _check_dotnet_runtime():
+    """Check for ASP.NET Core runtime and automatically install it if missing."""
+    if _dotnet_runtime_ok():
+        return  # All good — normal path, zero overhead
+
+    if os.environ.get("DOTNET_AUTO_INSTALL", "1").strip() == "0":
+        _log_startup(
+            f"⚠ ASP.NET Core {_DOTNET_MIN_MAJOR} Runtime not installed (DOTNET_AUTO_INSTALL=0). "
+            f"Download: https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe"
+        )
+        return
+
+    _log_startup(
+        f"⚠ Missing ASP.NET Core {_DOTNET_MIN_MAJOR} Runtime (required by MtBridgeService & MT connectors).\n"
+        f"Automatically downloading and installing ASP.NET Core {_DOTNET_MIN_MAJOR} Runtime..."
+    )
+    installed = _install_dotnet_runtime()
+    if installed:
+        _log_startup(f"✅ ASP.NET Core {_DOTNET_MIN_MAJOR} Runtime installed successfully.")
+    else:
+        _log_startup(
+            f"❌ Failed to auto-install ASP.NET Core {_DOTNET_MIN_MAJOR}. "
+            f"Please download and run manually: https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe"
+        )
+
+
+
 # ─── Self-Bootstrapping Dependency Auto-Installer ───────────────────────────
 # Automatically checks and installs all required dependencies on startup
 # (especially on production or clean machines) before any third-party imports.
 def _bootstrap_dependencies():
     """Ensure all required third-party packages are installed before app startup."""
+    # Check for .NET runtime first — pythonnet will silently fail without it.
+    _check_dotnet_runtime()
+
     required_packages = {
         "flask": "Flask",
         "requests": "requests",
@@ -39,6 +318,12 @@ def _bootstrap_dependencies():
         "pandas": "pandas",
         "tzdata": "tzdata",
         "colorama": "colorama",
+        # pythonnet is required for MT4/MT5 direct (in-process) connections.
+        # clr_loader ships with pythonnet but list it explicitly so it's always present.
+        "pythonnet": "pythonnet",
+        "clr_loader": "clr_loader",
+        # FIX connector dependencies
+        "simplefix": "simplefix",
     }
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,29 +340,29 @@ def _bootstrap_dependencies():
             missing_pkgs.append(pip_name)
 
     if missing_pkgs:
-        print(f"[STARTUP] Missing packages detected: {missing_pkgs}. Auto-installing dependencies...")
+        _log_startup(f"Missing packages detected: {missing_pkgs}. Auto-installing dependencies...")
         try:
             if req_file_to_use:
-                print(f"[STARTUP] Installing dependencies from {os.path.basename(req_file_to_use)} ...")
+                _log_startup(f"Installing dependencies from {os.path.basename(req_file_to_use)} ...")
                 res = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "-r", req_file_to_use],
                     capture_output=True, text=True, timeout=300
                 )
                 if res.returncode == 0:
-                    print("[STARTUP] All requirements installed successfully.")
+                    _log_startup("All requirements installed successfully.")
                 else:
-                    print(f"[STARTUP] pip install -r returned code {res.returncode}")
+                    _log_startup(f"pip install -r returned code {res.returncode}")
             for pkg in missing_pkgs:
                 mod_for_pkg = next((m for m, p in required_packages.items() if p == pkg), pkg)
                 if importlib.util.find_spec(mod_for_pkg) is None:
-                    print(f"[STARTUP] Installing missing package: {pkg} ...")
+                    _log_startup(f"Installing missing package: {pkg} ...")
                     subprocess.run(
                         [sys.executable, "-m", "pip", "install", pkg],
                         capture_output=True, text=True, timeout=180
                     )
             importlib.invalidate_caches()
         except Exception as e:
-            print(f"[STARTUP] Error during dependency auto-installation: {e}")
+            _log_startup(f"Error during dependency auto-installation: {e}")
 
 _bootstrap_dependencies()
 
@@ -1898,6 +2183,8 @@ threading.Thread(target=_swap_delta_loop, daemon=True, name="SwapDelta").start()
 
 def _optimal_fund_email_loop():
     """Background thread: send daily optimal fund distribution summary."""
+    # Wait for accounts to finish connecting before first email attempt
+    time.sleep(300)
     while True:
         try:
             if not dashboard_settings.get("fund_email_enabled", True):
@@ -2018,10 +2305,16 @@ _load_swap_baselines()
 
 def _swap_alert_loop():
     """Periodically check swap rates on tracked instruments and alert on change."""
-    time.sleep(90)  # Initial delay to let accounts connect and populate _symbol_cache
+    # Delay 5 minutes to let initial batch connect finish cleanly
+    time.sleep(300)
     _empty_retries = 0
     while True:
         try:
+            import mt_direct_connector
+            if getattr(mt_direct_connector, '_is_batch_connecting', False):
+                time.sleep(15)
+                continue
+
             enabled = dashboard_settings.get("swap_alert_enabled", False)
             instruments_str = dashboard_settings.get("swap_alert_instruments", "")
             interval_min = dashboard_settings.get("swap_alert_interval_min", 60)
@@ -2234,9 +2527,9 @@ try:
         _fix_dashboard_data,
         config_dir=TRADE_CONFIG_DIR
     )
-except ImportError:
+except Exception as e:
     fix_manager = None
-    app.logger.warning("fix_connector not available — FIX accounts disabled")
+    app.logger.warning("fix_connector not available — FIX accounts disabled (%s: %s)", type(e).__name__, e)
 
 # ─── MT Direct Account Manager ─────────────────────────────────────────────
 try:
@@ -5407,9 +5700,6 @@ _save_daily_statements = _save_full_statements
 def _daily_statements_loop():
     """Background thread: save full account statements once per day at midnight."""
     import time as _time
-    # Initial run after a delay so connections can settle on startup
-    _time.sleep(30)
-    _save_full_statements()
     while True:
         now      = datetime.now()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
@@ -10749,7 +11039,7 @@ def _should_issue_command(session, account):
                 continue  # No limit configured for this side
             s_max_spread_int = int(float(s_max_spread))
 
-            instrument = (s_info.get("pair") or session.get("pair", "")).upper()
+            instrument = str(s_info.get("pair") or session.get("pair", "")).strip()
             ei = ea_account_info.get(acc, {})
             bid = 0
             ask = 0
@@ -10921,7 +11211,7 @@ def _should_issue_command(session, account):
             if s_max_spread is not None and s_max_spread != "":
                 s_max_spread_int = int(float(s_max_spread))
                 
-                instrument = (s_info.get("pair") or session.get("pair", "")).upper()
+                instrument = str(s_info.get("pair") or session.get("pair", "")).strip()
                 ei = ea_account_info.get(acc, {})
                 bid = 0
                 ask = 0
@@ -11512,7 +11802,7 @@ def _should_issue_command(session, account):
             # Use get_quote_direct for reliable instrument-specific quotes.
             # get_symbol_info reads from _symbol_cache which can return wrong-instrument
             # data (e.g. EURUSD values for a USDJPY lookup) due to cache keying issues.
-            instrument = (side_info.get("pair") or session.get("pair", "")).upper()
+            instrument = str(side_info.get("pair") or session.get("pair", "")).strip()
             direct_acct = mt_direct_manager.accounts.get(account) if mt_direct_manager else None
             if direct_acct and instrument:
                 try:
@@ -18248,11 +18538,51 @@ body.popout-strategy .cycle-reminder-banner,
 #accountNameFilterInput:focus { border-color: var(--accent); background: var(--bg); }
 #accountNameFilterInput::placeholder { color: var(--text2); opacity: 0.8; font-weight: 600; text-transform: uppercase; }
 .accounts-table td {
-  padding: var(--acct-row-pad, 5px) 8px; font-size: 0.85rem;
+  padding: var(--acct-row-pad, 5px) 6px; font-size: var(--acct-row-fz, 0.85rem);
+  line-height: var(--acct-row-lh, 1.25);
   border-bottom: 1px solid var(--border); vertical-align: middle;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .accounts-table tr:hover td { background: var(--surface2); }
+.acct-stat-pill {
+  min-height: var(--acct-badge-h, 16px);
+  height: var(--acct-badge-h, 16px);
+  font-size: var(--acct-badge-fz, 0.72rem);
+  border-radius: 3px;
+  margin: 0 2px;
+  padding: 0 4px;
+  text-align: center;
+  white-space: nowrap;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.accounts-table td .btn {
+  padding: var(--acct-btn-pad, 2px 8px) !important;
+  font-size: 0.7rem !important;
+  height: var(--acct-badge-h, 16px);
+  line-height: 1;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.accounts-table td .inl {
+  height: var(--acct-badge-h, 16px);
+  line-height: var(--acct-badge-h, 16px);
+  padding: 0 3px;
+  font-size: var(--acct-row-fz, 0.8rem);
+  box-sizing: border-box;
+}
+.accounts-table td input[type="checkbox"] {
+  margin: 0;
+  vertical-align: middle;
+  height: 13px;
+  width: 13px;
+}
 .conn-dot {
   width: 8px; height: 8px; border-radius: 50%; display: inline-block;
   margin-right: 6px; vertical-align: middle;
@@ -18501,7 +18831,7 @@ body.popout-strategy .cycle-reminder-banner,
         </div>
         <label style="display:flex;align-items:center;gap:5px;font-size:0.78rem;color:var(--text2);user-select:none;" title="Adjust row height / line spacing">
           Density
-          <input type="range" id="acctRowDensitySlider" min="1" max="14" step="1" value="5"
+          <input type="range" id="acctRowDensitySlider" min="0" max="14" step="1" value="5"
             style="width:70px;accent-color:var(--accent);cursor:pointer;"
             oninput="applyAcctRowDensity(this.value)">
         </label>
@@ -18521,11 +18851,11 @@ body.popout-strategy .cycle-reminder-banner,
           Recalc
         </button>
       </div>
-      <div style="display:flex;gap:8px;">
-        <button class="btn btn-primary" onclick="showAddAccountModal()" style="padding:6px 16px;font-size:0.8rem;">+ Add EA Account</button>
-        <button class="btn" onclick="showAddFixAccountModal()" style="padding:6px 16px;font-size:0.8rem;background:var(--accent);color:white;">+ Add API Account</button>
-        <button class="btn" onclick="showAddMTDirectModal()" style="padding:6px 16px;font-size:0.8rem;background:#6366f1;color:white;">+ Add MT Direct</button>
-        <button class="btn" onclick="showAddIForexModal()" style="padding:6px 16px;font-size:0.8rem;background:#f59e0b;color:white;">+ Add iFOREX</button>
+      <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+        <button class="btn btn-primary" onclick="showAddAccountModal()" style="padding:3px 10px;font-size:0.75rem;line-height:1.2;white-space:nowrap;height:24px;border-radius:5px;">+ Add EA Account</button>
+        <button class="btn" onclick="showAddFixAccountModal()" style="padding:3px 10px;font-size:0.75rem;line-height:1.2;white-space:nowrap;height:24px;border-radius:5px;background:var(--accent);color:white;">+ Add API Account</button>
+        <button class="btn" onclick="showAddMTDirectModal()" style="padding:3px 10px;font-size:0.75rem;line-height:1.2;white-space:nowrap;height:24px;border-radius:5px;background:#6366f1;color:white;">+ Add MT Direct</button>
+        <button class="btn" onclick="showAddIForexModal()" style="padding:3px 10px;font-size:0.75rem;line-height:1.2;white-space:nowrap;height:24px;border-radius:5px;background:#f59e0b;color:white;">+ Add iFOREX</button>
       </div>
     </div>
     <div style="overflow-x:auto;">
@@ -21071,17 +21401,57 @@ function applyAcctColVisibility() {
 }
 
 // ─── Row density (line spacing) ───────────────────────────────────────────────
+function applyAcctRowDensity(v) {
+  const pad = Math.max(0, parseInt(v, 10) || 0);
+  document.documentElement.style.setProperty('--acct-row-pad', pad + 'px');
+  
+  let lh, fz, btnPad, badgeH, badgeFz;
+  if (pad === 0) {
+    lh = '1.05';
+    fz = '0.78rem';
+    btnPad = '0px 3px';
+    badgeH = '13px';
+    badgeFz = '0.67rem';
+  } else if (pad === 1) {
+    lh = '1.12';
+    fz = '0.80rem';
+    btnPad = '1px 4px';
+    badgeH = '14px';
+    badgeFz = '0.69rem';
+  } else if (pad === 2) {
+    lh = '1.18';
+    fz = '0.82rem';
+    btnPad = '1px 5px';
+    badgeH = '15px';
+    badgeFz = '0.71rem';
+  } else if (pad <= 4) {
+    lh = '1.22';
+    fz = '0.84rem';
+    btnPad = '2px 6px';
+    badgeH = '16px';
+    badgeFz = '0.72rem';
+  } else {
+    lh = '1.25';
+    fz = '0.85rem';
+    btnPad = '2px 8px';
+    badgeH = (Math.min(22, 16 + (pad - 5))) + 'px';
+    badgeFz = '0.73rem';
+  }
+  
+  document.documentElement.style.setProperty('--acct-row-lh', lh);
+  document.documentElement.style.setProperty('--acct-row-fz', fz);
+  document.documentElement.style.setProperty('--acct-btn-pad', btnPad);
+  document.documentElement.style.setProperty('--acct-badge-h', badgeH);
+  document.documentElement.style.setProperty('--acct-badge-fz', badgeFz);
+  localStorage.setItem('acctRowDensity', v);
+}
 (function() {
   const saved = localStorage.getItem('acctRowDensity');
   const v = saved != null ? saved : '5';
-  document.documentElement.style.setProperty('--acct-row-pad', v + 'px');
+  applyAcctRowDensity(v);
   const slider = document.getElementById('acctRowDensitySlider');
   if (slider) slider.value = v;
 })();
-function applyAcctRowDensity(v) {
-  document.documentElement.style.setProperty('--acct-row-pad', v + 'px');
-  localStorage.setItem('acctRowDensity', v);
-}
 
 // ─── Accounts table autofit (content-only) ──────────────────────────────────
 // ─── Accounts table autofit (fit within container) ─────────────────────────
@@ -25335,7 +25705,7 @@ async function toggleAccountHidden(id, val) {
 // Styled NOP/FM cell
 function _nopFmCell(ratioStr) {
   if (ratioStr === '-' || ratioStr == null) return '<td style="font-weight:600;color:var(--text2);text-align:center;">-</td>';
-  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);"><span style="color:#ef4444;font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="Margin call territory!">MAX</span></td>';
+  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);padding:0;"><span style="color:#ef4444;font-weight:700;font-size:var(--acct-badge-fz, 0.72rem);line-height:var(--acct-badge-h, 16px);animation:pulse-alert 1s infinite;" title="Margin call territory!">MAX</span></td>';
   
   const val = parseFloat(ratioStr);
   if (isNaN(val)) return `<td style="font-weight:600;color:var(--text2);text-align:center;">${ratioStr}</td>`;
@@ -25348,7 +25718,7 @@ function _nopFmCell(ratioStr) {
   else                { barColor = '#ef4444'; textColor = '#1a1a1a'; weight = '700'; } // red
   
   return `<td style="padding:0;">
-    <div style="background:${barColor};color:${textColor};border-radius:3px;margin:2px 4px;padding:2px 4px;text-align:center;font-weight:${weight};font-size:0.75rem;white-space:nowrap;">
+    <div class="acct-stat-pill" style="background:${barColor};color:${textColor};font-weight:${weight};">
       ${val.toFixed(0)}x
     </div>
   </td>`;
@@ -25357,7 +25727,7 @@ function _nopFmCell(ratioStr) {
 // Styled NOP/Eqty cell (Notional / Equity)
 function _nopEqCell(ratioStr) {
   if (ratioStr === '-' || ratioStr == null) return '<td style="font-weight:600;color:var(--text2);text-align:center;">-</td>';
-  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);"><span style="color:#ef4444;font-weight:700;font-size:0.78rem;animation:pulse-alert 1s infinite;" title="No equity!">MAX</span></td>';
+  if (ratioStr === 'MAX') return '<td style="text-align:center;background:rgba(239,68,68,0.25);padding:0;"><span style="color:#ef4444;font-weight:700;font-size:var(--acct-badge-fz, 0.72rem);line-height:var(--acct-badge-h, 16px);animation:pulse-alert 1s infinite;" title="No equity!">MAX</span></td>';
 
   const val = parseFloat(ratioStr);
   if (isNaN(val)) return `<td style="font-weight:600;color:var(--text2);text-align:center;">${ratioStr}</td>`;
@@ -25370,7 +25740,7 @@ function _nopEqCell(ratioStr) {
   else                { barColor = '#ef4444'; textColor = '#1a1a1a'; weight = '700'; } // red (>250)
 
   return `<td style="padding:0;" title="Effective Leverage: how much dollar loss will I take if the market moves 1% against me?">
-    <div style="background:${barColor};color:${textColor};border-radius:3px;margin:2px 4px;padding:2px 4px;text-align:center;font-weight:${weight};font-size:0.75rem;white-space:nowrap;">
+    <div class="acct-stat-pill" style="background:${barColor};color:${textColor};font-weight:${weight};">
       ${val.toFixed(0)}x
     </div>
   </td>`;
@@ -25530,10 +25900,10 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     const tooltip = `~${ptmc.toLocaleString(undefined,{maximumFractionDigits:0})} pips (${adrMult.toFixed(2)} ADRs, ADR=${adr}pip, ${solPct}${sym ? ', ' + sym : ''})`;
 
     return `<td style="padding:0;" title="${tooltip}">
-      <div style="position:relative;overflow:hidden;border-radius:3px;margin:2px 4px;">
-        <div style="position:absolute;inset:0;background:${barColor};opacity:0.22;"></div>
+      <div class="acct-stat-pill" style="position:relative;overflow:hidden;background:transparent;margin:0 2px;">
+        <div style="position:absolute;inset:0;background:${barColor};opacity:0.22;border-radius:3px;"></div>
         <div style="position:absolute;top:0;left:0;height:100%;width:${fillPct.toFixed(1)}%;background:${barColor};opacity:0.55;border-radius:3px 0 0 3px;"></div>
-        <div style="position:relative;z-index:1;text-align:center;padding:2px 4px;color:${textColor};font-weight:${weight};font-size:0.75rem;white-space:nowrap;">${pipsStr}&thinsp;<span style="opacity:0.75;font-size:0.7rem;">${adrStr}</span></div>
+        <div style="position:relative;z-index:1;color:${textColor};font-weight:${weight};font-size:var(--acct-badge-fz, 0.72rem);white-space:nowrap;">${pipsStr}&thinsp;<span style="opacity:0.75;font-size:0.68rem;">${adrStr}</span></div>
       </div>
     </td>`;
   }

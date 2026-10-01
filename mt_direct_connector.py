@@ -27,15 +27,30 @@ _clr_loaded = False
 _mt4_asm = None
 _mt5_asm = None
 _clr_lock = threading.Lock()  # Global lock: pythonnet is NOT thread-safe for .NET iteration
-# Single lock for connection serialization: even though MT4ServerAPI.dll and
-# mt5api.dll have separate static buffers, they share the CLR thread pool and
-# async infrastructure.  Parallel Connect() calls overwhelm the shared .NET
-# thread pool causing CLR corruption (0x80131506).
-_mt_connect_lock = threading.Lock()
-# Per-platform locks for deferred event subscription only (lighter operations
-# that don't stress the shared thread pool).
+# Separate locks for MT4 and MT5 connection serialization.
+# MT4 (MT4ServerAPI.dll) and MT5 (mt5api.dll) have isolated DLL namespaces
+# and memory spaces. Running MT4 and MT5 connection batches concurrently
+# cuts startup time significantly while maintaining single-account serialization
+# within each platform.
+#
+# Per-server MT5 locks: accounts on DIFFERENT broker servers connect in parallel;
+# accounts on the SAME server still serialize to avoid shared MT5API static state.
 _mt4_connect_lock = threading.Lock()
+_mt5_server_locks_lock = threading.Lock()   # Protects the dict itself
+_mt5_server_locks: dict = {}                # server_key -> threading.Lock()
+
+def _get_mt5_server_lock(server: str) -> threading.Lock:
+    """Return (creating if needed) a per-server connect lock for MT5."""
+    key = server.lower().strip()
+    with _mt5_server_locks_lock:
+        if key not in _mt5_server_locks:
+            _mt5_server_locks[key] = threading.Lock()
+        return _mt5_server_locks[key]
+
+# Legacy alias kept for any external references — maps to a dummy lock that is
+# never actually acquired (per-server locks are used in start() instead).
 _mt5_connect_lock = threading.Lock()
+_mt_connect_lock = _mt5_connect_lock  # Backwards compatibility alias
 DLL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MT-DLLS")
 
 # ─── Per-platform callback suppression gates ────────────────────────────────
@@ -44,8 +59,52 @@ DLL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MT-DLLS")
 # Split per-platform: MT4 callbacks don't need suppression during MT5 connects.
 _mt4_init_gate = threading.Event()
 _mt4_init_gate.set()
-_mt5_init_gate = threading.Event()
-_mt5_init_gate.set()
+# Per-account set of account_ids currently inside Connect() — replaces the
+# single _mt5_init_gate so that accounts on different servers don't block each
+# other's heartbeats. _mt5_init_gate is retained as a compat shim that reads
+# from this set.
+_mt5_connecting_accounts: set = set()
+_mt5_connecting_lock = threading.Lock()  # Protects _mt5_connecting_accounts
+
+class _MT5InitGateCompat:
+    """Compat shim: behaves like threading.Event but reflects the per-account
+    connecting set. is_set() returns True only when no MT5 account is currently
+    in Connect(). set()/clear() are kept for legacy call sites that pass a
+    specific account_id to the real helpers."""
+    def is_set(self):
+        with _mt5_connecting_lock:
+            return len(_mt5_connecting_accounts) == 0
+    def set(self):
+        pass   # No-op — real set/clear is done via _mt5_gate_enter/_exit
+    def clear(self):
+        pass   # No-op
+
+_mt5_init_gate = _MT5InitGateCompat()
+
+def _mt5_gate_enter(account_id: str):
+    """Mark account_id as currently connecting (suppresses its heartbeat)."""
+    with _mt5_connecting_lock:
+        _mt5_connecting_accounts.add(account_id)
+
+def _mt5_gate_exit(account_id: str):
+    """Mark account_id as done connecting (re-enables its heartbeat)."""
+    with _mt5_connecting_lock:
+        _mt5_connecting_accounts.discard(account_id)
+
+def _mt5_account_is_connecting(account_id: str) -> bool:
+    """True while account_id is inside Connect() (heartbeats should pause)."""
+    with _mt5_connecting_lock:
+        return account_id in _mt5_connecting_accounts
+
+def _is_init_gate_set():
+    """True when no account (MT4 or MT5) is actively connecting.
+    MT4 and MT5 share the same CLR thread pool in pythonnet, so all background
+    heartbeats must pause while any account is in Connect() handshake.
+    """
+    return _mt4_init_gate.is_set() and _mt5_init_gate.is_set()
+
+# Flag set while initial batch connection is running to defer heavy history/statement downloads
+_is_batch_connecting = False
 
 # ─── Quote-driven command loop wakeup ────────────────────────────────────
 # Signaled by any MT4/MT5 _on_quote callback so the command loop wakes
@@ -64,6 +123,28 @@ _heartbeat_sem = threading.Semaphore(1)
 
 # C# QuoteBuffer shim instance — initialized in _load_clr() if QuoteBuffer.dll exists
 _quote_buffer = None
+
+# Currencies recognized as valid Forex pairs (base + quote)
+_FX_CURRENCIES = {
+    "USD", "EUR", "GBP", "CHF", "JPY", "AUD", "CAD", "NZD",
+    "SGD", "HKD", "NOK", "SEK", "ZAR", "MXN", "PLN", "TRY",
+    "HUF", "CZK", "CNH", "XAU", "XAG"
+}
+
+def _is_forex_or_tracked(sym_str, tracked_set=None):
+    """Return True if symbol is an explicit tracked instrument or a standard Forex pair.
+    Filters out hundreds of stock CFDs (AAPL, TSLA, etc.) to prevent CPU starvation."""
+    s = str(sym_str).strip().upper()
+    if not s:
+        return False
+    if tracked_set and s in tracked_set:
+        return True
+    clean = "".join(c for c in s if c.isalnum())
+    if tracked_set and (clean in tracked_set or clean[:6] in tracked_set):
+        return True
+    if len(clean) >= 6 and clean[:3] in _FX_CURRENCIES and clean[3:6] in _FX_CURRENCIES:
+        return True
+    return False
 
 
 # ─── Active account registry for connection-time callback pause/resume ──────
@@ -160,8 +241,8 @@ def _unregister_account(acct):
 
 # ─── Auto-reconnect constants ───────────────────────────────────────────────
 RECONNECT_BASE_DELAY = 5      # initial wait (seconds)
-RECONNECT_MAX_DELAY  = 120    # cap (2min — keeps retrying steadily during outages)
-RECONNECT_BACKOFF    = 2.0    # multiplier per failed attempt
+RECONNECT_MAX_DELAY  = 30     # cap (30s max — faster recovery without long idle gaps)
+RECONNECT_BACKOFF    = 1.5    # multiplier per failed attempt (5s -> 7s -> 11s -> 16s -> 25s -> 30s)
 
 
 def _parse_open_time(ot):
@@ -315,8 +396,19 @@ def _load_clr():
         logger.error("pythonnet not installed: %s. Install with: pip install pythonnet", e)
         return False
     except Exception as e:
-        logger.error("Failed to load MT DLLs: %s (%s)", e, type(e).__name__)
+        err_str = str(e).lower()
+        # Distinguish missing .NET runtime from other CLR issues so the log is actionable.
+        if any(kw in err_str for kw in ("coreclr", "runtime", "clr", "dotnet", "net framework")):
+            logger.error(
+                "Failed to initialize .NET CLR: %s (%s). "
+                "This usually means the .NET 8 Runtime is not installed on this server. "
+                "Download it from: https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe",
+                e, type(e).__name__,
+            )
+        else:
+            logger.error("Failed to load MT DLLs: %s (%s)", e, type(e).__name__)
         return False
+
 
 
 # ─── Normalize ticket (same as dashboard) ───────────────────────────────────
@@ -389,6 +481,18 @@ class MT4DirectAccount:
         """Unsubscribe .NET event handlers. Safe to call multiple times."""
         if not self._events_subscribed or not self._client:
             return
+        # Remove from QuoteBuffer FIRST (C# side) — this stops new callbacks
+        # from being dispatched before we touch the .NET event list, preventing
+        # the CLR access violation from concurrent OnQuote dispatch.
+        global _quote_buffer
+        if _quote_buffer is not None:
+            try:
+                _quote_buffer.RemoveAccount(self.account_id)
+            except Exception:
+                pass
+        # Brief yield so any in-flight C# callback completes before we
+        # modify the delegate list.
+        time.sleep(0.05)
         try:
             self._client.OnQuote -= self._on_quote
         except Exception:
@@ -409,6 +513,11 @@ class MT4DirectAccount:
         subscribe immediately. The C# handlers are thread-safe and don't
         involve pythonnet dispatch."""
         if self._connected and self._running:
+            if _quote_buffer is not None:
+                try:
+                    _quote_buffer.CheckAndClearDisconnect(self.account_id)
+                except Exception:
+                    pass
             self._subscribe_events()
             logger.info("[%s] Events subscribed (immediate via QuoteBuffer)", self.account_id)
 
@@ -419,9 +528,14 @@ class MT4DirectAccount:
         # always starts — it handles auto-reconnect on failure.
         self._running = True
         if not _load_clr():
-            self._last_error = "pythonnet CLR failed to initialize — check server logs for details. Ensure .NET runtime is installed."
+            self._last_error = (
+                "pythonnet CLR failed to initialize — check server logs for details. "
+                "Ensure .NET 8 Runtime is installed: "
+                "https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe"
+            )
             logger.error("[%s] Cannot start — %s", self.account_id, self._last_error)
             return False
+
 
         try:
             from TradingAPI.MT4Server import QuoteClient, Op, PlacedType
@@ -446,9 +560,12 @@ class MT4DirectAccount:
             # Gate suppresses heartbeat + callback processing on the Python side
             # during connect. We do NOT pause/resume other accounts' .NET event
             # handlers — doing so corrupts their IO completion ports.
-            with _mt_connect_lock:
+            with _mt4_connect_lock:
                 _mt4_init_gate.clear()
                 logger.info("[%s] Gate closed for connection init", self.account_id)
+
+                # Tear down any previous client under the connect lock with the gate closed
+                self._cleanup_for_reconnect()
 
                 # Brief settle — QuoteBuffer handles events in C# so no
                 # callback collision risk, but serialized connect still needed
@@ -574,24 +691,22 @@ class MT4DirectAccount:
                 _mt4_init_gate.set()
                 logger.info("[%s] Gate opened (heartbeats may resume)", self.account_id)
 
-            # Subscribe events immediately (via C# QuoteBuffer — no deferral needed)
-            if self._connected:
-                # Clear any stale disconnect flag from the OLD client's OnDisconnect
-                # event — otherwise the heartbeat loop picks it up immediately and
-                # triggers another reconnect (infinite loop).
-                if _quote_buffer is not None:
-                    try:
-                        _quote_buffer.CheckAndClearDisconnect(self.account_id)
-                    except Exception:
-                        pass
-                self._deferred_subscribe()
+            # If not in batch connect, subscribe events and start heartbeat immediately.
+            # During batch connect, this is deferred to after the entire batch finishes.
+            if not _is_batch_connecting:
+                if self._connected:
+                    if _quote_buffer is not None:
+                        try:
+                            _quote_buffer.CheckAndClearDisconnect(self.account_id)
+                        except Exception:
+                            pass
+                    self._deferred_subscribe()
 
-            # Always ensure heartbeat thread is running (handles reconnect on failure)
-            if self._quote_thread is None or not self._quote_thread.is_alive():
-                self._quote_thread = threading.Thread(
-                    target=self._heartbeat_loop, daemon=True,
-                    name=f"MT4Direct-{self.account_id}")
-                self._quote_thread.start()
+                if self._quote_thread is None or not self._quote_thread.is_alive():
+                    self._quote_thread = threading.Thread(
+                        target=self._heartbeat_loop, daemon=True,
+                        name=f"MT4Direct-{self.account_id}")
+                    self._quote_thread.start()
 
             return self._connected
         except Exception as e:
@@ -635,9 +750,9 @@ class MT4DirectAccount:
         while self._running:
             try:
                 if self._connected:
-                    # Skip .NET calls if another account is mid-Connect()
-                    # to prevent CLR corruption (0x80131506)
-                    if not _mt4_init_gate.is_set():
+                    # Skip .NET calls while batch connect is running or another account is mid-Connect()
+                    # to prevent CPU starvation and CLR corruption (0x80131506) on 1-core VPS
+                    if _is_batch_connecting or not _mt4_init_gate.is_set():
                         time.sleep(2)
                         continue
                     # Check if an order update callback set the pending flag
@@ -663,9 +778,8 @@ class MT4DirectAccount:
                     # Check if connection silently died
                     if not self._check_connection():
                         continue  # will enter reconnect on next iteration
-                    # Sleep in short increments — compensates for disabled
-                    # .NET events by polling every ~3s instead of 30s
-                    for _ in range(2):
+                    # Sleep in short increments — polling every 5s
+                    for _ in range(5):
                         if self._order_update_pending.is_set() or not self._running:
                             break
                         # Check C# QuoteBuffer for order updates + disconnects
@@ -680,7 +794,7 @@ class MT4DirectAccount:
                                     break
                             except Exception:
                                 pass
-                        time.sleep(2)
+                        time.sleep(1)
                 else:
                     # Disconnected — attempt reconnect with backoff
                     self._attempt_reconnect()
@@ -706,6 +820,12 @@ class MT4DirectAccount:
         """Try to reconnect with exponential backoff."""
         if not self._running:
             return
+        # Do NOT reconnect while the startup batch is still connecting other
+        # accounts — the CLR cannot safely handle concurrent connect+cleanup.
+        if _is_batch_connecting:
+            logger.debug("[%s] Reconnect deferred — batch connect in progress", self.account_id)
+            time.sleep(5)  # prevent tight spin-loop while batch is running
+            return
         self._reconnect_attempt += 1
         delay = self._reconnect_delay
         logger.info("[%s] Attempting reconnect (attempt #%d, waiting %ds)...",
@@ -718,9 +838,7 @@ class MT4DirectAccount:
         if not self._running:
             return
         try:
-            self._cleanup_for_reconnect()
-            # start() already serializes via _mt_connect_lock internally,
-            # so we do NOT acquire the lock here (would deadlock — Lock is non-reentrant).
+            # start() safely handles cleanup under _mt_connect_lock with gate closed
             if not self._running:
                 return
             ok = self.start()
@@ -746,6 +864,9 @@ class MT4DirectAccount:
     def _cleanup_for_reconnect(self):
         """Tear down stale .NET client objects before reconnecting."""
         self._unsubscribe_events()
+        # Let CLR settle after event removal before calling Disconnect —
+        # prevents a final OnDisconnect callback from racing a torn event list.
+        time.sleep(0.2)
         try:
             if self._client:
                 try:
@@ -929,25 +1050,18 @@ class MT4DirectAccount:
         try:
             with _clr_lock:
                 symbols_info = self._client.SymbolsInfo
-                # One-time SymbolsInfo diagnostic
-                if not getattr(self, '_syminfo_logged', False):
-                    try:
-                        si_count = 0
-                        sample_props = None
-                        if symbols_info:
-                            for si_sym in symbols_info:
-                                si_count += 1
-                                if sample_props is None:
-                                    sample_props = [a for a in dir(si_sym) if not a.startswith('_')]
-                                if si_count >= 3:
-                                    break
-                        logger.info("[%s] SymbolsInfo: count=%s, sample_props=%s",
-                                    self.account_id, si_count if symbols_info else 'None', sample_props)
-                        self._syminfo_logged = True
-                    except Exception as si_err:
-                        logger.info("[%s] SymbolsInfo diagnostic error: %s", self.account_id, si_err)
-                        self._syminfo_logged = True
                 if symbols_info:
+                    tracked = set()
+                    cfg_sym = self.config.get("symbol") or self.config.get("symbols")
+                    if cfg_sym:
+                        if isinstance(cfg_sym, list):
+                            tracked.update(str(s).strip().upper() for s in cfg_sym)
+                        else:
+                            tracked.update(s.strip().upper() for s in str(cfg_sym).split(",") if s.strip())
+                    ea_sym = self.dd.get("ea_account_info", {}).get(self.account_id, {}).get("symbol")
+                    if ea_sym:
+                        tracked.add(str(ea_sym).strip().upper())
+
                     new_cache = {}
                     for sym in symbols_info:
                         try:
@@ -992,6 +1106,8 @@ class MT4DirectAccount:
                             sym_name = str(sym_name).strip().upper()
                             if not sym_name or ' ' in sym_name:
                                 continue  # Skip garbage names like '0 0 MARKET'
+                            if not _is_forex_or_tracked(sym_name, tracked):
+                                continue  # Skip non-forex CFDs and commodities
                             entry = {
                                 "swap_long": float(getattr(sym, 'SwapLong', 0)),
                                 "swap_short": float(getattr(sym, 'SwapShort', 0)),
@@ -1023,11 +1139,10 @@ class MT4DirectAccount:
             # Filter to only include active market positions (exclude pending limit/stop orders)
             active_types = ('buy', 'sell', '0', '1', 'op_buy', 'op_sell', 'position_type_buy', 'position_type_sell')
             
-            raw_types = [str(o.get('Type', '')) for o in orders]
-            logger.warning("[%s] MT4 _push_positions raw_types: %s", self.account_id, raw_types)
-            
             tickets = [o['Ticket'] for o in orders if str(o.get('Type', '')).lower() in active_types]
-            logger.warning("[%s] MT4 _push_positions filtered %d orders down to %d tickets", self.account_id, len(orders), len(tickets))
+            if logger.isEnabledFor(logging.DEBUG):
+                raw_types = [str(o.get('Type', '')) for o in orders]
+                logger.debug("[%s] MT4 _push_positions raw_types: %s -> %d tickets", self.account_id, raw_types, len(tickets))
             
             info["open_tickets"] = tickets
             info["positions"] = len(tickets)
@@ -1220,6 +1335,9 @@ class MT4DirectAccount:
         """
         if not self._connected or not self._client:
             logger.warning("[%s] get_deal_history: not connected", self.account_id)
+            return None
+        if _is_batch_connecting:
+            logger.info("[%s] Deferring deal history download until batch connection completes", self.account_id)
             return None
         if fee_keywords is None:
             fee_keywords = []
@@ -1886,6 +2004,8 @@ class MT4DirectAccount:
         Returns {bid, ask, spread} or None."""
         if not self._connected or not self._client:
             return None
+        if not _mt4_init_gate.is_set():
+            return None
         # Try original symbol, then with lowercase extension (e.g. USDCHF.B -> USDCHF.b)
         variants = [symbol]
         if '.' in symbol:
@@ -1920,7 +2040,13 @@ class MT4DirectAccount:
                             logger.warning("[%s] get_quote_direct(%s) returned None/empty", self.account_id, sym_try)
             except Exception as e:
                 if sym_try == variants[-1]:
-                    logger.error("[%s] get_quote_direct(%s) error: %s", self.account_id, sym_try, e)
+                    now = time.time()
+                    last_err_ts = getattr(self, '_last_quote_err_ts', {}).get(sym_try, 0)
+                    if now - last_err_ts > 60:
+                        logger.warning("[%s] get_quote_direct(%s) error: %s (throttled 60s)", self.account_id, sym_try, e)
+                        if not hasattr(self, '_last_quote_err_ts'):
+                            self._last_quote_err_ts = {}
+                        self._last_quote_err_ts[sym_try] = now
         return None
 
     def get_swap_rates(self, symbols):
@@ -2075,6 +2201,18 @@ class MT5DirectAccount:
         """Unsubscribe .NET event handlers. Safe to call multiple times."""
         if not self._events_subscribed or not self._client:
             return
+        # Remove from QuoteBuffer FIRST (C# side) — this stops new callbacks
+        # from being dispatched before we touch the .NET event list, preventing
+        # the CLR access violation from concurrent OnQuote dispatch.
+        global _quote_buffer
+        if _quote_buffer is not None:
+            try:
+                _quote_buffer.RemoveAccount(self.account_id)
+            except Exception:
+                pass
+        # Brief yield so any in-flight C# callback completes before we
+        # modify the delegate list.
+        time.sleep(0.05)
         try:
             self._client.OnQuote -= self._on_quote
         except Exception:
@@ -2089,6 +2227,12 @@ class MT5DirectAccount:
         """Subscribe .NET events via C# QuoteBuffer.
         With QuoteBuffer handling events natively in C#, no deferral needed."""
         if self._connected and self._running:
+            try:
+                if self._client and hasattr(self._client, 'ProcessServerMessagesInThread') and not self._client.ProcessServerMessagesInThread:
+                    self._client.ProcessServerMessagesInThread = True
+                    logger.info("[%s] MT5 ProcessServerMessagesInThread enabled", self.account_id)
+            except Exception as pmt_err:
+                logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
             self._subscribe_events()
             logger.info("[%s] MT5 Events subscribed (immediate via QuoteBuffer)", self.account_id)
 
@@ -2099,9 +2243,14 @@ class MT5DirectAccount:
         # always starts — it handles auto-reconnect on failure.
         self._running = True
         if not _load_clr():
-            self._last_error = "pythonnet CLR failed to initialize — check server logs for details. Ensure .NET runtime is installed."
+            self._last_error = (
+                "pythonnet CLR failed to initialize — check server logs for details. "
+                "Ensure .NET 8 Runtime is installed: "
+                "https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe"
+            )
             logger.error("[%s] Cannot start — %s", self.account_id, self._last_error)
             return False
+
 
         try:
             from mtapi.mt5 import MT5API
@@ -2110,42 +2259,60 @@ class MT5DirectAccount:
             password = str(self.config["password"])
             server = str(self.config["server"])
             port = int(self.config.get("port", 443))
+            connect_timeout_sec = int(self.config.get("connect_timeout_sec", 35))
 
             logger.info("[%s] Connecting to MT5 server %s:%d ...", self.account_id, server, port)
-            # Serialize connection init — .NET MT API has shared static buffers.
-            # Both the constructor AND Connect() must be serialized.
-            # Gate suppresses heartbeat + callback processing on the Python side
-            # during connect. We do NOT pause/resume other accounts' .NET event
-            # handlers — doing so corrupts their IO completion ports.
-            with _mt_connect_lock:
-                _mt5_init_gate.clear()
-                logger.info("[%s] Gate closed for connection init", self.account_id)
+            # Per-server lock: accounts on DIFFERENT broker servers connect in parallel.
+            # Accounts on the SAME server still serialize (shared MT5API internal buffers).
+            # Per-account gate: suppresses only THIS account's heartbeat during connect.
+            _server_lock = _get_mt5_server_lock(server)
+            with _server_lock:
+                _mt5_gate_enter(self.account_id)
+                logger.info("[%s] Gate entered for connection init (server lock: %s)", self.account_id, server)
 
-                # REMOVED: System.GC.Collect() — calling GC.Collect() from Python
-                # via pythonnet causes fatal CLR corruption (0x80131506) when .NET
-                # background threads (IO completion, event handlers) are active.
-                # Let the .NET runtime manage its own GC.
+                # Tear down any previous client under the connect lock with the gate closed
+                self._cleanup_for_reconnect()
+
                 time.sleep(1)  # Settle for .NET thread pool to drain callbacks
 
                 logger.info("[%s] Creating MT5API object (under lock)...", self.account_id)
                 self._client = MT5API(login, password, server, port)
                 logger.info("[%s] MT5API object created", self.account_id)
 
-                # Enable background thread for processing server messages.
-                # Without this, MarketOpenWaiter/MarketCloseWaiter never receive
-                # trade responses and time out after 30s.
                 try:
-                    cur_val = self._client.ProcessServerMessagesInThread
-                    logger.info("[%s] ProcessServerMessagesInThread was: %s", self.account_id, cur_val)
-                    self._client.ProcessServerMessagesInThread = True
-                    logger.info("[%s] ProcessServerMessagesInThread set to True", self.account_id)
-                except Exception as pmt_err:
-                    logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
+                    # Disable Task-based connection so Connect() runs on a dedicated OS thread
+                    # (ConnectInThread) instead of competing for ThreadPool tasks on 1-CPU VPS.
+                    self._client.UseConnectTask = False
+                    logger.info("[%s] UseConnectTask set to False (dedicated thread mode)", self.account_id)
+                except Exception as uct_err:
+                    logger.warning("[%s] Could not set UseConnectTask: %s", self.account_id, uct_err)
+
+                try:
+                    # ConnectTimeout: overall timeout across all cluster members (35s)
+                    self._client.ConnectTimeout = connect_timeout_sec * 1000
+                    # ConnectTimeoutForOneClusterMember: per-node timeout (20s) so heavy brokers
+                    # like FP Markets have sufficient time to finish symbol catalog and account info.
+                    member_timeout = min(20000, connect_timeout_sec * 1000)
+                    self._client.ConnectTimeoutForOneClusterMember = member_timeout
+                    self._client.ExecutionTimeout = 35000
+                    logger.info("[%s] ConnectTimeout set to %dms (cluster member timeout: %dms)",
+                                self.account_id, connect_timeout_sec * 1000, member_timeout)
+                except Exception as cto_err:
+                    logger.warning("[%s] Could not set ConnectTimeout: %s", self.account_id, cto_err)
+
+                try:
+                    def _prog_handler(sender, args):
+                        p = getattr(args, 'Progress', args)
+                        m = getattr(args, 'Message', '')
+                        logger.info("[%s] Connect progress: %s %s", self.account_id, p, m)
+                    self._client.OnConnectProgress += _prog_handler
+                except Exception as cpe:
+                    logger.debug("[%s] Could not hook OnConnectProgress: %s", self.account_id, cpe)
 
                 if self._client is None:
                     self._last_error = "MT5API constructor returned None — .NET resources may not have been fully released. Try again."
                     logger.error("[%s] %s", self.account_id, self._last_error)
-                    _mt5_init_gate.set()
+                    _mt5_gate_exit(self.account_id)
                     return False
 
                 # Run Connect() with a timeout — it sometimes hangs forever.
@@ -2158,14 +2325,15 @@ class MT5DirectAccount:
                     except Exception as ex:
                         connect_result[0] = ex
 
-                logger.info("[%s] Calling Connect() (15s timeout)...", self.account_id)
+                join_timeout = connect_timeout_sec + 4
+                logger.info("[%s] Calling Connect() (%ds timeout)...", self.account_id, join_timeout)
                 ct = threading.Thread(target=_do_connect, daemon=True)
                 ct.start()
-                ct.join(timeout=15)
+                ct.join(timeout=join_timeout)
 
                 if ct.is_alive():
-                    logger.warning("[%s] Connect() timed out after 15s — will retry later", self.account_id)
-                    self._last_error = "MT5 Connect() timed out after 15s"
+                    logger.warning("[%s] Connect() timed out after %ds — will retry later", self.account_id, join_timeout)
+                    self._last_error = f"MT5 Connect() timed out after {join_timeout}s"
                     self._connected = False
                     # Tear down the stuck client's .NET resources to prevent
                     # orphaned thread pool work items from causing AccessViolationException
@@ -2184,6 +2352,18 @@ class MT5DirectAccount:
                     logger.error("[%s] Connect() raised: %s", self.account_id, connect_result[0])
                     self._last_error = f"MT5 Connect() error: {connect_result[0]}"
                     self._connected = False
+                    # Immediately tear down failed client and socket so it does not hold ports/state
+                    stuck = self._client
+                    self._client = None
+                    try:
+                        stuck.Disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(stuck, 'Dispose'):
+                            stuck.Dispose()
+                    except Exception:
+                        pass
                 else:
                     _is_connected = self._client.Connected
 
@@ -2204,12 +2384,18 @@ class MT5DirectAccount:
                         # definitive data push.
                         _register_account(self)
 
+                        # If not in batch connect, enable message pump now.
+                        # During batch connect, this is deferred until all accounts have
+                        # connected, preventing CPU starvation on 1-core VPS.
+                        if not _is_batch_connecting:
+                            try:
+                                self._client.ProcessServerMessagesInThread = True
+                                logger.info("[%s] ProcessServerMessagesInThread set to True (post-connect)", self.account_id)
+                            except Exception as pmt_err:
+                                logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
+
                         # Active-wait for BOTH Account.Balance AND AccountEquity
-                        # to be non-zero before pushing.  ProcessServerMessagesInThread
-                        # makes Connect() return before all data is synced — Balance
-                        # arrives quickly but AccountEquity (used for PnL) may lag
-                        # behind by 0.5-2s.  Exiting the wait before Equity is ready
-                        # causes pnl = equity(0) - balance = 0 on first push.
+                        # to be non-zero before pushing.
                         _acct_wait_deadline = time.time() + 5.0
                         while time.time() < _acct_wait_deadline:
                             try:
@@ -2252,25 +2438,22 @@ class MT5DirectAccount:
                 # Brief settle before releasing lock
                 time.sleep(0.5)
 
-                # DO NOT subscribe events inside the lock — deferring to a
-                # background thread prevents callback traffic from colliding
-                # with the next account's ConnectThread.LoadSymbols on the
-                # shared .NET thread pool (deterministic crash prevention).
+                # Exit per-account gate — settle complete, heartbeat for this account may resume
+                _mt5_gate_exit(self.account_id)
+                logger.info("[%s] Gate exited (heartbeat may resume)", self.account_id)
 
-                # Open gate — settle complete, safe for heartbeats
-                _mt5_init_gate.set()
-                logger.info("[%s] Gate opened (heartbeats may resume)", self.account_id)
+            # If not in batch connect, subscribe events and start heartbeat immediately.
+            # During batch connect, this is deferred to after the entire batch finishes
+            # so early-connected accounts don't consume CPU while later accounts connect.
+            if not _is_batch_connecting:
+                if self._connected:
+                    self._deferred_subscribe()
 
-            # Subscribe events immediately (via C# QuoteBuffer — no deferral needed)
-            if self._connected:
-                self._deferred_subscribe()
-
-            # Always ensure heartbeat thread is running (handles reconnect on failure)
-            if self._quote_thread is None or not self._quote_thread.is_alive():
-                self._quote_thread = threading.Thread(
-                    target=self._heartbeat_loop, daemon=True,
-                    name=f"MT5Direct-{self.account_id}")
-                self._quote_thread.start()
+                if self._quote_thread is None or not self._quote_thread.is_alive():
+                    self._quote_thread = threading.Thread(
+                        target=self._heartbeat_loop, daemon=True,
+                        name=f"MT5Direct-{self.account_id}")
+                    self._quote_thread.start()
 
             return self._connected
         except Exception as e:
@@ -2284,9 +2467,9 @@ class MT5DirectAccount:
                     target=self._heartbeat_loop, daemon=True,
                     name=f"MT5Direct-{self.account_id}")
                 self._quote_thread.start()
-            # Make sure gate is reopened even on error
+            # Make sure gate is exited even on error
             try:
-                _mt5_init_gate.set()
+                _mt5_gate_exit(self.account_id)
             except Exception:
                 pass
             return False
@@ -2314,9 +2497,10 @@ class MT5DirectAccount:
         while self._running:
             try:
                 if self._connected:
-                    # Skip .NET calls if another account is mid-Connect()
-                    # to prevent CLR corruption (0x80131506)
-                    if not _mt5_init_gate.is_set():
+                    # Skip .NET calls while batch connect is running or THIS account is mid-Connect().
+                    # With per-server locks, other accounts connecting to different servers
+                    # no longer block this heartbeat — only our own connect does.
+                    if _is_batch_connecting or _mt5_account_is_connecting(self.account_id):
                         time.sleep(2)
                         continue
                     # Check if an order update callback set the pending flag
@@ -2339,8 +2523,8 @@ class MT5DirectAccount:
                     # Check if connection silently died
                     if not self._check_connection():
                         continue
-                    # Sleep in short increments — check buffer for events
-                    for _ in range(2):
+                    # Sleep in short increments — polling every 5s
+                    for _ in range(5):
                         if self._order_update_pending.is_set() or not self._running:
                             break
                         # Check C# QuoteBuffer for order updates
@@ -2351,7 +2535,7 @@ class MT5DirectAccount:
                                     break
                             except Exception:
                                 pass
-                        time.sleep(2)
+                        time.sleep(1)
                 else:
                     # Disconnected — attempt reconnect with backoff
                     self._attempt_reconnect()
@@ -2377,9 +2561,17 @@ class MT5DirectAccount:
         """Try to reconnect with exponential backoff."""
         if not self._running:
             return
+        # Do NOT reconnect while the startup batch is still connecting other
+        # accounts — the CLR cannot safely handle concurrent connect+cleanup.
+        if _is_batch_connecting:
+            logger.debug("[%s] MT5 Reconnect deferred — batch connect in progress", self.account_id)
+            time.sleep(5)  # prevent tight spin-loop while batch is running
+            return
         self._reconnect_attempt += 1
-        delay = self._reconnect_delay
-        logger.info("[%s] MT5 Attempting reconnect (attempt #%d, waiting %ds)...",
+        # Per-account stagger so failed accounts don't all collide on _mt5_connect_lock at the same second
+        stagger = (abs(hash(self.account_id)) % 30) / 10.0 + 0.5
+        delay = self._reconnect_delay + stagger
+        logger.info("[%s] MT5 Attempting reconnect (attempt #%d, waiting %.1fs)...",
                     self.account_id, self._reconnect_attempt, delay)
         # Sleep in small increments so we can exit quickly if stopped
         for _ in range(int(delay * 2)):
@@ -2389,9 +2581,7 @@ class MT5DirectAccount:
         if not self._running:
             return
         try:
-            self._cleanup_for_reconnect()
-            # start() already serializes via _mt_connect_lock internally,
-            # so we do NOT acquire the lock here (would deadlock — Lock is non-reentrant).
+            # start() safely handles cleanup under _mt_connect_lock with gate closed
             if not self._running:
                 return
             ok = self.start()
@@ -2410,6 +2600,9 @@ class MT5DirectAccount:
     def _cleanup_for_reconnect(self):
         """Tear down stale .NET client objects before reconnecting."""
         self._unsubscribe_events()
+        # Let CLR settle after event removal before calling Disconnect —
+        # prevents a final OnDisconnect callback from racing a torn event list.
+        time.sleep(0.2)
         try:
             if self._client:
                 try:
@@ -2589,51 +2782,27 @@ class MT5DirectAccount:
             symbols_obj = getattr(self._client, 'Symbols', None)
             if symbols_obj:
                 infos = getattr(symbols_obj, 'Infos', None)
-                # One-time diagnostic
-                if not getattr(self, '_syminfo_logged', False):
-                    try:
-                        if infos:
-                            keys_list = list(infos.Keys)[:5] if hasattr(infos, 'Keys') else []
-                            si_count = len(list(infos.Keys)) if hasattr(infos, 'Keys') else 0
-                            # Log first value's properties
-                            sample_props = None
-                            group_props = None
-                            si_props = None
-                            if keys_list:
-                                first_val = infos[keys_list[0]]
-                                if first_val:
-                                    sample_props = [a for a in dir(first_val) if not a.startswith('_')]
-                            # Also try GetGroup and SymbolsInfo for swap data
-                            try:
-                                grp = symbols_obj.GetGroup('USDJPY')
-                                if grp:
-                                    group_props = [a for a in dir(grp) if not a.startswith('_')]
-                            except Exception:
-                                pass
-                            try:
-                                si_old = getattr(self._client, 'SymbolsInfo', None)
-                                if si_old:
-                                    for si_item in si_old:
-                                        si_props = [a for a in dir(si_item) if not a.startswith('_')]
-                                        break
-                            except Exception:
-                                pass
-                            logger.info("[%s] MT5 Symbols.Infos: count=%d, first_keys=%s, Infos_props=%s",
-                                        self.account_id, si_count, keys_list, sample_props)
-                            logger.info("[%s] MT5 GetGroup('USDJPY') props=%s", self.account_id, group_props)
-                            logger.info("[%s] MT5 SymbolsInfo[0] props=%s", self.account_id, si_props)
-                        else:
-                            logger.info("[%s] MT5 Symbols.Infos is None/empty", self.account_id)
-                    except Exception as si_err:
-                        logger.info("[%s] MT5 Symbols.Infos diagnostic error: %s", self.account_id, si_err)
-                    self._syminfo_logged = True
                 if infos and hasattr(infos, 'Keys'):
+                    tracked = set()
+                    cfg_sym = self.config.get("symbol") or self.config.get("symbols")
+                    if cfg_sym:
+                        if isinstance(cfg_sym, list):
+                            tracked.update(str(s).strip().upper() for s in cfg_sym)
+                        else:
+                            tracked.update(s.strip().upper() for s in str(cfg_sym).split(",") if s.strip())
+                    ea_sym = self.dd.get("ea_account_info", {}).get(self.account_id, {}).get("symbol")
+                    if ea_sym:
+                        tracked.add(str(ea_sym).strip().upper())
+
                     new_cache = {}
                     try:
                         for sym_name in infos.Keys:
                             try:
                                 sn_upper = str(sym_name).strip().upper()
                                 if not sn_upper:
+                                    continue
+                                # Skip non-forex and non-tracked symbols (eliminates 900+ stock CFDs)
+                                if not _is_forex_or_tracked(sn_upper, tracked):
                                     continue
                                 # Swap data is in GetGroup, NOT in Infos values
                                 sl = 0.0
@@ -2720,11 +2889,10 @@ class MT5DirectAccount:
             # Filter to only include active market positions (exclude pending limit/stop orders)
             active_types = ('buy', 'sell', '0', '1', 'op_buy', 'op_sell', 'position_type_buy', 'position_type_sell')
             
-            raw_types = [str(o.get('Type', '')) for o in orders]
-            logger.warning("[%s] MT5 _push_positions raw_types: %s", self.account_id, raw_types)
-            
             tickets = [o['Ticket'] for o in orders if str(o.get('Type', '')).lower() in active_types]
-            logger.warning("[%s] MT5 _push_positions filtered %d orders down to %d tickets", self.account_id, len(orders), len(tickets))
+            if logger.isEnabledFor(logging.DEBUG):
+                raw_types = [str(o.get('Type', '')) for o in orders]
+                logger.debug("[%s] MT5 _push_positions raw_types: %s -> %d tickets", self.account_id, raw_types, len(tickets))
             
             # Zero-drop debounce guard: if we previously had N positions and now see 0,
             # check order history to immediately confirm closed tickets, or require 3 consecutive zero reads (~1.5s).
@@ -3009,6 +3177,9 @@ class MT5DirectAccount:
         """
         if not self._connected or not self._client:
             logger.warning("[%s] MT5 get_deal_history: not connected", self.account_id)
+            return None
+        if _is_batch_connecting:
+            logger.info("[%s] MT5 Deferring deal history download until batch connection completes", self.account_id)
             return None
         if fee_keywords is None:
             fee_keywords = []
@@ -4258,6 +4429,8 @@ class MT5DirectAccount:
         Returns {bid, ask, spread} or None."""
         if not self._connected or not self._client:
             return None
+        if not _mt5_init_gate.is_set():
+            return None
         try:
             with _clr_lock:
                 quote = self._client.GetQuote(symbol)
@@ -4384,50 +4557,155 @@ class MTDirectManager:
             if self.accounts:
                 self.save_config()
             logger.info("Loaded %d MT Direct account(s) from config", len(configs))
-            # Serial batch connect — MT4 and MT5 share the CLR thread pool,
-            # so connections must be serialized to prevent thread pool
-            # exhaustion and CLR corruption (0x80131506).
-            # Failed accounts still auto-reconnect via their heartbeat loop.
+            # Dual-batch connect: MT4 and MT5 connect concurrently in separate threads,
+            # while maintaining strict serialization within each platform.
+            # Fast MT5 brokers connect first; heavy-catalog brokers connect last.
             def _batch_connect():
-                MAX_ROUNDS = 3
-                RETRY_DELAY = 15
-                to_connect = [aid for aid, cfg in configs.items()
-                              if force_connect_all or cfg.get("auto_connect_start", True)]
-                logger.info("Batch connecting %d account(s) (max %d rounds)...",
-                            len(to_connect), MAX_ROUNDS)
-                failed = list(to_connect)
-                for round_num in range(1, MAX_ROUNDS + 1):
-                    if not failed:
-                        break
-                    if round_num > 1:
-                        logger.info("Batch connect round %d/%d — retrying %d failed account(s) in %ds...",
-                                    round_num, MAX_ROUNDS, len(failed), RETRY_DELAY)
-                        time.sleep(RETRY_DELAY)
-                    still_failed = []
-                    for i, aid in enumerate(failed):
-                        try:
-                            logger.info("[%s] Batch connect round %d — %d/%d...",
-                                        aid, round_num, i + 1, len(failed))
-                            ok, err = self.connect_account(aid)
-                            if ok:
-                                logger.info("[%s] Batch connect succeeded (round %d)",
-                                            aid, round_num)
-                            else:
-                                logger.warning("[%s] Batch connect failed (round %d): %s",
-                                               aid, round_num, err)
-                                still_failed.append(aid)
-                        except Exception as e:
-                            logger.error("[%s] Batch connect error (round %d): %s", aid, round_num, e)
-                            still_failed.append(aid)
-                    failed = still_failed
+                global _is_batch_connecting
+                _is_batch_connecting = True
+                try:
+                    to_connect = [aid for aid, cfg in configs.items()
+                                  if force_connect_all or cfg.get("auto_connect_start", True)]
 
-                if failed:
-                    logger.warning("Batch connect: %d account(s) still failed after %d rounds "
-                                   "— heartbeat threads will keep retrying: %s",
-                                   len(failed), MAX_ROUNDS, failed)
-                else:
-                    logger.info("Batch connect complete — all %d account(s) connected",
-                                len(to_connect))
+                    mt4_to_connect = []
+                    mt5_to_connect = []
+                    for aid in to_connect:
+                        acct = self.accounts.get(aid)
+                        if isinstance(acct, MT5DirectAccount):
+                            mt5_to_connect.append(aid)
+                        elif isinstance(acct, MT4DirectAccount):
+                            mt4_to_connect.append(aid)
+                        else:
+                            cfg = configs.get(aid, {})
+                            mtype = cfg.get("type", "").lower()
+                            if not mtype:
+                                mtype = "mt5" if "MT5" in aid.upper() else "mt4"
+                            if mtype == "mt5":
+                                mt5_to_connect.append(aid)
+                            else:
+                                mt4_to_connect.append(aid)
+
+                    # Smart sorting for MT5: fast/light brokers first, heavy catalog brokers last
+                    def _mt5_priority_key(aid):
+                        aid_u = aid.upper()
+                        # Heavy catalog brokers connect last (rank 100) — need 120s timeout
+                        for heavy in ("MEX", "RKX", "FP", "DUKA", "ICMARKET"):
+                            if heavy in aid_u:
+                                return 100
+                        # Light / fast catalog brokers connect first (rank 10)
+                        for light in ("ORB", "FXV", "CXM", "BB", "DERIV", "IFX"):
+                            if light in aid_u:
+                                return 10
+                        return 50  # standard/other
+
+                    mt5_to_connect.sort(key=_mt5_priority_key)
+
+                    logger.info("Batch connecting %d account(s) in parallel (%d MT4, %d MT5)...",
+                                len(to_connect), len(mt4_to_connect), len(mt5_to_connect))
+                    if mt5_to_connect:
+                        logger.info("MT5 connect queue: %s", mt5_to_connect)
+
+                    failed_mt4 = []
+                    failed_mt5 = []
+
+                    def _run_mt4():
+                        for i, aid in enumerate(mt4_to_connect):
+                            try:
+                                logger.info("[%s] MT4 batch connect %d/%d...", aid, i + 1, len(mt4_to_connect))
+                                ok, err = self.connect_account(aid)
+                                if ok:
+                                    logger.info("[%s] MT4 batch connect succeeded", aid)
+                                else:
+                                    logger.warning("[%s] MT4 batch connect failed: %s", aid, err)
+                                    failed_mt4.append(aid)
+                            except Exception as e:
+                                logger.error("[%s] MT4 batch connect error: %s", aid, e)
+                                failed_mt4.append(aid)
+
+                    def _run_mt5_for_server(server_key, aids_for_server):
+                        """Connect all accounts on the same broker server, serially.
+                        Multiple calls run in parallel for DIFFERENT servers."""
+                        for i, aid in enumerate(aids_for_server):
+                            try:
+                                logger.info("[%s] MT5 batch connect (server=%s, %d/%d)...",
+                                            aid, server_key, i + 1, len(aids_for_server))
+                                ok, err = self.connect_account(aid)
+                                if ok:
+                                    logger.info("[%s] MT5 batch connect succeeded", aid)
+                                else:
+                                    logger.warning("[%s] MT5 batch connect failed: %s", aid, err)
+                                    failed_mt5.append(aid)
+                            except Exception as e:
+                                logger.error("[%s] MT5 batch connect error: %s", aid, e)
+                                failed_mt5.append(aid)
+
+                    # Group MT5 accounts by server — different servers connect in parallel,
+                    # same-server accounts stay serial (shared MT5API internal buffers).
+                    mt5_by_server: dict = {}
+                    for aid in mt5_to_connect:
+                        acct = self.accounts.get(aid)
+                        srv = ""
+                        if acct:
+                            srv = str(acct.config.get("server", "")).lower().strip()
+                        elif aid in configs:
+                            srv = str(configs[aid].get("server", "")).lower().strip()
+                        if not srv:
+                            srv = "__unknown__"
+                        mt5_by_server.setdefault(srv, []).append(aid)
+
+                    logger.info("MT5 batch: %d server group(s): %s",
+                                len(mt5_by_server),
+                                {k: len(v) for k, v in mt5_by_server.items()})
+
+                    threads = []
+                    if mt4_to_connect:
+                        t4 = threading.Thread(target=_run_mt4, daemon=True, name="BatchMT4")
+                        threads.append(t4)
+                        t4.start()
+                    for srv_key, srv_aids in mt5_by_server.items():
+                        t5 = threading.Thread(
+                            target=_run_mt5_for_server,
+                            args=(srv_key, srv_aids),
+                            daemon=True,
+                            name=f"BatchMT5-{srv_key[:20]}")
+                        threads.append(t5)
+                        t5.start()
+
+                    for t in threads:
+                        t.join()
+
+                    all_failed = failed_mt4 + failed_mt5
+                    if all_failed:
+                        logger.warning("Batch connect: %d account(s) failed — heartbeats will retry: %s",
+                                       len(all_failed), all_failed)
+                    else:
+                        logger.info("Batch connect complete — all %d account(s) connected", len(to_connect))
+                finally:
+                    _is_batch_connecting = False
+                    logger.info("Batch connect ended — activating background event subscriptions and heartbeats...")
+
+                # Post-batch activation: start QuoteBuffer and heartbeat loops for all accounts
+                for aid in to_connect:
+                    acct = self.accounts.get(aid)
+                    if not acct:
+                        continue
+                    try:
+                        if getattr(acct, '_connected', False):
+                            if hasattr(acct, '_client') and acct._client:
+                                if hasattr(acct._client, 'ProcessServerMessagesInThread'):
+                                    try:
+                                        acct._client.ProcessServerMessagesInThread = True
+                                    except Exception:
+                                        pass
+                            acct._deferred_subscribe()
+                        # Always start heartbeat thread so it can monitor or auto-reconnect
+                        if getattr(acct, '_quote_thread', None) is None or not acct._quote_thread.is_alive():
+                            acct._quote_thread = threading.Thread(
+                                target=acct._heartbeat_loop, daemon=True,
+                                name=f"{acct.__class__.__name__}-{aid}")
+                            acct._quote_thread.start()
+                    except Exception as act_e:
+                        logger.warning("[%s] Post-batch activation error: %s", aid, act_e)
 
             threading.Thread(target=_batch_connect, daemon=True,
                              name="BatchConnect").start()

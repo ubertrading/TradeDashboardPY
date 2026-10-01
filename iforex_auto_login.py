@@ -18,36 +18,93 @@ from typing import Dict, Any, Optional, Tuple, List
 logger = logging.getLogger("iforex_auto_login")
 
 def ensure_playwright_dependencies(auto_repair: bool = True) -> bool:
-    """Check if greenlet and playwright can be imported. If not, auto-install/repair."""
+    """Check if greenlet and playwright can be imported. If not, auto-install/repair.
+    Handles two cases:
+      1. greenlet corrupt/missing DLL — reinstall greenlet
+      2. playwright package entirely absent — pip install playwright + install browsers
+    """
     try:
-        import greenlet
-        from playwright.sync_api import sync_playwright
+        import greenlet  # noqa: F401
+        from playwright.sync_api import sync_playwright  # noqa: F401
         return True
     except Exception as e:
         logger.warning("Playwright/greenlet dependency check failed: %s", e)
         if not auto_repair:
             return False
-        try:
-            import subprocess, sys
-            logger.info("Attempting auto-repair of greenlet via pip (%s)...", sys.executable)
-            res = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "greenlet"],
-                capture_output=True, text=True, timeout=120
-            )
-            if res.returncode == 0:
-                logger.info("greenlet reinstalled successfully. Refreshing module cache...")
-                for mod in list(sys.modules.keys()):
-                    if "greenlet" in mod or "playwright" in mod:
-                        sys.modules.pop(mod, None)
-                import greenlet
-                from playwright.sync_api import sync_playwright
-                logger.info("Playwright sync_api verified successfully after auto-repair!")
+
+        import subprocess, sys
+
+        msg = str(e).lower()
+        playwright_missing = "playwright" in msg and "no module" in msg
+
+        if playwright_missing:
+            # playwright package is entirely absent — full install needed
+            logger.info("playwright package missing — installing via pip (%s)...", sys.executable)
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "playwright"],
+                    capture_output=True, text=True, timeout=300
+                )
+                if res.returncode != 0:
+                    logger.error("pip install playwright failed (code %d): %s", res.returncode, res.stderr)
+                    return False
+                logger.info("playwright installed successfully.")
+            except Exception as ex:
+                logger.error("pip install playwright error: %s", ex)
+                return False
+
+            # Install browser binaries (chromium)
+            logger.info("Installing Chromium browser via playwright install chromium...")
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    capture_output=True, text=True, timeout=600
+                )
+                if res.returncode == 0:
+                    logger.info("Chromium installed successfully.")
+                else:
+                    logger.warning("playwright install chromium returned code %d: %s", res.returncode, res.stderr)
+            except Exception as ex:
+                logger.warning("playwright install chromium error: %s", ex)
+
+            # Flush module cache and verify
+            for mod in list(sys.modules.keys()):
+                if "greenlet" in mod or "playwright" in mod:
+                    sys.modules.pop(mod, None)
+            try:
+                from playwright.sync_api import sync_playwright  # noqa: F401
+                logger.info("playwright verified successfully after install!")
                 return True
-            else:
-                logger.error("pip install greenlet returned code %d: %s", res.returncode, res.stderr)
-        except Exception as ex:
-            logger.error("Auto-repair error: %s", ex)
-        return False
+            except Exception as ex2:
+                logger.error("playwright still not importable after install: %s", ex2)
+                return False
+
+        else:
+            # greenlet DLL corrupt/missing — reinstall greenlet only
+            logger.info("Attempting auto-repair of greenlet via pip (%s)...", sys.executable)
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "greenlet"],
+                    capture_output=True, text=True, timeout=120
+                )
+                if res.returncode == 0:
+                    logger.info("greenlet reinstalled successfully. Refreshing module cache...")
+                    for mod in list(sys.modules.keys()):
+                        if "greenlet" in mod or "playwright" in mod:
+                            sys.modules.pop(mod, None)
+                    try:
+                        import greenlet  # noqa: F401
+                        from playwright.sync_api import sync_playwright  # noqa: F401
+                        logger.info("Playwright sync_api verified successfully after auto-repair!")
+                        return True
+                    except Exception as ex2:
+                        logger.error("Still failing after greenlet reinstall: %s", ex2)
+                else:
+                    logger.error("pip install greenlet returned code %d: %s", res.returncode, res.stderr)
+            except Exception as ex:
+                logger.error("Auto-repair error: %s", ex)
+            return False
+
 
 def get_sync_playwright():
     """Import and return sync_playwright, attempting auto-repair if greenlet DLL fails."""

@@ -208,10 +208,43 @@ def ensure_bridge_running():
         logger.error("MtBridgeService not found at %s — run 'dotnet build -c Release' first", BRIDGE_EXE)
         return False
 
+    # Pre-flight: verify ASP.NET Core 8 runtime is present before trying to launch the exe.
+    # MtBridgeService.exe is built with Microsoft.NET.Sdk.Web and requires
+    # Microsoft.AspNetCore.App 8.x — NOT just the base .NET runtime.
+    # Without it the exe crashes instantly with exit code 2147516566
+    # (0x80131556, COR_E_EXECUTIONENGINE) with the message "No frameworks were found."
+    try:
+        _dotnet_check = subprocess.run(
+            ["dotnet", "--list-runtimes"],
+            capture_output=True, text=True, timeout=5,
+        )
+        _has_aspnet8 = (
+            _dotnet_check.returncode == 0
+            and any(
+                line.startswith("Microsoft.AspNetCore.App 8.")
+                for line in _dotnet_check.stdout.splitlines()
+            )
+        )
+    except Exception:
+        _has_aspnet8 = False
+
+    if not _has_aspnet8:
+        logger.error(
+            "MtBridgeService requires the ASP.NET Core 8 Runtime (Microsoft.AspNetCore.App), "
+            "which is NOT installed on this server. The base .NET runtime alone is not enough. "
+            "Download ASP.NET Core 8 Runtime: https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe — "
+            "MtBridgeService will not start until it is installed."
+        )
+        return False
+
+
+
+
     logger.info("Starting MtBridgeService from %s (detached daemon)", BRIDGE_EXE)
     log_dir = os.path.join(_bridge_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
     bridge_log_path = os.path.join(log_dir, "MtBridgeService.log")
+
 
     creation_flags = 0
     if sys.platform == "win32":
