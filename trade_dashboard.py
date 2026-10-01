@@ -1297,6 +1297,14 @@ def _cycle_reminder_loop():
     _friday_checked_this_week = None
     while True:
         try:
+            import mt_direct_connector
+            if getattr(mt_direct_connector, '_is_batch_connecting', False):
+                time.sleep(15)
+                continue
+        except Exception:
+            pass
+
+        try:
             now = datetime.now(NY_TZ)
             # Target: 5:01 PM EST
             target = now.replace(hour=17, minute=1, second=0, microsecond=0)
@@ -6891,6 +6899,15 @@ def _disbalance_alert_loop():
             # evaluation entirely until the grace window has elapsed so we don't
             # fire false "Possible Disbalance" alerts while accounts are still
             # connecting.
+            try:
+                import mt_direct_connector
+                if getattr(mt_direct_connector, '_is_batch_connecting', False):
+                    app.logger.debug("[DISBALANCE-ALERT] Suppressing because MT Direct batch connect is running")
+                    _time.sleep(5)
+                    continue
+            except Exception:
+                pass
+
             grace_sec = int(dashboard_settings.get("disbalance_startup_grace_sec", 120))
             elapsed_since_start = _time.time() - _dashboard_start_time
             if elapsed_since_start < grace_sec:
