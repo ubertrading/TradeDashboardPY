@@ -2307,24 +2307,15 @@ class MT5DirectAccount:
                 # Enable background thread for processing server messages BEFORE Connect().
                 # This is required so incoming AccountInfo packets from the broker are
                 # dispatched immediately; without it, Connect() hangs with "waiting account info".
+                # UseConnectTask is left at its DEFAULT (True / ConnectInTask path) — setting it
+                # False causes "waiting account info" timeouts on DUKA/FP/FXV brokers.
+                # The Orbex ConnectLock race (2nd/3rd account on same server) is handled instead
+                # by the 10-second settle delay in _run_mt5_for_server between same-server accounts.
                 try:
                     self._client.ProcessServerMessagesInThread = True
                     logger.info("[%s] ProcessServerMessagesInThread set to True", self.account_id)
                 except Exception as pmt_err:
                     logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
-
-                # ALSO disable Task-based connect so Connect() uses ConnectInThread().
-                # When UseConnectTask=True (default), ConnectorTask.run() acquires ConnectLock via
-                # WaitAsync(ConnectTimeout). With ProcessServerMessagesInThread also active the
-                # two async paths race and the lock await times out with
-                # "Timeout exception ConnectLock await" — especially on the 2nd/3rd account on
-                # the same broker server. UseConnectTask=False bypasses ConnectorTask entirely
-                # and avoids this race while still benefiting from the message pump above.
-                try:
-                    self._client.UseConnectTask = False
-                    logger.info("[%s] UseConnectTask set to False (avoids ConnectLock race)", self.account_id)
-                except Exception as uct_err:
-                    logger.warning("[%s] Could not set UseConnectTask: %s", self.account_id, uct_err)
 
                 try:
                     # ConnectTimeout: overall timeout across all cluster members (60s)
