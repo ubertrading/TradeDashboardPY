@@ -2304,14 +2304,27 @@ class MT5DirectAccount:
                 self._client = MT5API(login, password, server, port)
                 logger.info("[%s] MT5API object created", self.account_id)
 
-                # Enable background thread for processing server messages.
-                # Crucial for Connect(): without this, incoming AccountInfo packets are not
-                # dispatched to the connect thread, causing a 60s timeout on "waiting account info".
+                # Enable background thread for processing server messages BEFORE Connect().
+                # This is required so incoming AccountInfo packets from the broker are
+                # dispatched immediately; without it, Connect() hangs with "waiting account info".
                 try:
                     self._client.ProcessServerMessagesInThread = True
                     logger.info("[%s] ProcessServerMessagesInThread set to True", self.account_id)
                 except Exception as pmt_err:
                     logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
+
+                # ALSO disable Task-based connect so Connect() uses ConnectInThread().
+                # When UseConnectTask=True (default), ConnectorTask.run() acquires ConnectLock via
+                # WaitAsync(ConnectTimeout). With ProcessServerMessagesInThread also active the
+                # two async paths race and the lock await times out with
+                # "Timeout exception ConnectLock await" — especially on the 2nd/3rd account on
+                # the same broker server. UseConnectTask=False bypasses ConnectorTask entirely
+                # and avoids this race while still benefiting from the message pump above.
+                try:
+                    self._client.UseConnectTask = False
+                    logger.info("[%s] UseConnectTask set to False (avoids ConnectLock race)", self.account_id)
+                except Exception as uct_err:
+                    logger.warning("[%s] Could not set UseConnectTask: %s", self.account_id, uct_err)
 
                 try:
                     # ConnectTimeout: overall timeout across all cluster members (60s)
@@ -4629,6 +4642,16 @@ class MTDirectManager:
                         Multiple calls run in parallel for DIFFERENT servers."""
                         for i, aid in enumerate(aids_for_server):
                             try:
+                                # After the FIRST account on a server connects, wait for the
+                                # broker's session state to settle before the next account
+                                # tries. Orbex and similar brokers limit concurrent logins
+                                # from the same IP and need time to reset their server-side
+                                # session context. Without this delay the 2nd/3rd accounts hit
+                                # "waiting account info, timeout" or "ConnectLock await".
+                                if i > 0:
+                                    logger.info("[%s] Waiting 10s for broker server %s to settle before next connect...",
+                                                aid, server_key)
+                                    time.sleep(10)
                                 logger.info("[%s] MT5 batch connect (server=%s, %d/%d)...",
                                             aid, server_key, i + 1, len(aids_for_server))
                                 ok, err = self.connect_account(aid)
