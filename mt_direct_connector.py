@@ -2260,6 +2260,12 @@ class MT5DirectAccount:
             server = str(self.config["server"])
             port = int(self.config.get("port", 443))
             connect_timeout_sec = int(self.config.get("connect_timeout_sec", 35))
+            
+            # Increase timeout for brokers with huge symbol catalogs
+            for heavy in ("FP", "DUKA", "MEX", "RKX", "ICMARKET"):
+                if heavy in self.account_id.upper():
+                    connect_timeout_sec = 50
+                    break
 
             logger.info("[%s] Connecting to MT5 server %s:%d ...", self.account_id, server, port)
             # Per-server lock: accounts on DIFFERENT broker servers connect in parallel.
@@ -2348,22 +2354,18 @@ class MT5DirectAccount:
                             stuck.Dispose()
                     except Exception:
                         pass
+                    # Let the server session cleanly close before allowing retries
+                    time.sleep(3)
                 elif connect_result[0] is not None:
                     logger.error("[%s] Connect() raised: %s", self.account_id, connect_result[0])
                     self._last_error = f"MT5 Connect() error: {connect_result[0]}"
                     self._connected = False
-                    # Immediately tear down failed client and socket so it does not hold ports/state
-                    stuck = self._client
+                    
+                    # DO NOT call Disconnect() on an exception-failed MT5API object!
+                    # Doing so triggers a fatal CLR System.AccessViolationException crash.
+                    # We simply orphan it to the garbage collector and wait briefly for TCP teardown.
                     self._client = None
-                    try:
-                        stuck.Disconnect()
-                    except Exception:
-                        pass
-                    try:
-                        if hasattr(stuck, 'Dispose'):
-                            stuck.Dispose()
-                    except Exception:
-                        pass
+                    time.sleep(3)
                 else:
                     _is_connected = self._client.Connected
 
