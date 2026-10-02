@@ -360,6 +360,11 @@ def _load_clr():
                 clr.AddReference(mt4_path)
                 _mt4_asm = True
                 logger.info("Loaded MT4ServerAPI.dll from %s", mt4_path)
+                # Pre-import to avoid pythonnet concurrent import crash in parallel connect threads
+                try:
+                    import mtapi.mt4
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error("Failed to load MT4ServerAPI.dll: %s", e)
         else:
@@ -370,6 +375,11 @@ def _load_clr():
                 clr.AddReference(mt5_path)
                 _mt5_asm = True
                 logger.info("Loaded mt5api.dll from %s", mt5_path)
+                # Pre-import to avoid pythonnet concurrent import crash in parallel connect threads
+                try:
+                    import mtapi.mt5
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error("Failed to load mt5api.dll: %s", e)
         else:
