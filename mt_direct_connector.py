@@ -4630,9 +4630,30 @@ class MTDirectManager:
 
                     def _run_mt5_for_server(server_key, aids_for_server):
                         """Connect all accounts on the same broker server, serially.
-                        Multiple calls run in parallel for DIFFERENT servers."""
+                        Multiple calls run in parallel for DIFFERENT servers.
+
+                        Orbex (and possibly other brokers) throttle the AccountInfo response
+                        for the 2nd/3rd login from the same IP while the first session's
+                        initial data load is still in progress server-side. The TCP handshake
+                        and login succeed instantly, but the AccountInfo packet doesn't arrive
+                        for 60+ seconds. Waiting after the 1st account successfully connects
+                        gives the broker server time to finish internal housekeeping so the
+                        next session's AccountInfo packet is delivered within ConnectTimeout.
+                        """
                         for i, aid in enumerate(aids_for_server):
                             try:
+                                if i > 0:
+                                    # Wait for the broker server to finish its internal
+                                    # session setup for the previous account before the
+                                    # next login attempts to receive AccountInfo.
+                                    # 30s is enough for Orbex — the Round 2 retry
+                                    # (which always succeeds) starts ~70s after account 1,
+                                    # so 30s puts us well into the safe window.
+                                    logger.info(
+                                        "[%s] Waiting 30s for broker server %s to finish "
+                                        "session setup before next login...",
+                                        aid, server_key)
+                                    time.sleep(30)
                                 logger.info("[%s] MT5 batch connect (server=%s, %d/%d)...",
                                             aid, server_key, i + 1, len(aids_for_server))
                                 ok, err = self.connect_account(aid)
@@ -4644,6 +4665,7 @@ class MTDirectManager:
                             except Exception as e:
                                 logger.error("[%s] MT5 batch connect error: %s", aid, e)
                                 failed_mt5.append(aid)
+
 
                     # Group MT5 accounts by server — different servers connect in parallel,
                     # same-server accounts stay serial (shared MT5API internal buffers).
