@@ -4678,7 +4678,7 @@ class MTDirectManager:
                         t4 = threading.Thread(target=_run_mt4, daemon=True, name="BatchMT4")
                         threads.append(t4)
                         t4.start()
-                    for srv_key, srv_aids in mt5_by_server.items():
+                    for srv_idx, (srv_key, srv_aids) in enumerate(mt5_by_server.items()):
                         t5 = threading.Thread(
                             target=_run_mt5_for_server,
                             args=(srv_key, srv_aids),
@@ -4686,6 +4686,12 @@ class MTDirectManager:
                             name=f"BatchMT5-{srv_key[:20]}")
                         threads.append(t5)
                         t5.start()
+                        # Stagger thread starts: give the .NET ThreadPool time to allocate
+                        # a worker for each ConnectorTask before the next batch starts.
+                        # Without this, all ConnectLock.WaitAsync() calls fire simultaneously
+                        # and the ones at the back of the queue time out ("ConnectLock await").
+                        if srv_idx < len(mt5_by_server) - 1:
+                            time.sleep(1.5)
 
                     for t in threads:
                         t.join()
@@ -4697,7 +4703,8 @@ class MTDirectManager:
                         round_num += 1
                         logger.info("Batch connect round %d: retrying %d failed account(s): %s",
                                     round_num, len(all_failed), all_failed)
-                        time.sleep(3)
+                        # Wait for .NET GC to collect failed MT5API objects before retry
+                        time.sleep(8)
                         retry_mt4 = [a for a in all_failed if a in mt4_to_connect]
                         retry_mt5 = [a for a in all_failed if a in mt5_to_connect]
                         failed_mt4 = []
