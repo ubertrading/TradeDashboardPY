@@ -104,11 +104,11 @@ def _is_init_gate_set():
     return _mt4_init_gate.is_set() and _mt5_init_gate.is_set()
 
 # Flag set while initial batch connection is running to defer heavy history/statement downloads
-_is_batch_connecting = False
+_is_batch_connecting = True
 # Event that is cleared at startup (while batch is running) and set when batch finishes.
-# Use wait_for_initial_connect() to block until first startup connect attempt is fully done.
+# Use wait_for_initial_connect() to block until startup connect attempt is fully done.
 _batch_connect_done = threading.Event()
-_batch_connect_done.set()  # default: set (no batch running). Cleared in _batch_connect_thread.
+# NOT set by default! Remains cleared until _batch_connect finishes all rounds.
 
 def is_startup_connecting():
     """Return True if the initial startup batch connect is still in progress.
@@ -2284,13 +2284,7 @@ class MT5DirectAccount:
             password = str(self.config["password"])
             server = str(self.config["server"])
             port = int(self.config.get("port", 443))
-            connect_timeout_sec = int(self.config.get("connect_timeout_sec", 35))
-            
-            # Increase timeout for brokers with huge symbol catalogs
-            for heavy in ("FP", "DUKA", "MEX", "RKX", "ICMARKET"):
-                if heavy in self.account_id.upper():
-                    connect_timeout_sec = 50
-                    break
+            connect_timeout_sec = int(self.config.get("connect_timeout_sec", 60))
 
             logger.info("[%s] Connecting to MT5 server %s:%d ...", self.account_id, server, port)
             # Per-server lock: accounts on DIFFERENT broker servers connect in parallel.
@@ -2319,13 +2313,13 @@ class MT5DirectAccount:
                     logger.warning("[%s] Could not set UseConnectTask: %s", self.account_id, uct_err)
 
                 try:
-                    # ConnectTimeout: overall timeout across all cluster members (35s)
+                    # ConnectTimeout: overall timeout across all cluster members (60s)
                     self._client.ConnectTimeout = connect_timeout_sec * 1000
-                    # ConnectTimeoutForOneClusterMember: per-node timeout (20s) so heavy brokers
-                    # like FP Markets have sufficient time to finish symbol catalog and account info.
-                    member_timeout = min(20000, connect_timeout_sec * 1000)
+                    # ConnectTimeoutForOneClusterMember: per-node timeout (35s) so heavy brokers
+                    # have sufficient time to finish symbol catalog and account info.
+                    member_timeout = min(35000, connect_timeout_sec * 1000)
                     self._client.ConnectTimeoutForOneClusterMember = member_timeout
-                    self._client.ExecutionTimeout = 35000
+                    self._client.ExecutionTimeout = 45000
                     logger.info("[%s] ConnectTimeout set to %dms (cluster member timeout: %dms)",
                                 self.account_id, connect_timeout_sec * 1000, member_timeout)
                 except Exception as cto_err:
@@ -2422,35 +2416,29 @@ class MT5DirectAccount:
                                 logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
 
                         # Active-wait for BOTH Account.Balance AND AccountEquity
-                        # to be non-zero before pushing.
-                        _acct_wait_deadline = time.time() + 5.0
+                        # to be non-zero before pushing (pure property check, no order queries).
+                        _acct_wait_deadline = time.time() + 3.0
+                        _acct_bal = 0.0
+                        _acct_eq = 0.0
                         while time.time() < _acct_wait_deadline:
                             try:
                                 _acct_obj = getattr(self._client, 'Account', None)
                                 _acct_bal = float(getattr(_acct_obj, 'Balance', 0) or 0) if _acct_obj else 0.0
                                 _acct_eq  = float(getattr(self._client, 'AccountEquity', 0) or 0)
-                                _open_pos_count = len(self._get_open_orders() or [])
                                 if _acct_bal != 0.0 and _acct_eq != 0.0:
-                                    if _open_pos_count > 0 and _acct_eq == _acct_bal:
-                                        # Stale equity (equals balance but has open positions) — keep waiting
-                                        pass
-                                    else:
-                                        break  # Both balance and equity received
+                                    break
                             except Exception:
                                 pass
-                            time.sleep(0.1)
-                        _elapsed = round(5.0 - (_acct_wait_deadline - time.time()), 2)
+                            time.sleep(0.2)
+                        _elapsed = round(3.0 - max(0.0, _acct_wait_deadline - time.time()), 2)
                         logger.info("[%s] Account data ready after ~%.1fs (bal=%.2f eq=%.2f) — pushing",
                                     self.account_id, _elapsed, _acct_bal, _acct_eq)
 
                         # Single definitive push — Account.Balance is now populated
                         self._push_account_info()
-                        self._push_positions()
-
-                        # NOW mark as connected — get_status() will only report
-                        # this account after PnL data is fully populated.
-                        # This prevents the browser from ever seeing
-                        # connected=true with total_pnl=null.
+                        # Defer position queries during batch connect to avoid CPU starvation
+                        if not _is_batch_connecting:
+                            self._push_positions()
                         self._connected = True
 
                         logger.info("[%s] Post-connect push done (balance=%.2f equity=%.2f pnl=%.2f)",
@@ -4703,11 +4691,69 @@ class MTDirectManager:
                         t.join()
 
                     all_failed = failed_mt4 + failed_mt5
+                    MAX_ROUNDS = 2
+                    round_num = 1
+                    while all_failed and round_num < MAX_ROUNDS:
+                        round_num += 1
+                        logger.info("Batch connect round %d: retrying %d failed account(s): %s",
+                                    round_num, len(all_failed), all_failed)
+                        time.sleep(3)
+                        retry_mt4 = [a for a in all_failed if a in mt4_to_connect]
+                        retry_mt5 = [a for a in all_failed if a in mt5_to_connect]
+                        failed_mt4 = []
+                        failed_mt5 = []
+                        retry_threads = []
+
+                        if retry_mt4:
+                            def _run_retry_mt4():
+                                for aid in retry_mt4:
+                                    try:
+                                        ok, err = self.connect_account(aid)
+                                        if not ok:
+                                            failed_mt4.append(aid)
+                                    except Exception:
+                                        failed_mt4.append(aid)
+                            t4 = threading.Thread(target=_run_retry_mt4, daemon=True, name="BatchMT4-Retry")
+                            retry_threads.append(t4)
+                            t4.start()
+
+                        retry_mt5_by_srv = {}
+                        for aid in retry_mt5:
+                            acct = self.accounts.get(aid)
+                            srv = str(acct.config.get("server", "")).lower().strip() if acct else "__unknown__"
+                            if not srv:
+                                srv = "__unknown__"
+                            retry_mt5_by_srv.setdefault(srv, []).append(aid)
+
+                        for srv_key, srv_aids in retry_mt5_by_srv.items():
+                            t5 = threading.Thread(
+                                target=_run_mt5_for_server,
+                                args=(srv_key, srv_aids),
+                                daemon=True,
+                                name=f"BatchMT5-Retry-{srv_key[:20]}")
+                            retry_threads.append(t5)
+                            t5.start()
+
+                        for t in retry_threads:
+                            t.join()
+                        all_failed = failed_mt4 + failed_mt5
+
                     if all_failed:
-                        logger.warning("Batch connect: %d account(s) failed — heartbeats will retry: %s",
-                                       len(all_failed), all_failed)
+                        logger.warning("Batch connect: %d account(s) permanently failed after %d rounds — heartbeats will keep retrying: %s",
+                                       len(all_failed), MAX_ROUNDS, all_failed)
                     else:
                         logger.info("Batch connect complete — all %d account(s) connected", len(to_connect))
+
+                    # Initial clean position push for all connected accounts before clearing batch flag
+                    logger.info("Batch connect: synchronizing initial positions for all connected accounts...")
+                    for aid in to_connect:
+                        acct = self.accounts.get(aid)
+                        if acct and getattr(acct, '_connected', False):
+                            try:
+                                with _heartbeat_sem:
+                                    acct._push_positions()
+                            except Exception as pe:
+                                logger.warning("[%s] Initial position sync error: %s", aid, pe)
                 finally:
                     _is_batch_connecting = False
                     _batch_connect_done.set()  # Unblock all alert/query loops

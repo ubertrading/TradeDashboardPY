@@ -1309,8 +1309,22 @@ def _cycle_reminder_loop():
             if now >= target:
                 target += timedelta(days=1)
             wait_secs = (target - now).total_seconds()
-            # Don't wait more than 60 seconds — also check periodically for import triggers
-            time.sleep(min(wait_secs, 60))
+            # Sleep in chunks until target time arrives
+            while wait_secs > 0:
+                time.sleep(min(wait_secs, 30))
+                wait_secs = (target - datetime.now(NY_TZ)).total_seconds()
+
+            # Target 5:01 PM reached!
+            # Suppress if startup batch is still connecting
+            try:
+                import mt_direct_connector
+                if mt_direct_connector.is_startup_connecting():
+                    logger.info("[CYCLE-REMINDER] Batch connect still in progress — skipping check")
+                    time.sleep(15)
+                    continue
+            except Exception:
+                pass
+
             # Run the check
             with lock:
                 _check_cycle_reminders()
@@ -2327,9 +2341,19 @@ def _swap_alert_loop():
         mt_direct_connector.wait_for_initial_connect(timeout=600)
     except Exception:
         pass
+    # Settle delay after startup before hammering accounts for swap rates
+    time.sleep(30)
     _empty_retries = 0
     while True:
         try:
+            try:
+                import mt_direct_connector
+                if mt_direct_connector.is_startup_connecting():
+                    time.sleep(15)
+                    continue
+            except Exception:
+                pass
+
             enabled = dashboard_settings.get("swap_alert_enabled", False)
             instruments_str = dashboard_settings.get("swap_alert_instruments", "")
             interval_min = dashboard_settings.get("swap_alert_interval_min", 60)
@@ -6905,6 +6929,37 @@ def _disbalance_alert_loop():
     while True:
         try:
             if not dashboard_settings.get("disbalance_alert_enabled", False):
+                _time.sleep(5)
+                continue
+
+            # Gate: do not evaluate disbalance while batch connect is running
+            try:
+                import mt_direct_connector
+                if mt_direct_connector.is_startup_connecting():
+                    _time.sleep(5)
+                    continue
+            except Exception:
+                pass
+
+            # Gate: do not evaluate disbalance if any configured autoconnect accounts are disconnected!
+            # A disconnected account means half the hedge is missing, which produces bogus alerts.
+            disconnected = []
+            if mt_direct_manager:
+                for aid, acct in mt_direct_manager.accounts.items():
+                    if acct.config.get("auto_connect_start", True) and not getattr(acct, 'connected', False):
+                        disconnected.append(aid)
+            if fix_manager:
+                for aid, acct in fix_manager.accounts.items():
+                    if getattr(acct, 'auto_connect', True) and not getattr(acct, 'connected', False):
+                        disconnected.append(aid)
+            if 'iforex_manager' in globals() and iforex_manager:
+                for aid, acct in iforex_manager.accounts.items():
+                    if getattr(acct, 'auto_connect', True) and not getattr(acct, 'connected', False):
+                        disconnected.append(aid)
+
+            if disconnected:
+                app.logger.debug("[DISBALANCE-ALERT] Disbalance check suppressed: %d account(s) not connected: %s",
+                                 len(disconnected), disconnected)
                 _time.sleep(5)
                 continue
 
