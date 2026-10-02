@@ -4633,16 +4633,6 @@ class MTDirectManager:
                         Multiple calls run in parallel for DIFFERENT servers."""
                         for i, aid in enumerate(aids_for_server):
                             try:
-                                # After the FIRST account on a server connects, wait for the
-                                # broker's session state to settle before the next account
-                                # tries. Orbex and similar brokers limit concurrent logins
-                                # from the same IP and need time to reset their server-side
-                                # session context. Without this delay the 2nd/3rd accounts hit
-                                # "waiting account info, timeout" or "ConnectLock await".
-                                if i > 0:
-                                    logger.info("[%s] Waiting 10s for broker server %s to settle before next connect...",
-                                                aid, server_key)
-                                    time.sleep(10)
                                 logger.info("[%s] MT5 batch connect (server=%s, %d/%d)...",
                                             aid, server_key, i + 1, len(aids_for_server))
                                 ok, err = self.connect_account(aid)
@@ -4678,7 +4668,7 @@ class MTDirectManager:
                         t4 = threading.Thread(target=_run_mt4, daemon=True, name="BatchMT4")
                         threads.append(t4)
                         t4.start()
-                    for srv_idx, (srv_key, srv_aids) in enumerate(mt5_by_server.items()):
+                    for srv_key, srv_aids in mt5_by_server.items():
                         t5 = threading.Thread(
                             target=_run_mt5_for_server,
                             args=(srv_key, srv_aids),
@@ -4686,18 +4676,18 @@ class MTDirectManager:
                             name=f"BatchMT5-{srv_key[:20]}")
                         threads.append(t5)
                         t5.start()
-                        # Stagger thread starts: give the .NET ThreadPool time to allocate
-                        # a worker for each ConnectorTask before the next batch starts.
-                        # Without this, all ConnectLock.WaitAsync() calls fire simultaneously
-                        # and the ones at the back of the queue time out ("ConnectLock await").
-                        if srv_idx < len(mt5_by_server) - 1:
-                            time.sleep(1.5)
+                        # NOTE: Do NOT stagger thread starts here. Staggering allows
+                        # already-connected accounts' CmdHandler.RunAsync tasks to fill
+                        # the .NET ThreadPool, starving later accounts' packet-processing
+                        # tasks so GotAccountInfo never gets set within ConnectTimeout.
+                        # All server groups must start simultaneously so their CmdHandlers
+                        # compete equally for ThreadPool workers from the start.
 
                     for t in threads:
                         t.join()
 
                     all_failed = failed_mt4 + failed_mt5
-                    MAX_ROUNDS = 2
+                    MAX_ROUNDS = 3
                     round_num = 1
                     while all_failed and round_num < MAX_ROUNDS:
                         round_num += 1
