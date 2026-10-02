@@ -1295,15 +1295,13 @@ def _cycle_reminder_loop():
     """Background thread: check reminders shortly after each 5PM EST rollover.
     Also runs Friday weekend check at start of Friday (Thursday 5PM EST)."""
     _friday_checked_this_week = None
+    # Block until the initial batch connect finishes so we don't alert on partially-loaded data
+    try:
+        import mt_direct_connector
+        mt_direct_connector.wait_for_initial_connect(timeout=600)
+    except Exception:
+        pass
     while True:
-        try:
-            import mt_direct_connector
-            if getattr(mt_direct_connector, '_is_batch_connecting', False):
-                time.sleep(15)
-                continue
-        except Exception:
-            pass
-
         try:
             now = datetime.now(NY_TZ)
             # Target: 5:01 PM EST
@@ -2140,6 +2138,12 @@ def _check_missing_swap_alerts():
 def _swap_delta_loop():
     """Background thread: snapshot swap at 4:58 PM ET daily (pre-rollover),
     and check for missing swap on non-swapfree accounts at ~5:05 PM ET."""
+    # Block until all accounts have finished their initial connect attempt
+    try:
+        import mt_direct_connector
+        mt_direct_connector.wait_for_initial_connect(timeout=600)
+    except Exception:
+        pass
     while True:
         try:
             now = datetime.now(NY_TZ)
@@ -2191,8 +2195,12 @@ threading.Thread(target=_swap_delta_loop, daemon=True, name="SwapDelta").start()
 
 def _optimal_fund_email_loop():
     """Background thread: send daily optimal fund distribution summary."""
-    # Wait for accounts to finish connecting before first email attempt
-    time.sleep(300)
+    # Block until all accounts have finished their initial connect attempt
+    try:
+        import mt_direct_connector
+        mt_direct_connector.wait_for_initial_connect(timeout=600)
+    except Exception:
+        pass
     while True:
         try:
             if not dashboard_settings.get("fund_email_enabled", True):
@@ -2313,16 +2321,15 @@ _load_swap_baselines()
 
 def _swap_alert_loop():
     """Periodically check swap rates on tracked instruments and alert on change."""
-    # Delay 5 minutes to let initial batch connect finish cleanly
-    time.sleep(300)
+    # Block until all accounts have finished their initial connect attempt
+    try:
+        import mt_direct_connector
+        mt_direct_connector.wait_for_initial_connect(timeout=600)
+    except Exception:
+        pass
     _empty_retries = 0
     while True:
         try:
-            import mt_direct_connector
-            if getattr(mt_direct_connector, '_is_batch_connecting', False):
-                time.sleep(15)
-                continue
-
             enabled = dashboard_settings.get("swap_alert_enabled", False)
             instruments_str = dashboard_settings.get("swap_alert_instruments", "")
             interval_min = dashboard_settings.get("swap_alert_interval_min", 60)
@@ -6885,37 +6892,19 @@ _last_disbalance_alert_ts = {}  # subgroup -> last alert timestamp
 def _disbalance_alert_loop():
     """Background thread to detect and alert on hedge disbalances."""
     import time as _time
-    _time.sleep(10)  # Wait for initial data load
+    # Block until all accounts have finished their initial connect attempt.
+    # This prevents bogus disbalance alerts while accounts are still loading positions.
+    try:
+        import mt_direct_connector
+        app.logger.info("[DISBALANCE-ALERT] Waiting for initial batch connect to finish...")
+        mt_direct_connector.wait_for_initial_connect(timeout=600)
+        app.logger.info("[DISBALANCE-ALERT] Batch connect done — starting disbalance monitoring")
+    except Exception:
+        pass
 
     while True:
         try:
             if not dashboard_settings.get("disbalance_alert_enabled", False):
-                _time.sleep(5)
-                continue
-
-            # ── Startup grace gate ─────────────────────────────────────────────
-            # After a server restart autoconnect accounts (FIX, MT-Bridge, etc.)
-            # may not yet have re-established their sessions.  Suppress disbalance
-            # evaluation entirely until the grace window has elapsed so we don't
-            # fire false "Possible Disbalance" alerts while accounts are still
-            # connecting.
-            try:
-                import mt_direct_connector
-                if getattr(mt_direct_connector, '_is_batch_connecting', False):
-                    app.logger.debug("[DISBALANCE-ALERT] Suppressing because MT Direct batch connect is running")
-                    _time.sleep(5)
-                    continue
-            except Exception:
-                pass
-
-            grace_sec = int(dashboard_settings.get("disbalance_startup_grace_sec", 120))
-            elapsed_since_start = _time.time() - _dashboard_start_time
-            if elapsed_since_start < grace_sec:
-                remaining = int(grace_sec - elapsed_since_start)
-                app.logger.debug(
-                    "[DISBALANCE-ALERT] Startup grace active — suppressing for %ds more "
-                    "(autoconnect accounts may still be coming online)", remaining
-                )
                 _time.sleep(5)
                 continue
 

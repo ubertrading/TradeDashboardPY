@@ -105,6 +105,21 @@ def _is_init_gate_set():
 
 # Flag set while initial batch connection is running to defer heavy history/statement downloads
 _is_batch_connecting = False
+# Event that is cleared at startup (while batch is running) and set when batch finishes.
+# Use wait_for_initial_connect() to block until first startup connect attempt is fully done.
+_batch_connect_done = threading.Event()
+_batch_connect_done.set()  # default: set (no batch running). Cleared in _batch_connect_thread.
+
+def is_startup_connecting():
+    """Return True if the initial startup batch connect is still in progress.
+    Alert loops and order-query loops should skip their work while this is True."""
+    return _is_batch_connecting
+
+def wait_for_initial_connect(timeout=600):
+    """Block until the initial startup batch connect has finished (or timeout).
+    Returns True when the batch is done, False if timed out.
+    Safe to call from any thread — has no effect if called after startup is already done."""
+    return _batch_connect_done.wait(timeout=timeout)
 
 # ─── Quote-driven command loop wakeup ────────────────────────────────────
 # Signaled by any MT4/MT5 _on_quote callback so the command loop wakes
@@ -4575,6 +4590,7 @@ class MTDirectManager:
             def _batch_connect():
                 global _is_batch_connecting
                 _is_batch_connecting = True
+                _batch_connect_done.clear()  # Block all alert/query loops until batch finishes
                 try:
                     to_connect = [aid for aid, cfg in configs.items()
                                   if force_connect_all or cfg.get("auto_connect_start", True)]
@@ -4694,6 +4710,7 @@ class MTDirectManager:
                         logger.info("Batch connect complete — all %d account(s) connected", len(to_connect))
                 finally:
                     _is_batch_connecting = False
+                    _batch_connect_done.set()  # Unblock all alert/query loops
                     logger.info("Batch connect ended — activating background event subscriptions and heartbeats...")
 
                 # Post-batch activation: start QuoteBuffer and heartbeat loops for all accounts
