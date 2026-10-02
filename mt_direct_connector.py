@@ -2304,24 +2304,20 @@ class MT5DirectAccount:
                 self._client = MT5API(login, password, server, port)
                 logger.info("[%s] MT5API object created", self.account_id)
 
+                # Enable background thread for processing server messages.
+                # Crucial for Connect(): without this, incoming AccountInfo packets are not
+                # dispatched to the connect thread, causing a 60s timeout on "waiting account info".
                 try:
-                    # Disable Task-based connection so Connect() runs on a dedicated OS thread
-                    # (ConnectInThread) instead of competing for ThreadPool tasks on 1-CPU VPS.
-                    self._client.UseConnectTask = False
-                    logger.info("[%s] UseConnectTask set to False (dedicated thread mode)", self.account_id)
-                except Exception as uct_err:
-                    logger.warning("[%s] Could not set UseConnectTask: %s", self.account_id, uct_err)
+                    self._client.ProcessServerMessagesInThread = True
+                    logger.info("[%s] ProcessServerMessagesInThread set to True", self.account_id)
+                except Exception as pmt_err:
+                    logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
 
                 try:
                     # ConnectTimeout: overall timeout across all cluster members (60s)
                     self._client.ConnectTimeout = connect_timeout_sec * 1000
-                    # ConnectTimeoutForOneClusterMember: per-node timeout (35s) so heavy brokers
-                    # have sufficient time to finish symbol catalog and account info.
-                    member_timeout = min(35000, connect_timeout_sec * 1000)
-                    self._client.ConnectTimeoutForOneClusterMember = member_timeout
                     self._client.ExecutionTimeout = 45000
-                    logger.info("[%s] ConnectTimeout set to %dms (cluster member timeout: %dms)",
-                                self.account_id, connect_timeout_sec * 1000, member_timeout)
+                    logger.info("[%s] ConnectTimeout set to %dms", self.account_id, connect_timeout_sec * 1000)
                 except Exception as cto_err:
                     logger.warning("[%s] Could not set ConnectTimeout: %s", self.account_id, cto_err)
 
@@ -2404,16 +2400,6 @@ class MT5DirectAccount:
                         # Register for callback management first, then do the
                         # definitive data push.
                         _register_account(self)
-
-                        # If not in batch connect, enable message pump now.
-                        # During batch connect, this is deferred until all accounts have
-                        # connected, preventing CPU starvation on 1-core VPS.
-                        if not _is_batch_connecting:
-                            try:
-                                self._client.ProcessServerMessagesInThread = True
-                                logger.info("[%s] ProcessServerMessagesInThread set to True (post-connect)", self.account_id)
-                            except Exception as pmt_err:
-                                logger.warning("[%s] Could not set ProcessServerMessagesInThread: %s", self.account_id, pmt_err)
 
                         # Active-wait for BOTH Account.Balance AND AccountEquity
                         # to be non-zero before pushing (pure property check, no order queries).
