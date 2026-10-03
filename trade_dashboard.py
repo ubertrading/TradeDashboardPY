@@ -873,18 +873,32 @@ def _get_fill_open_epoch(fill_record, account):
     ticket = fill_record.get("ticket")
     if ticket:
         acct_info = ea_account_info.get(account, {})
+        if not acct_info:
+            for k, v in ea_account_info.items():
+                if v and (v.get("label") == account or v.get("account_number") == account or str(k) == str(account)):
+                    acct_info = v
+                    break
         positions = acct_info.get("position_details") or acct_info.get("positions", [])
         if isinstance(positions, list):
             for pos in positions:
                 if isinstance(pos, dict) and _normalize_ticket(pos.get("ticket")) == _normalize_ticket(ticket):
                     oe = pos.get("open_epoch")
+                    if not oe:
+                        oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime") or pos.get("ts_epoch")
+                        if oe_str:
+                            try:
+                                from iforex_connector import _parse_iforex_epoch
+                                oe = _parse_iforex_epoch(oe_str)
+                            except Exception:
+                                oe = _parse_broker_timestamp(oe_str)
                     if oe:
+                        fill_record["open_epoch"] = oe
                         return oe
     fill_ts_str = fill_record.get("ts", "")
     if fill_ts_str:
-        is_direct = mt_direct_manager and account in mt_direct_manager.accounts
-        ep = _parse_broker_timestamp(fill_ts_str, is_direct=is_direct)
+        ep = _parse_broker_timestamp(fill_ts_str)
         if ep is not None:
+            fill_record["open_epoch"] = ep
             return ep
     return fill_record.get("ts_epoch", 0) or 0
 
@@ -966,7 +980,37 @@ def _parse_broker_timestamp(ts_str, is_direct=True):
             continue
     return None
 
-def _check_cycle_reminders():
+def _wait_for_initial_connect(timeout=600):
+    """Wait for initial account connection in either bridge or direct mode."""
+    if USE_MT_BRIDGE:
+        try:
+            import mt_bridge_client
+            return mt_bridge_client.wait_for_initial_connect(timeout=timeout)
+        except Exception:
+            return True
+    else:
+        try:
+            import mt_direct_connector
+            return mt_direct_connector.wait_for_initial_connect(timeout=timeout)
+        except Exception:
+            return True
+
+def _is_startup_connecting():
+    """Check if startup batch connection is in progress in either bridge or direct mode."""
+    if USE_MT_BRIDGE:
+        try:
+            import mt_bridge_client
+            return mt_bridge_client.is_startup_connecting()
+        except Exception:
+            return False
+    else:
+        try:
+            import mt_direct_connector
+            return mt_direct_connector.is_startup_connecting()
+        except Exception:
+            return False
+
+def _check_cycle_reminders(trigger_auto_cycle=True):
     """Scan all accounts with cycle_reminder_enabled and check position ages.
     Two thresholds: cycle_reminder_days (warning) and cycle_max_days (critical max).
     Checks:
@@ -977,6 +1021,10 @@ def _check_cycle_reminders():
     If auto_cycle_enabled, automatically trigger cycle action on sessions."""
     global cycle_reminders
     new_reminders = {}
+
+    now_dt = datetime.now(NY_TZ)
+    now_ts = now_dt.timestamp()
+    globals()['_last_cycle_check_ts'] = now_ts
 
     # Collect accounts from MT Direct, FIX, and iFOREX managers
     all_accounts = {}  # acct_id -> (acct, config dict)
@@ -989,9 +1037,10 @@ def _check_cycle_reminders():
     if 'iforex_manager' in globals() and iforex_manager:
         for acct_id, acct in iforex_manager.accounts.items():
             all_accounts[acct_id] = (acct, acct.config)
+    for acct_id, man in manual_accounts.items():
+        if acct_id not in all_accounts and isinstance(man, dict):
+            all_accounts[acct_id] = (None, man)
 
-    now_dt = datetime.now(NY_TZ)
-    now_ts = now_dt.timestamp()
     # Friday trading period check: Thursday 17:00 EST through Friday 23:59 EST
     is_friday_period = (now_dt.weekday() == 3 and now_dt.hour >= 17) or (now_dt.weekday() == 4)
 
@@ -1160,7 +1209,7 @@ def _check_cycle_reminders():
         }
 
         # ── Auto-Cycle Trigger ──────────────────────────────────────
-        if is_critical and cfg.get("auto_cycle_enabled"):
+        if trigger_auto_cycle and is_critical and cfg.get("auto_cycle_enabled"):
             trigger = True
             time_str = dashboard_settings.get("auto_cycle_time_est", "")
             if time_str:
@@ -1292,55 +1341,48 @@ def _friday_weekend_check():
 
 
 def _cycle_reminder_loop():
-    """Background thread: check reminders shortly after each 5PM EST rollover.
-    Also runs Friday weekend check at start of Friday (Thursday 5PM EST)."""
+    """Background thread: check reminders periodically for live UI banners,
+    and trigger auto-cycle / Friday checks shortly after each 5PM EST rollover."""
     _friday_checked_this_week = None
-    # Block until the initial batch connect finishes so we don't alert on partially-loaded data
+    _last_rollover_check_day = None
+
+    # Immediate check on startup — cycle alerts are account-specific and do NOT need
+    # to wait for all accounts to connect.
     try:
-        import mt_direct_connector
-        mt_direct_connector.wait_for_initial_connect(timeout=600)
-    except Exception:
-        pass
+        with lock:
+            _check_cycle_reminders(trigger_auto_cycle=False)
+        app.logger.info("[CYCLE-REMINDER] Initial cycle reminder check complete — UI banners populated (%d alert(s))", len(cycle_reminders))
+    except Exception as e:
+        logger.error("Initial cycle reminder check error: %s", e)
+
     while True:
         try:
+            time.sleep(15)  # 15s poll interval keeps UI banners completely fresh
+
             now = datetime.now(NY_TZ)
-            # Target: 5:01 PM EST
-            target = now.replace(hour=17, minute=1, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_secs = (target - now).total_seconds()
-            # Sleep in chunks until target time arrives
-            while wait_secs > 0:
-                time.sleep(min(wait_secs, 30))
-                wait_secs = (target - datetime.now(NY_TZ)).total_seconds()
+            today_str = now.strftime("%Y-%m-%d")
 
-            # Target 5:01 PM reached!
-            # Suppress if startup batch is still connecting
-            try:
-                import mt_direct_connector
-                if mt_direct_connector.is_startup_connecting():
-                    logger.info("[CYCLE-REMINDER] Batch connect still in progress — skipping check")
-                    time.sleep(15)
-                    continue
-            except Exception:
-                pass
+            # Check if we are at or past 5:01 PM EST for today's rollover
+            is_rollover_window = (now.hour == 17 and now.minute >= 1) or (now.hour > 17)
+            do_rollover_trigger = is_rollover_window and (_last_rollover_check_day != today_str)
 
-            # Run the check
             with lock:
-                _check_cycle_reminders()
-            # Friday weekend check: Thursday 5PM EST = start of Friday trading day
-            now2 = datetime.now(NY_TZ)
-            # weekday() 3 = Thursday; after 5PM Thursday = Friday trading day
-            is_friday_start = (now2.weekday() == 3 and now2.hour >= 17) or \
-                              (now2.weekday() == 4 and now2.hour < 17)
-            week_id = now2.strftime("%Y-W%W")
-            if is_friday_start and _friday_checked_this_week != week_id:
-                _friday_checked_this_week = week_id
-                with lock:
-                    _friday_weekend_check()
+                _check_cycle_reminders(trigger_auto_cycle=do_rollover_trigger)
+
+            if do_rollover_trigger:
+                _last_rollover_check_day = today_str
+                # Friday weekend check: Thursday 5PM EST = start of Friday trading day
+                now2 = datetime.now(NY_TZ)
+                is_friday_start = (now2.weekday() == 3 and now2.hour >= 17) or \
+                                  (now2.weekday() == 4 and now2.hour < 17)
+                week_id = now2.strftime("%Y-W%W")
+                if is_friday_start and _friday_checked_this_week != week_id:
+                    _friday_checked_this_week = week_id
+                    with lock:
+                        _friday_weekend_check()
         except Exception as e:
             logger.error("Cycle reminder loop error: %s", e)
-            time.sleep(60)
+            time.sleep(30)
 
 threading.Thread(target=_cycle_reminder_loop, daemon=True, name="CycleReminder").start()
 
@@ -2154,8 +2196,7 @@ def _swap_delta_loop():
     and check for missing swap on non-swapfree accounts at ~5:05 PM ET."""
     # Block until all accounts have finished their initial connect attempt
     try:
-        import mt_direct_connector
-        mt_direct_connector.wait_for_initial_connect(timeout=600)
+        _wait_for_initial_connect(timeout=600)
     except Exception:
         pass
     while True:
@@ -2211,8 +2252,7 @@ def _optimal_fund_email_loop():
     """Background thread: send daily optimal fund distribution summary."""
     # Block until all accounts have finished their initial connect attempt
     try:
-        import mt_direct_connector
-        mt_direct_connector.wait_for_initial_connect(timeout=600)
+        _wait_for_initial_connect(timeout=600)
     except Exception:
         pass
     while True:
@@ -2337,8 +2377,7 @@ def _swap_alert_loop():
     """Periodically check swap rates on tracked instruments and alert on change."""
     # Block until all accounts have finished their initial connect attempt
     try:
-        import mt_direct_connector
-        mt_direct_connector.wait_for_initial_connect(timeout=600)
+        _wait_for_initial_connect(timeout=600)
     except Exception:
         pass
     # Settle delay after startup before hammering accounts for swap rates
@@ -2346,13 +2385,9 @@ def _swap_alert_loop():
     _empty_retries = 0
     while True:
         try:
-            try:
-                import mt_direct_connector
-                if mt_direct_connector.is_startup_connecting():
-                    time.sleep(15)
-                    continue
-            except Exception:
-                pass
+            if _is_startup_connecting():
+                time.sleep(15)
+                continue
 
             enabled = dashboard_settings.get("swap_alert_enabled", False)
             instruments_str = dashboard_settings.get("swap_alert_instruments", "")
@@ -2767,6 +2802,15 @@ def _load_sessions():
                                 t = cf.get("ticket")
                                 matched = next((f for f in fills_m if f.get("account") == acc and _normalize_ticket(f.get("ticket")) == _normalize_ticket(t)), None) if t else None
                                 cf["lots"] = float((matched.get("lots") if matched else 0) or sides_dict.get(acc, {}).get("lot_size") or sess_lots)
+                    # Migration: backfill open_epoch for fills missing it (especially imported fills)
+                    for sid_k, session_dict in sessions.items():
+                        for f in session_dict.get("fills", []):
+                            if not f.get("open_epoch") and f.get("ts"):
+                                oe = _parse_broker_timestamp(f.get("ts"))
+                                if oe:
+                                    f["open_epoch"] = oe
+                                    if f.get("imported") and f.get("ts_epoch") and f["ts_epoch"] > oe + 86400:
+                                        f["ts_epoch"] = oe
                     # Migration: normalize pair extensions to lowercase
                     # and use base pair (no extension) as global pair.
                     # e.g. global USDCHF.B -> USDCHF, side USDCHF.B -> USDCHF.b
@@ -6919,9 +6963,8 @@ def _disbalance_alert_loop():
     # Block until all accounts have finished their initial connect attempt.
     # This prevents bogus disbalance alerts while accounts are still loading positions.
     try:
-        import mt_direct_connector
         app.logger.info("[DISBALANCE-ALERT] Waiting for initial batch connect to finish...")
-        mt_direct_connector.wait_for_initial_connect(timeout=600)
+        _wait_for_initial_connect(timeout=600)
         app.logger.info("[DISBALANCE-ALERT] Batch connect done — starting disbalance monitoring")
     except Exception:
         pass
@@ -6933,13 +6976,9 @@ def _disbalance_alert_loop():
                 continue
 
             # Gate: do not evaluate disbalance while batch connect is running
-            try:
-                import mt_direct_connector
-                if mt_direct_connector.is_startup_connecting():
-                    _time.sleep(5)
-                    continue
-            except Exception:
-                pass
+            if _is_startup_connecting():
+                _time.sleep(5)
+                continue
 
             # Gate: do not evaluate disbalance if any configured autoconnect accounts are disconnected!
             # A disconnected account means half the hedge is missing, which produces bogus alerts.
@@ -12612,15 +12651,16 @@ def _check_session_completion(session):
 
     if all_done and action == "close":
         print(f"[CLOSE-DONE-TRIGGER] sid={session['id'][:8]} ALL DONE filled={dict((a, session['filled'].get(a,0)) for a in session.get('sides',{}))} closed={dict((a, session['closed'].get(a,0)) for a in session.get('sides',{}))} close_count={session.get('close_count')}")
-        # All close targets met — switch to monitor and pause.
+        # All close targets met — switch to monitor/active so the hedge monitor
+        # continues running and can close any residual unhedged positions.
         # Preserve fills/close_fills so the UI can still display position history.
         # The user can manually reset via the Reset Cycle button if needed.
         session["action"] = "monitor"
-        session["status"] = "paused"
+        session["status"] = "active"
         session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _log_event(session["id"], None, "close_complete",
-                   "All close targets met — switched to monitor/paused, fills preserved")
-        print(f"[CLOSE-DONE] Session {session['id']}: all closes done, switched to monitor/paused")
+                   "All close targets met — switched to monitor/active, fills preserved")
+        print(f"[CLOSE-DONE] Session {session['id']}: all closes done, switched to monitor/active")
         _save_sessions()
     elif all_done and action == "open":
         # All open targets met — check if all positions were also externally closed
@@ -14608,6 +14648,12 @@ def api_status():
 
     # ── Snapshot shared data under lock (keep this as short as possible) ─────
     with lock:
+        _last_cycle_ts = globals().get('_last_cycle_check_ts', 0)
+        if not cycle_reminders or (now_ts - _last_cycle_ts > 15):
+            try:
+                _check_cycle_reminders(trigger_auto_cycle=False)
+            except Exception:
+                pass
         _snap_ea_heartbeats = dict(ea_heartbeats)
         _snap_ea_account_info = {k: dict(v) for k, v in ea_account_info.items()}
         _snap_sessions = {k: dict(v) for k, v in sessions.items()}
@@ -14821,9 +14867,7 @@ def api_status():
                 t = str(f.get("ticket")) if f.get("ticket") is not None else None
                 if t and (t in closed_tks or t in dismissed_tks):
                     continue
-                ep = f.get("open_epoch") or f.get("ts_epoch")
-                if not ep:
-                    ep = _get_fill_open_epoch(f, acc)
+                ep = _get_fill_open_epoch(f, acc)
                 if ep and (oldest_epoch is None or ep < oldest_epoch):
                     oldest_epoch = ep
 
@@ -14832,16 +14876,21 @@ def api_status():
                 # Fallback: check live positions for this account & symbol
                 side_sym = (side_info.get("pair") or sc.get("pair", "")).strip().upper()
                 ai = _snap_ea_account_info.get(acc, {})
+                if not ai:
+                    for k, v in _snap_ea_account_info.items():
+                        if v and (v.get("label") == acc or v.get("account_number") == acc or str(k) == str(acc)):
+                            ai = v
+                            break
                 live_pos = ai.get("position_details") or ai.get("positions", [])
                 if live_pos and isinstance(live_pos, list):
                     for pos in live_pos:
                         if not isinstance(pos, dict):
                             continue
                         psym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
-                        if psym == side_sym:
-                            oe = pos.get("open_epoch") or pos.get("ts_epoch")
+                        if psym == side_sym or psym.startswith(side_sym) or side_sym.startswith(psym) or psym.replace(".", "").startswith(side_sym.replace(".", "")):
+                            oe = pos.get("open_epoch")
                             if not oe:
-                                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime")
+                                oe_str = pos.get("open_time") or pos.get("OpenTime") or pos.get("exeTime") or pos.get("ts_epoch")
                                 if oe_str:
                                     try:
                                         from iforex_connector import _parse_iforex_epoch
@@ -16877,6 +16926,9 @@ def _process_position_import(req):
         for i in range(total_positions):
             if i < len(pos1):
                 p = pos1[i]
+                oe1 = p.get("open_epoch")
+                if not oe1 and p.get("open_time"):
+                    oe1 = _parse_broker_timestamp(p.get("open_time"))
                 session["fills"].append({
                     "account": acct1,
                     "ticket": _normalize_ticket(p.get("ticket", 0)),
@@ -16884,7 +16936,8 @@ def _process_position_import(req):
                     "quote_price": p.get("open_price", p.get("price")),
                     "spread": None,
                     "ts": p.get("open_time", now),
-                    "ts_epoch": p.get("open_epoch", time.time()),
+                    "open_epoch": oe1,
+                    "ts_epoch": oe1 or time.time(),
                     "lots": float(p.get("lots") or lot_size),
                     "cmd_ts": None,
                     "imported": True,
@@ -16892,6 +16945,9 @@ def _process_position_import(req):
                 })
             if i < len(pos2):
                 p = pos2[i]
+                oe2 = p.get("open_epoch")
+                if not oe2 and p.get("open_time"):
+                    oe2 = _parse_broker_timestamp(p.get("open_time"))
                 session["fills"].append({
                     "account": acct2,
                     "ticket": _normalize_ticket(p.get("ticket", 0)),
@@ -16899,7 +16955,8 @@ def _process_position_import(req):
                     "quote_price": p.get("open_price", p.get("price")),
                     "spread": None,
                     "ts": p.get("open_time", now),
-                    "ts_epoch": p.get("open_epoch", time.time()),
+                    "open_epoch": oe2,
+                    "ts_epoch": oe2 or time.time(),
                     "lots": float(p.get("lots") or lot_size),
                     "cmd_ts": None,
                     "imported": True,
@@ -22721,8 +22778,21 @@ function _getSessionSideAge(session, sideNum, acc) {
   // 2. Secondary: Check live position_age_by_symbol from account status
   const sideInfo = (session.sides && session.sides[acc]) || {};
   const sidePair = (sideInfo.pair || session.pair || '').toUpperCase().trim();
-  if (acctInfo && acctInfo.position_age_by_symbol && acctInfo.position_age_by_symbol[sidePair] && acctInfo.position_age_by_symbol[sidePair].age != null) {
-    return acctInfo.position_age_by_symbol[sidePair].age;
+  const cleanSym = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const targetSymClean = cleanSym(sidePair);
+
+  if (acctInfo && acctInfo.position_age_by_symbol) {
+    if (acctInfo.position_age_by_symbol[sidePair] && acctInfo.position_age_by_symbol[sidePair].age != null) {
+      return acctInfo.position_age_by_symbol[sidePair].age;
+    }
+    for (const [sKey, sVal] of Object.entries(acctInfo.position_age_by_symbol)) {
+      if (sVal && sVal.age != null) {
+        const kClean = cleanSym(sKey);
+        if (kClean && targetSymClean && (kClean === targetSymClean || kClean.startsWith(targetSymClean) || targetSymClean.startsWith(kClean))) {
+          return sVal.age;
+        }
+      }
+    }
   }
 
   // 3. Fallback: Find oldest epoch among open fills
@@ -22734,7 +22804,12 @@ function _getSessionSideAge(session, sideNum, acc) {
 
   let oldestEpoch = null;
   openFills.forEach(f => {
-    const ep = f.open_epoch || f.ts_epoch;
+    let ep = f.open_epoch;
+    if (!ep && f.ts) {
+      const parsed = Date.parse(f.ts.replace(' ', 'T'));
+      if (!isNaN(parsed)) ep = parsed / 1000;
+    }
+    if (!ep) ep = f.ts_epoch;
     if (ep && (oldestEpoch === null || ep < oldestEpoch)) {
       oldestEpoch = ep;
     }
