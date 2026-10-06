@@ -14648,12 +14648,6 @@ def api_status():
 
     # ── Snapshot shared data under lock (keep this as short as possible) ─────
     with lock:
-        _last_cycle_ts = globals().get('_last_cycle_check_ts', 0)
-        if not cycle_reminders or (now_ts - _last_cycle_ts > 15):
-            try:
-                _check_cycle_reminders(trigger_auto_cycle=False)
-            except Exception:
-                pass
         _snap_ea_heartbeats = dict(ea_heartbeats)
         _snap_ea_account_info = {k: dict(v) for k, v in ea_account_info.items()}
         _snap_sessions = {k: dict(v) for k, v in sessions.items()}
@@ -30736,7 +30730,7 @@ if __name__ == '__main__':
 
         try:
             if serve is not None:
-                serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=16)
+                serve(app, host=TRADE_HOST, port=TRADE_PORT, threads=32)
             else:
                 app.run(host=TRADE_HOST, port=TRADE_PORT, threaded=True)
         except KeyboardInterrupt:

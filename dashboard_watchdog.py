@@ -58,6 +58,10 @@ TRADE_HOST = os.environ.get("TRADE_HOST", "127.0.0.2")
 TRADE_PORT = int(os.environ.get("TRADE_PORT", "80"))
 CHECK_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "30"))
 FAILURE_THRESHOLD = int(os.environ.get("WATCHDOG_FAILURES", "3"))
+# Per-request HTTP timeout for health checks.  The old hardcoded 15 s was problematic:
+# the watchdog tried /api/ping (15 s) then /api/status (15 s) = up to 30 s per cycle.
+# 8 s is plenty for a healthy server and avoids chaining two long waits.
+HEALTH_CHECK_TIMEOUT = int(os.environ.get("WATCHDOG_HTTP_TIMEOUT", "8"))
 AUTO_RESTART = os.environ.get("WATCHDOG_AUTO_RESTART", "1") == "1"
 RESTART_CMD = os.environ.get("WATCHDOG_RESTART_CMD", "py trade_dashboard.py")
 RESTART_DELAY = int(os.environ.get("WATCHDOG_RESTART_DELAY", "10"))
@@ -159,20 +163,30 @@ def _notify(settings, subject, body):
 
 def _check_dashboard():
     """Check if dashboard is responding via HTTP. Returns True if healthy.
-    Prefers lightweight /api/ping (<1ms), falls back to /api/status if ping is not available.
+
+    Tries the lightweight /api/ping first.  Falls back to /api/status ONLY if
+    ping returns HTTP 404 (running on an older dashboard build without the ping
+    endpoint).  Any other failure — timeout, connection refused, OS error — is
+    reported as unhealthy immediately without attempting the heavier status
+    endpoint.  This prevents a double-timeout wait (HEALTH_CHECK_TIMEOUT×2 per
+    cycle) that was causing false positive crash alerts when the server was
+    temporarily slow but alive.
     """
     for url in (DASHBOARD_PING_URL, DASHBOARD_STATUS_URL):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "TradeDashboardWatchdog/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=HEALTH_CHECK_TIMEOUT) as resp:
                 if resp.status in (200, 204):
                     return True
+            return False
         except urllib.error.HTTPError as e:
             if e.code == 404 and url == DASHBOARD_PING_URL:
-                continue  # Fallback to status endpoint if running on older dashboard version
+                continue  # Old dashboard without /api/ping — try /api/status
             return False
         except Exception:
-            pass
+            # Timeout or connection error on the primary URL.  Do NOT fall through
+            # to the status endpoint — it holds the global lock and is slower.
+            return False
     return False
 
 
@@ -238,7 +252,7 @@ def _restart_dashboard():
 
 def main():
     print(f"[WATCHDOG] Monitoring dashboard at {DASHBOARD_URL}")
-    print(f"[WATCHDOG] Check interval: {CHECK_INTERVAL}s, failure threshold: {FAILURE_THRESHOLD}")
+    print(f"[WATCHDOG] Check interval: {CHECK_INTERVAL}s, failure threshold: {FAILURE_THRESHOLD}, HTTP timeout: {HEALTH_CHECK_TIMEOUT}s")
     print(f"[WATCHDOG] Auto-restart: {'ON' if AUTO_RESTART else 'OFF'}"
           + (f" (cmd: {RESTART_CMD}, max: {MAX_RESTARTS or 'unlimited'})" if AUTO_RESTART else ""))
     print(f"[WATCHDOG] PID file:        {PID_FILE}")
@@ -254,6 +268,11 @@ def main():
     restart_count = 0        # Total restarts since last successful recovery
     dashboard_proc = None    # Tracked subprocess (if we started it)
     last_known_pid = None    # Last PID we saw alive
+    # Require 2 consecutive "PID not found" readings before declaring a crash.
+    # A single tasklist failure (Windows Defender scan, power-save CPU throttling,
+    # or transient encoding glitch) used to immediately trigger the CRASH branch
+    # and include the faulthandler.log in the alert — even with PID still running.
+    _pid_death_count = 0
 
     while True:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -264,8 +283,17 @@ def main():
             last_known_pid = current_pid
         pid_alive = _is_pid_alive(last_known_pid)
 
-        # If we have a PID and it's definitively dead → count as immediate failure
-        pid_crashed = (last_known_pid is not None and pid_alive is False)
+        # Accumulate consecutive "PID not found" readings; reset on any alive signal.
+        if last_known_pid is not None and pid_alive is False:
+            _pid_death_count += 1
+        else:
+            _pid_death_count = 0
+
+        # Only declare crash after 2 consecutive dead reads to filter transient
+        # tasklist failures (single-poll false positive was the root cause of the
+        # "CRASH DETECTED" alerts that arrived while PID was still running).
+        pid_crashed = (_pid_death_count >= 2)
+
 
         # ── HTTP health check ──────────────────────────────────────────────
         healthy = _check_dashboard()

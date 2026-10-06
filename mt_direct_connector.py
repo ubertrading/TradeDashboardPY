@@ -104,11 +104,11 @@ def _is_init_gate_set():
     return _mt4_init_gate.is_set() and _mt5_init_gate.is_set()
 
 # Flag set while initial batch connection is running to defer heavy history/statement downloads
-_is_batch_connecting = True
+_is_batch_connecting = False
 # Event that is cleared at startup (while batch is running) and set when batch finishes.
 # Use wait_for_initial_connect() to block until startup connect attempt is fully done.
 _batch_connect_done = threading.Event()
-# NOT set by default! Remains cleared until _batch_connect finishes all rounds.
+_batch_connect_done.set()  # Default set (no batch running). Cleared by _batch_connect.
 
 def is_startup_connecting():
     """Return True if the initial startup batch connect is still in progress.

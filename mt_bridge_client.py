@@ -256,14 +256,27 @@ def ensure_bridge_running():
 
     try:
         bridge_log_file = open(bridge_log_path, "a", encoding="utf-8")
-        _bridge_process = subprocess.Popen(
-            [BRIDGE_EXE],
-            cwd=os.path.dirname(BRIDGE_EXE),
-            stdout=bridge_log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            creationflags=creation_flags
-        )
+        # Attempt to spawn with CREATE_BREAKAWAY_FROM_JOB (0x01000000) so MtBridgeService
+        # does not inherit any Windows Service / NSSM Job Object. This ensures it continues
+        # running in background when the Python dashboard stops or restarts.
+        try:
+            _bridge_process = subprocess.Popen(
+                [BRIDGE_EXE],
+                cwd=os.path.dirname(BRIDGE_EXE),
+                stdout=bridge_log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=creation_flags | 0x01000000
+            )
+        except Exception:
+            _bridge_process = subprocess.Popen(
+                [BRIDGE_EXE],
+                cwd=os.path.dirname(BRIDGE_EXE),
+                stdout=bridge_log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=creation_flags
+            )
     except Exception as launch_err:
         logger.error("Failed to spawn MtBridgeService: %s", launch_err)
         return False
@@ -768,74 +781,85 @@ class MtBridgeAccount:
         # must do the sync here after every successful position push.
         # Skip during cycling/closing/opening — mid-execution the broker async delivery
         # can lag behind fill callbacks, causing a false rollback of the filled count.
+        #
+        # Guard this entire section with the dashboard lock: we iterate sessions_dict
+        # while Flask request handlers may concurrently add/remove sessions under the
+        # same lock, which caused intermittent RuntimeError (dict changed during iteration)
+        # and the resulting GIL contention contributed to watchdog HTTP timeouts.
+        # save_sessions() (file I/O) is called outside the lock to avoid holding it
+        # during a disk write.
         _needs_save = False
-        sessions_dict = dd.get("sessions", {})
-        for _sid, _sess in sessions_dict.items():
-            if not _sess.get("imported"):
-                continue
-            if aid not in _sess.get("sides", {}):
-                continue
-            sess_action = _sess.get("action", "")
-            # Skip when the session is actively opening, cycling, or closing.
-            # During "open" the broker count can lag behind fill callbacks by 1-2 polls
-            # (500ms each) causing this sync to decrease filled and retrigger extra orders.
-            if sess_action in ("open", "close", "close_limit") or sess_action.startswith("cycle_"):
-                continue
-
-            # Exclude tickets that are already claimed by OTHER sessions for this account
-            other_claimed_tickets = set()
-            for other_sid, other_sess in sessions_dict.items():
-                if other_sid == _sid:
+        with dd["lock"]:
+            sessions_dict = dd.get("sessions", {})
+            for _sid, _sess in list(sessions_dict.items()):
+                if not _sess.get("imported"):
                     continue
-                other_closed = set(
-                    str(cf.get("ticket")) for cf in other_sess.get("close_fills", [])
-                    if cf.get("account") == aid and cf.get("ticket") is not None
-                )
-                for f in other_sess.get("fills", []):
-                    if f.get("account") == aid and f.get("ticket") is not None:
-                        norm_t = str(f.get("ticket"))
-                        if norm_t not in other_closed:
-                            other_claimed_tickets.add(norm_t)
-
-            # Count only positions that match this session's pair, match expected lot size,
-            # and are NOT already claimed by another session on this account.
-            sess_pair = (_sess.get("sides", {}).get(aid, {}).get("pair") or _sess.get("pair", "")).upper().strip()
-            sess_lot_size = float(_sess.get("sides", {}).get(aid, {}).get("lot_size") or _sess.get("lot_size") or 0.0)
-
-            matching_positions = []
-            for tk, p in pos_dict.items():
-                if str(tk) in other_claimed_tickets:
+                if aid not in _sess.get("sides", {}):
                     continue
-                sym = (p.get("symbol", "") or "").upper().strip()
-                if sess_pair:
-                    if not (sym.startswith(sess_pair) or sess_pair.startswith(sym)):
-                        continue
-                if sess_lot_size > 0:
-                    p_lots = float(p.get("lots", 0.0) or 0.0)
-                    already_in_session = any(_normalize_ticket(f.get("ticket")) == _normalize_ticket(tk) for f in _sess.get("fills", []) if f.get("account") == aid)
-                    if not already_in_session and p_lots > 0 and abs(p_lots - sess_lot_size) > 0.0001:
-                        continue
-                matching_positions.append(tk)
+                sess_action = _sess.get("action", "")
+                # Skip when the session is actively opening, cycling, or closing.
+                # During "open" the broker count can lag behind fill callbacks by 1-2 polls
+                # (500ms each) causing this sync to decrease filled and retrigger extra orders.
+                if sess_action in ("open", "close", "close_limit") or sess_action.startswith("cycle_"):
+                    continue
 
-            ea_pos = len(matching_positions)
-            # Never let auto-sync exceed total_positions for imported sessions
-            sess_total = _sess.get("total_positions")
-            if sess_total is not None and sess_total > 0:
-                ea_pos = min(ea_pos, int(sess_total))
+                # Exclude tickets that are already claimed by OTHER sessions for this account
+                other_claimed_tickets = set()
+                for other_sid, other_sess in sessions_dict.items():
+                    if other_sid == _sid:
+                        continue
+                    other_closed = set(
+                        str(cf.get("ticket")) for cf in other_sess.get("close_fills", [])
+                        if cf.get("account") == aid and cf.get("ticket") is not None
+                    )
+                    for f in other_sess.get("fills", []):
+                        if f.get("account") == aid and f.get("ticket") is not None:
+                            norm_t = str(f.get("ticket"))
+                            if norm_t not in other_closed:
+                                other_claimed_tickets.add(norm_t)
 
-            old_filled = _sess.get("filled", {}).get(aid, 0)
-            if ea_pos == old_filled:
-                continue
-            # Safety: never decrease the filled count via auto-sync.
-            # A decrease means the broker hasn't fully propagated the new position yet.
-            # Only upward corrections (recovering from a missed fill callback) are safe.
-            if ea_pos < old_filled:
-                logger.debug("[%s] Bridge auto-sync sid=%s: suppressing downward correction %d -> %d (broker lag)",
-                             aid, _sid[:8], old_filled, ea_pos)
-                continue
-            logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed, pair=%s)", aid, _sid[:8], old_filled, ea_pos, sess_pair)
-            _sess.setdefault("filled", {})[aid] = ea_pos
-            _needs_save = True
+                # Count only positions that match this session's pair, match expected lot size,
+                # and are NOT already claimed by another session on this account.
+                sess_pair = (_sess.get("sides", {}).get(aid, {}).get("pair") or _sess.get("pair", "")).upper().strip()
+                sess_lot_size = float(_sess.get("sides", {}).get(aid, {}).get("lot_size") or _sess.get("lot_size") or 0.0)
+
+                matching_positions = []
+                for tk, p in pos_dict.items():
+                    if str(tk) in other_claimed_tickets:
+                        continue
+                    sym = (p.get("symbol", "") or "").upper().strip()
+                    if sess_pair:
+                        if not (sym.startswith(sess_pair) or sess_pair.startswith(sym)):
+                            continue
+                    if sess_lot_size > 0:
+                        p_lots = float(p.get("lots", 0.0) or 0.0)
+                        already_in_session = any(_normalize_ticket(f.get("ticket")) == _normalize_ticket(tk) for f in _sess.get("fills", []) if f.get("account") == aid)
+                        if not already_in_session and p_lots > 0 and abs(p_lots - sess_lot_size) > 0.0001:
+                            continue
+                    matching_positions.append(tk)
+
+                ea_pos = len(matching_positions)
+                # Never let auto-sync exceed total_positions for imported sessions
+                sess_total = _sess.get("total_positions")
+                if sess_total is not None and sess_total > 0:
+                    ea_pos = min(ea_pos, int(sess_total))
+
+                old_filled = _sess.get("filled", {}).get(aid, 0)
+                if ea_pos == old_filled:
+                    continue
+                # Safety: never decrease the filled count via auto-sync.
+                # A decrease means the broker hasn't fully propagated the new position yet.
+                # Only upward corrections (recovering from a missed fill callback) are safe.
+                if ea_pos < old_filled:
+                    logger.debug("[%s] Bridge auto-sync sid=%s: suppressing downward correction %d -> %d (broker lag)",
+                                 aid, _sid[:8], old_filled, ea_pos)
+                    continue
+                logger.info("[%s] Bridge auto-sync sid=%s: filled %d -> %d (broker confirmed, pair=%s)", aid, _sid[:8], old_filled, ea_pos, sess_pair)
+                _sess.setdefault("filled", {})[aid] = ea_pos
+                _needs_save = True
+
+        # save_sessions() does file I/O — call it outside the lock to avoid holding
+        # the dashboard lock during a disk write.
         if _needs_save:
             save_fn = dd.get("save_sessions")
             if save_fn:
@@ -844,6 +868,7 @@ class MtBridgeAccount:
     def get_positions_for_import(self, pair_filter="", comment_filter=""):
         """Get open positions in import-compatible format."""
         params = []
+
         if pair_filter:
             params.append(f"pair={pair_filter}")
         if comment_filter:
@@ -1182,6 +1207,20 @@ class MtBridgeAccount:
 # MtBridgeManager — drop-in replacement for MTDirectManager
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ─── Startup connection synchronization ────────────────────────────────────
+_batch_connect_done = threading.Event()
+_batch_connect_done.set()  # Default set (ready)
+_is_batch_connecting = False
+
+def is_startup_connecting():
+    """Return True if initial startup connect/sync is still in progress."""
+    return _is_batch_connecting
+
+def wait_for_initial_connect(timeout=600):
+    """Block until startup connect attempt is fully done (or timeout)."""
+    return _batch_connect_done.wait(timeout=timeout)
+
+
 class MtBridgeManager:
     """
     Manages MT4/MT5 accounts via the MtBridgeService HTTP API.
@@ -1206,13 +1245,44 @@ class MtBridgeManager:
             logger.error("MtBridgeService failed to start — MT Direct disabled")
             return
         self._running = True
+
+        global _is_batch_connecting
+        _is_batch_connecting = True
+        _batch_connect_done.clear()
+
         self._load_config()
+
+        # Start initial connect monitor thread
+        threading.Thread(
+            target=self._monitor_initial_connect, daemon=True, name="BridgeInitSync"
+        ).start()
 
         # Start the Python-side background command processor thread (same as MTDirectManager)
         self._command_thread = threading.Thread(
             target=self._command_loop, daemon=True, name="BridgeCommandLoop"
         )
         self._command_thread.start()
+
+    def _monitor_initial_connect(self):
+        """Monitor initial bridge connection and signal _batch_connect_done when ready."""
+        global _is_batch_connecting
+        logger.info("[MT-BRIDGE] Waiting for initial account connection sync...")
+        start_t = time.time()
+        max_wait = 60.0  # max 60s wait
+        try:
+            while time.time() - start_t < max_wait:
+                auto_accts = [a for a in self.accounts.values() if a.config.get("auto_connect_start", True)]
+                if auto_accts and all(a.connected for a in auto_accts):
+                    logger.info("[MT-BRIDGE] All %d auto-connect accounts connected", len(auto_accts))
+                    break
+                time.sleep(2.0)
+            else:
+                connected = sum(1 for a in self.accounts.values() if a.connected)
+                logger.info("[MT-BRIDGE] Initial connection window elapsed: %d/%d accounts connected", connected, len(self.accounts))
+        finally:
+            _is_batch_connecting = False
+            _batch_connect_done.set()
+            logger.info("[MT-BRIDGE] Initial batch connect marked done — alert and monitoring loops active")
 
     def _command_loop(self):
         """Background thread executing orders from dashboard shared data (dd)."""
