@@ -8239,10 +8239,15 @@ def _find_recent_balance_deal(account, delta, now_ts):
         if not deals:
             return None
 
-        # Separate non-trade deals (skip buy/sell)
+        # Separate non-trade deals (skip buy/sell).
+        # Sort ascending by close_time so that:
+        #   - Pass 4 fallback: [-1] = most recent deal (not oldest)
+        #   - Pass 2b time-bucket sub-clusters are contiguous
         non_trade = [d for d in deals if str(d.get("type", "")).lower() not in ("buy", "sell")]
         if not non_trade:
             return None
+        # Stable sort by close_time string (broker format "YYYY.MM.DD HH:MM:SS" sorts lexicographically)
+        non_trade.sort(key=lambda d: str(d.get("close_time", "") or d.get("open_time", "") or ""))
 
         # ── Pass 1: single deal exact-amount match ──
         for d in reversed(non_trade):
@@ -8303,6 +8308,68 @@ def _find_recent_balance_deal(account, delta, now_ts):
                     "_breakdown": breakdown,
                 }
 
+        # ── Pass 2b: time-proximity sub-cluster ──
+        # When the full fee_cluster spans multiple days (e.g. yesterday's 3-day fees + today's),
+        # the full-cluster sum won't match delta.  Group fee deals into 5-minute buckets and try
+        # each bucket's sum — this isolates today's concurrent per-symbol storage fees from
+        # yesterday's without requiring an exact timestamp match.
+        if fee_cluster:
+            # Build buckets: anchor on the close_time of each deal, group within ±150s (5 min)
+            def _ct_str(d):
+                return str(d.get("close_time", "") or d.get("open_time", "") or "")
+
+            # Sort fee_cluster by time (non_trade is already sorted ascending)
+            buckets = []  # list of lists
+            for d in fee_cluster:
+                placed = False
+                for bkt in buckets:
+                    # Compare close_time strings; if within 5 min they belong together
+                    if abs(ord(_ct_str(d)[0:1] or "0") - ord(_ct_str(bkt[0])[0:1] or "0")) == 0:
+                        # Refined: compare the full string prefix up to minute granularity
+                        if _ct_str(d)[:15] == _ct_str(bkt[0])[:15]:
+                            bkt.append(d)
+                            placed = True
+                            break
+                if not placed:
+                    buckets.append([d])
+
+            tol = max(0.05, abs(delta) * 0.01)
+            # Try each bucket, newest first (last bucket in ascending-sorted list is most recent)
+            for bkt in reversed(buckets):
+                bkt_sum = sum(
+                    float(d.get("profit", 0.0) or 0.0) + float(d.get("commission", 0.0) or 0.0)
+                    for d in bkt
+                )
+                if abs(bkt_sum - delta) <= tol:
+                    all_storage = all(
+                        "storage" in str(d.get("comment", "") or "").lower()
+                        or d.get("fee_type") == "storage_fee"
+                        for d in bkt
+                    )
+                    breakdown = _build_fee_breakdown_from_deals(bkt, account, total_delta=bkt_sum)
+                    if all_storage and breakdown:
+                        composite_comment = _format_composite_storage_comment(breakdown)
+                        symbols_str = " ".join(b["symbol"] for b in breakdown)
+                    else:
+                        composite_comment = "; ".join(
+                            str(d.get("comment", "") or "") for d in bkt if d.get("comment")
+                        )
+                        symbols_str = " ".join(b["symbol"] for b in breakdown) if breakdown else ""
+
+                    logger.info("[FEE-DETECT] %s: time-bucket cluster of %d deals sums to %.2f (delta=%.2f) syms=%s",
+                                account, len(bkt), bkt_sum, delta, symbols_str)
+                    return {
+                        "type": "charge",
+                        "profit": bkt_sum,
+                        "commission": 0.0,
+                        "comment": composite_comment,
+                        "symbol": symbols_str,
+                        "is_fee": True,
+                        "fee_type": "storage_fee" if all_storage else "fee",
+                        "_matched_deals": bkt,
+                        "_breakdown": breakdown,
+                    }
+
         # ── Pass 3: best approximate single-deal match (within 10 %) ──
         best_deal = None
         best_diff = 999999.0
@@ -8324,6 +8391,7 @@ def _find_recent_balance_deal(account, delta, now_ts):
         # IMPORTANT: Never return a balance/credit/deposit deal as a fallback. If the most
         # recent non-trade deal is a deposit (fee_type=="balance"), its comment would
         # contaminate the alert text for an unrelated storage-fee balance change.
+        # NOTE: non_trade is sorted ascending above, so [-1] is the most recent deal.
         fee_type_non_trade = [
             d for d in non_trade
             if str(d.get("type", "")).lower() not in ("balance", "credit", "2", "3", "op_balance", "op_credit")
