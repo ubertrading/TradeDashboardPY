@@ -11894,26 +11894,28 @@ def _should_issue_command(session, account):
                 # Starting from 0 ensures we always find the oldest uncycled position.
                 search_idx = 0
                 found_old_enough = False
-                # Resolve account config for broker-aware day-count (respects day_schedule_template)
-                _acct_cfg_cy = None
-                if mt_direct_manager and account in mt_direct_manager.accounts:
-                    _acct_cfg_cy = mt_direct_manager.accounts[account].config
-                elif fix_manager and account in fix_manager.accounts:
-                    _acct_cfg_cy = fix_manager.accounts[account].config
+                # Resolve account config for broker-aware day-count so the Swap/Session
+                # Day Schedule set in the account modal drives the age calculation.
+                # _get_account_config covers all connector types: MT Direct, FIX, and iForex.
+                # The previous code only checked mt_direct_manager/fix_manager, leaving iForex
+                # accounts with _acct_cfg_cy=None which fell back to the default Mon-Fri
+                # 5-day schedule — making 30 calendar days count as only ~21 rollover days
+                # and causing the cycle to immediately conclude "no positions old enough".
+                _acct_cfg_cy = _get_account_config(account)
                 while search_idx < len(acct_fills):
                     fill_record = acct_fills[search_idx]
                     fill_epoch = _get_fill_open_epoch(fill_record, account)
                     if fill_epoch:
                         age_days = _count_rollover_days(fill_epoch, day_schedule=_acct_cfg_cy)
                         if age_days < cycle_days:
-                            print(f"[CYCLE-DBG] acct={account}: position {search_idx} too new (age={age_days} rollover days < {cycle_days}d) - skipping")
+                            print(f"[CYCLE-DBG] acct={account}: position {search_idx} too new (age={age_days:.2f}d < {cycle_days}d) - skipping")
                             search_idx += 1
                         else:
-                            print(f"[CYCLE-DBG] acct={account}: position {search_idx} old enough (age={age_days} rollover days >= {cycle_days}d)")
+                            print(f"[CYCLE-DBG] acct={account}: position {search_idx} old enough (age={age_days:.2f}d >= {cycle_days}d)")
                             found_old_enough = True
                             break
                     else:
-                        print(f"[CYCLE-DBG] acct={account}: position {search_idx} missing ts_epoch, allowing cycle")
+                        print(f"[CYCLE-DBG] acct={account}: position {search_idx} missing open_epoch, allowing cycle")
                         found_old_enough = True
                         break
                 # Update idx to the found position for downstream use
