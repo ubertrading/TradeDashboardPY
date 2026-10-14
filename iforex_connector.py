@@ -206,10 +206,15 @@ class IForexAccount:
         self.dd = dashboard_data
         
         self.session = requests.Session()
+        # Derive origin and referer from base_url so .eu accounts use the correct domain
+        from urllib.parse import urlparse as _urlparse
+        _parsed_url = _urlparse(self.base_url)
+        _origin = f"{_parsed_url.scheme}://{_parsed_url.netloc}"
+        _referer = f"{self.base_url}/trading/new-transaction"
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 Edg/152.0.0.0",
-            "Referer": "https://trader.iforex.com/webpl4/trading/new-transaction",
-            "Origin": "https://trader.iforex.com",
+            "Referer": _referer,
+            "Origin": _origin,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Microsoft Edge";v="152"',
@@ -287,6 +292,8 @@ class IForexAccount:
         self.connected = True
         # Immediate fast reconciliation before starting worker loops
         try:
+            # Opportunistic HTTP probe (rarely finds anything — iForex uses SignalR for positions)
+            self._sync_open_positions_http()
             self._sync_closed_positions_http()
             self._sync_account_balance_http()
             self._update_ea_account_info()
@@ -297,7 +304,11 @@ class IForexAccount:
         self._poll_thread.start()
         self._pos_sync_thread = threading.Thread(target=self._position_sync_loop, daemon=True, name=f"iforex_pos_sync_{self.account_id}")
         self._pos_sync_thread.start()
-        logger.info("[%s] iFOREX Direct polling & HTTP position sync threads started", self.account_id)
+        # Browser-based position sync: scrapes open deals from the React DOM every 5 min.
+        # This is the only reliable way to pick up positions opened outside the dashboard.
+        self._browser_sync_thread = threading.Thread(target=self._browser_position_sync_loop, daemon=True, name=f"iforex_browser_sync_{self.account_id}")
+        self._browser_sync_thread.start()
+        logger.info("[%s] iFOREX Direct polling, HTTP position sync & browser position sync threads started", self.account_id)
 
     def stop(self):
         """Stop background polling."""
@@ -405,10 +416,255 @@ class IForexAccount:
                     except Exception:
                         pass
                     logger.info("[%s] Refreshed security token via fast HTTP: %s", self.account_id, self.security_token)
+                    # Also grab open positions embedded in the InitialData response
+                    try:
+                        self._parse_open_positions_from_initial_data(data)
+                    except Exception:
+                        pass
                     return self.security_token
         except Exception as e:
             logger.warning("[%s] Fast HTTP token refresh failed: %s", self.account_id, e)
         return None
+
+    def _parse_deal_list(self, deals_raw: list, source: str) -> int:
+        """
+        Merge a raw list of open deal dicts into _open_orders.
+        Handles both the InitialData/GetData field names and the React DOM field names
+        returned by the browser scraper (same data, same structure).
+
+        Field name variants observed:
+          Ticket    : positionNumber | orderID | itemId | ItemId | ticket | Ticket
+          Instrument: instrumentID | instrumentId | InstrumentId  (int -> REVERSE_INSTRUMENT_MAP)
+          Direction : orderDir (1=buy, 0=sell) | direction (bool: true=sell) | Type/type
+          Amount    : dealAmount | amount | Amount | baseAmount
+          Open rate : orderRateNumeric | orderRate | openRate | OpenRate | openPrice
+          Open time : exeTime | openDateTime | OpenDateTime | openTime
+          Profit    : plNumeric | profit | Profit | pandLCalc
+
+        Returns number of new positions merged.
+        """
+        if not deals_raw or not isinstance(deals_raw, list):
+            return 0
+
+        new_count = 0
+        with self._lock:
+            existing_tickets = {
+                str(o.get("Ticket") or o.get("ticket") or "")
+                for o in self._open_orders
+                if o.get("Ticket") or o.get("ticket")
+            }
+            for d in deals_raw:
+                if not isinstance(d, dict):
+                    continue
+                # ── Ticket ──────────────────────────────────────────────────
+                ticket = str(
+                    d.get("positionNumber") or d.get("orderID") or
+                    d.get("itemId") or d.get("ItemId") or
+                    d.get("ticket") or d.get("Ticket") or ""
+                ).strip()
+                if not ticket or ticket == "0":
+                    continue
+                if ticket in existing_tickets:
+                    continue
+
+                # ── Direction ────────────────────────────────────────────────
+                order_dir = d.get("orderDir")
+                dir_bool  = d.get("direction", d.get("Direction"))
+                if order_dir is not None:
+                    # 1 = buy, 0 = sell  (React DOM convention)
+                    direction = "buy" if int(order_dir) == 1 else "sell"
+                elif dir_bool is not None:
+                    # bool true = sell  (InitialData convention)
+                    if isinstance(dir_bool, bool):
+                        direction = "sell" if dir_bool else "buy"
+                    else:
+                        direction = "sell" if str(dir_bool).lower() in ("true", "sell", "1") else "buy"
+                else:
+                    direction = str(d.get("Type") or d.get("type") or "buy").lower()
+                    direction = "sell" if "sell" in direction else "buy"
+
+                # ── Symbol from instrument ID ────────────────────────────────
+                inst_id = d.get("instrumentID") or d.get("instrumentId") or d.get("InstrumentId")
+                symbol = ""
+                if inst_id is not None:
+                    try:
+                        symbol = REVERSE_INSTRUMENT_MAP.get(int(inst_id), "")
+                    except (ValueError, TypeError):
+                        pass
+                if not symbol:
+                    symbol = str(d.get("symbol") or d.get("Symbol") or "UNKNOWN")
+
+                # ── Amount / Lots ────────────────────────────────────────────
+                amt_raw = d.get("dealAmount") or d.get("amount") or d.get("Amount") or d.get("baseAmount") or 0
+                try:
+                    amount = float(str(amt_raw).replace(",", ""))
+                except (ValueError, TypeError):
+                    amount = 0.0
+                lots = notional_to_lots(symbol, amount)
+
+                # ── Open rate ────────────────────────────────────────────────
+                open_rate = float(
+                    d.get("orderRateNumeric") or d.get("orderRate") or
+                    d.get("openRate") or d.get("OpenRate") or d.get("openPrice") or 0.0
+                )
+
+                # ── Open time ────────────────────────────────────────────────
+                open_time = str(
+                    d.get("exeTime") or d.get("openDateTime") or
+                    d.get("OpenDateTime") or d.get("openTime") or ""
+                )
+                open_epoch = _parse_iforex_epoch(open_time) if open_time else None
+
+                # ── Profit ───────────────────────────────────────────────────
+                profit = float(d.get("plNumeric") or d.get("profit") or d.get("Profit") or d.get("pandLCalc") or 0.0)
+
+                order_entry = {
+                    "Ticket": ticket, "ticket": ticket,
+                    "Symbol": symbol, "symbol": symbol,
+                    "Type": direction, "direction": direction,
+                    "Lots": lots, "lots": lots,
+                    "Amount": amount, "amount": amount,
+                    "OpenPrice": open_rate, "open_price": open_rate,
+                    "OpenTime": open_time, "open_time": open_time,
+                    "open_epoch": open_epoch,
+                    "Profit": profit, "profit": profit,
+                    "source": source,
+                }
+                self._open_orders.append(order_entry)
+                existing_tickets.add(ticket)
+                new_count += 1
+
+        if new_count > 0:
+            self._save_open_orders()
+            logger.info("[%s] %s: merged %d pre-existing open position(s) into tracker",
+                        self.account_id, source, new_count)
+        return new_count
+
+    def _parse_open_positions_from_initial_data(self, data: dict) -> int:
+        """Extract and merge open deals from an InitialData/GetData response dict."""
+        # Log top-level keys once so we can diagnose field name mismatches
+        if not getattr(self, "_initial_data_keys_logged", False):
+            self._initial_data_keys_logged = True
+            logger.info("[%s] InitialData/GetData top-level keys: %s",
+                        self.account_id, list(data.keys())[:30])
+
+        # Try every plausible nesting location
+        deals_raw = None
+        for candidate in [
+            data.get("openDeals"),
+            data.get("OpenDeals"),
+            (data.get("portfolio") or {}).get("openDeals"),
+            (data.get("Portfolio") or {}).get("openDeals"),
+            (data.get("customer") or {}).get("openDeals"),
+            (data.get("Customer") or {}).get("openDeals"),
+            (data.get("data") or {}).get("openDeals"),
+        ]:
+            if candidate and isinstance(candidate, list):
+                deals_raw = candidate
+                break
+
+        if not deals_raw:
+            # Log a sample of the response at DEBUG so we can find the right key
+            logger.debug("[%s] InitialData: no openDeals list found under known keys. "
+                         "Sample: %s", self.account_id,
+                         str({k: (type(v).__name__, len(v) if isinstance(v, (list, dict)) else v)
+                              for k, v in list(data.items())[:20]}))
+            return 0
+
+        logger.info("[%s] InitialData: found %d open deal(s) to parse", self.account_id, len(deals_raw))
+        if deals_raw:
+            logger.info("[%s] InitialData first deal keys: %s",
+                        self.account_id, list(deals_raw[0].keys()) if isinstance(deals_raw[0], dict) else deals_raw[0])
+        return self._parse_deal_list(deals_raw, "InitialData")
+
+    def _sync_open_positions_http(self) -> int:
+        """
+        Probe InitialData/GetData for open positions (opportunistic — iForex loads
+        positions via SignalR push, not REST, so this rarely finds anything).
+        Returns number of new positions merged.
+        """
+        try:
+            url = f"{self.base_url}/InitialData/GetData?rnd={time.time()}"
+            r = self.session.get(url, timeout=8.0)
+            if r.status_code == 200:
+                data = r.json()
+                tok = (data.get("systemInfo") or {}).get("securityToken")
+                if tok:
+                    self.security_token = int(tok)
+                    self.connected = True
+                    self._last_401_ts = 0.0
+                return self._parse_open_positions_from_initial_data(data)
+            elif r.status_code in (401, 403):
+                self.refresh_security_token_http()
+        except Exception as e:
+            logger.debug("[%s] _sync_open_positions_http error: %s", self.account_id, e)
+        return 0
+
+    def _browser_sync_open_positions(self) -> int:
+        """
+        Use the Playwright browser scraper to fetch live open positions.
+        iForex has no REST API for open positions — they are pushed via SignalR
+        after the SPA loads, so the browser is the only reliable source.
+
+        Runs on startup (in a background thread) and every ~5 minutes thereafter
+        via _browser_position_sync_loop().  Uses the per-account profile dir so
+        .eu and .com accounts stay isolated.
+        Returns number of new positions merged.
+        """
+        try:
+            from iforex_auto_login import fetch_active_deals_and_summary, _profile_dir_for
+            profile_dir = _profile_dir_for(self.account_id)
+            logger.info("[%s] Browser position sync starting (base=%s profile=%s)...",
+                        self.account_id, self.base_url, profile_dir)
+            deals, summary = fetch_active_deals_and_summary(
+                timeout_sec=40,
+                base_url=self.base_url,
+                profile_dir=profile_dir,
+            )
+            if deals is None:
+                logger.warning("[%s] Browser position sync: session expired or login required", self.account_id)
+                return 0
+            logger.info("[%s] Browser position sync: got %d open deal(s) from broker", self.account_id, len(deals))
+            # Update summary (balance, equity, etc.) if available
+            if summary:
+                with self._lock:
+                    self._account_summary.update({k: v for k, v in summary.items() if v})
+                    if summary.get("account_currency"):
+                        self.config.setdefault("account_currency", summary["account_currency"])
+            # Merge new positions
+            merged = self._parse_deal_list(deals, "browser_sync")
+            if merged or deals:
+                # Even if merged==0 (all already known), update ea_account_info
+                self._update_ea_account_info()
+            return merged
+        except Exception as e:
+            logger.warning("[%s] Browser position sync error: %s", self.account_id, e)
+            return 0
+
+    def _browser_position_sync_loop(self):
+        """
+        Background thread: runs _browser_sync_open_positions on startup (after a
+        short delay for the session to settle) then every 5 minutes.
+        Uses the browser profile lock so it never runs concurrently with a login.
+        """
+        # Short delay on first run to let the poll loop establish connection first
+        time.sleep(5)
+        while self._running:
+            try:
+                self._browser_sync_open_positions()
+            except Exception as e:
+                logger.debug("[%s] _browser_position_sync_loop error: %s", self.account_id, e)
+            # Sleep 5 minutes between syncs; check _running every 10s so we can exit cleanly
+            for _ in range(30):
+                if not self._running:
+                    return
+                time.sleep(10)
+
+
+
+
+
+
 
     def _trigger_auto_relogin(self):
         """Trigger background Playwright auto-login if credentials or profile exist with backoff."""
@@ -432,7 +688,8 @@ class IForexAccount:
                     username=self.config.get("username"),
                     password=self.config.get("password"),
                     timeout_sec=90,
-                    headless=True
+                    headless=True,
+                    base_url=self.base_url
                 )
                 if res.get("status") == "ok":
                     self._auto_relogin_fails = 0
@@ -1255,13 +1512,15 @@ class IForexAccount:
                 # 1. Update Heartbeat
                 if "ea_heartbeats" in self.dd:
                     self.dd["ea_heartbeats"][self.account_id] = time.time()
-                
+
                 # 2. Query EUR/USD margin to check connection & maintain session keep-alive
                 self.get_deal_margin_details(3631)
 
                 # 3. Synchronize closed positions and balance via pure HTTP
                 self._sync_closed_positions_http()
                 self._sync_account_balance_http()
+
+                # (Open position sync runs in _browser_position_sync_loop every 5 min)
 
                 # 4. Poll active symbols from sessions for live quotes (non-blocking for dashboard lock)
                 sessions = self.dd.get("sessions", {})
@@ -1272,7 +1531,7 @@ class IForexAccount:
                         pair = (sides[self.account_id].get("pair") or sess.get("pair", "")).strip()
                         if pair:
                             active_pairs.add(pair)
-                
+
                 # Also poll all instruments from currently open positions and their conversion pairs
                 for o in self._get_open_orders():
                     p = o.get("Symbol") or o.get("symbol")
@@ -1282,7 +1541,7 @@ class IForexAccount:
                         _, qc = parse_symbol_currencies(p_str)
                         if qc and qc != "USD":
                             active_pairs.add(f"USD/{qc}")
-                
+
                 if not active_pairs:
                     active_pairs.add("EUR/USD")
 

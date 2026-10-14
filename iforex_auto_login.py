@@ -130,8 +130,14 @@ def get_sync_playwright():
             "Please run: python -m pip install playwright && playwright install chromium"
         ) from e
 
-PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_edge_profile")
+_BASE_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_edge_profile")
 _browser_profile_lock = threading.Lock()
+
+def _profile_dir_for(account_id: str) -> str:
+    """Return an isolated Chromium profile directory for a given account_id.
+    Each account gets its own profile so cookies are never shared between accounts."""
+    safe_id = str(account_id).replace("/", "_").replace("\\", "_").replace(":", "_")
+    return f"{_BASE_PROFILE_DIR}_{safe_id}"
 
 def launch_browser_context(p, user_data_dir: str, headless: bool = True, **kwargs):
     """
@@ -166,18 +172,34 @@ def refresh_iforex_session(account_id: str = "12141021",
                            username: Optional[str] = None,
                            password: Optional[str] = None,
                            timeout_sec: int = 120,
-                           headless: bool = False) -> Dict[str, Any]:
+                           headless: bool = False,
+                           base_url: str = "") -> Dict[str, Any]:
     """
     Automates login and session extraction for an iFOREX account.
     If username/password are provided or present in config, fills the form and submits.
     If 2FA is required, keeps browser window open for user to complete.
     Saves new cookies & securityToken to config files.
+
+    base_url: e.g. 'https://trader.iforex.com/webpl4' or 'https://trader.iforex.eu/webpl4'.
+              Determines which domain is used for login and cookie extraction.
+              Defaults to iforex.com if blank.
     """
+    # Resolve domain/origin from base_url
+    if not base_url:
+        base_url = "https://trader.iforex.com/webpl4"
+    base_url = base_url.rstrip("/")
+    # Derive origin (scheme + host) from base_url
+    from urllib.parse import urlparse as _urlparse
+    _parsed = _urlparse(base_url)
+    origin = f"{_parsed.scheme}://{_parsed.netloc}"   # e.g. https://trader.iforex.eu
+    login_url = f"{base_url}/Account/Login/Lang/English"
+    trading_url = f"{base_url}/trading"
+
     cfg_paths = [
         os.path.join(config_dir, "iforex_accounts.json"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "iforex_accounts.json")
     ]
-    
+
     # Load stored credentials from config if not passed
     if not username or not password:
         for cpath in cfg_paths:
@@ -191,21 +213,33 @@ def refresh_iforex_session(account_id: str = "12141021",
                             username = acct_data.get("username") or acct_data.get("account_number")
                         if not password:
                             password = acct_data.get("password")
+                        # Also pick up stored base_url if not overridden by caller
+                        if base_url == "https://trader.iforex.com/webpl4":
+                            stored_url = acct_data.get("base_url", "")
+                            if stored_url:
+                                base_url = stored_url.rstrip("/")
+                                _parsed = _urlparse(base_url)
+                                origin = f"{_parsed.scheme}://{_parsed.netloc}"
+                                login_url = f"{base_url}/Account/Login/Lang/English"
+                                trading_url = f"{base_url}/trading"
                 except Exception:
                     pass
                 if username and password:
                     break
 
-    logger.info("Starting iFOREX session refresh for account %s (user=%s, headless=%s)...",
-                account_id, username or "None", headless)
-    
+    # Per-account isolated browser profile — prevents cookie bleed between accounts
+    profile_dir = _profile_dir_for(account_id)
+
+    logger.info("Starting iFOREX session refresh for account %s (user=%s, headless=%s, origin=%s, profile=%s)...",
+                account_id, username or "None", headless, origin, profile_dir)
+
     sync_pw = get_sync_playwright()
     with _browser_profile_lock, sync_pw() as p:
         try:
             args = ["--start-maximized", "--disable-blink-features=AutomationControlled"] if not headless else ["--disable-blink-features=AutomationControlled"]
             context = launch_browser_context(
                 p,
-                user_data_dir=PROFILE_DIR,
+                user_data_dir=profile_dir,
                 headless=headless,
                 viewport=None,
                 args=args
@@ -216,8 +250,9 @@ def refresh_iforex_session(account_id: str = "12141021",
 
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto("https://trader.iforex.com/webpl4/trading", wait_until="domcontentloaded", timeout=25000)
+            page.goto(trading_url, wait_until="domcontentloaded", timeout=25000)
             time.sleep(2.0)
+
 
             # 1. Accept cookie banner if present
             try:
@@ -241,9 +276,9 @@ def refresh_iforex_session(account_id: str = "12141021",
 
             # If not logged in and on connectivity-issue or login required, go to login URL
             if not sec_token_check:
-                if "connectivity-issue" in page.url or "trader.iforex.com" not in page.url or not page.query_selector("#txtUName"):
-                    logger.info("Session not active — navigating to login URL: https://trader.iforex.com/webpl4/Account/Login/Lang/English")
-                    page.goto("https://trader.iforex.com/webpl4/Account/Login/Lang/English", wait_until="domcontentloaded", timeout=25000)
+                if "connectivity-issue" in page.url or origin not in page.url or not page.query_selector("#txtUName"):
+                    logger.info("Session not active — navigating to login URL: %s", login_url)
+                    page.goto(login_url, wait_until="domcontentloaded", timeout=25000)
                     time.sleep(1.5)
 
                 # Check if login form is displayed
@@ -313,11 +348,11 @@ def refresh_iforex_session(account_id: str = "12141021",
                 return {"status": "error", "message": "Login timeout: security token not detected. Please verify credentials or complete 2FA."}
 
             # 4. Extract all cookies including HttpOnly cookies (must include /webpl4 path)
-            all_cookies = context.cookies(["https://trader.iforex.com/webpl4", "https://trader.iforex.com"])
+            all_cookies = context.cookies([base_url, origin])
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in all_cookies])
             cookie_names = [c['name'] for c in all_cookies]
-            logger.info("Extracted %d cookies (has FXnetWeb_identity: %s): %s",
-                        len(cookie_names), "FXnetWeb_identity" in cookie_names, cookie_names)
+            logger.info("Extracted %d cookies from %s (has FXnetWeb_identity: %s): %s",
+                        len(cookie_names), origin, "FXnetWeb_identity" in cookie_names, cookie_names)
 
             context.close()
 
@@ -415,26 +450,41 @@ def _extract_currency_code(val_str: Any) -> Optional[str]:
     return None
 
 
-def fetch_active_deals_and_summary(timeout_sec: int = 25) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+def fetch_active_deals_and_summary(timeout_sec: int = 25,
+                                   base_url: str = "",
+                                   profile_dir: str = "") -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """
     Launch headless Edge with persistent profile to read active positions AND live
     account summary (balance, equity, margin, free_margin, open_pl) directly from the
     iFOREX WebPL4 interface (React DOM).
+
+    base_url   : e.g. 'https://trader.iforex.eu/webpl4' — defaults to iforex.com
+    profile_dir: per-account Chromium profile directory — defaults to _BASE_PROFILE_DIR
     Returns: (deals_list, summary_dict)
     """
+    if not base_url:
+        base_url = "https://trader.iforex.com/webpl4"
+    base_url = base_url.rstrip("/")
+    trading_url = f"{base_url}/trading/new-transaction"
+    from urllib.parse import urlparse as _up
+    _host = _up(base_url).netloc   # e.g. trader.iforex.eu
+
+    if not profile_dir:
+        profile_dir = _BASE_PROFILE_DIR
+
     sync_pw = get_sync_playwright()
     with _browser_profile_lock, sync_pw() as p:
         try:
             context = launch_browser_context(
                 p,
-                user_data_dir=PROFILE_DIR,
+                user_data_dir=profile_dir,
                 headless=True,
                 viewport={"width": 1920, "height": 3000},
                 args=["--disable-blink-features=AutomationControlled"]
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto("https://trader.iforex.com/webpl4/trading/new-transaction", wait_until="domcontentloaded", timeout=timeout_sec * 1000)
-            if "connectivity-issue" in page.url or "login" in page.url or "trader.iforex.com" not in page.url:
+            page.goto(trading_url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
+            if "connectivity-issue" in page.url or "login" in page.url or _host not in page.url:
                 logger.warning("fetch_active_deals_and_summary: redirected to %s — session disconnected/login required", page.url)
                 context.close()
                 return None, {}

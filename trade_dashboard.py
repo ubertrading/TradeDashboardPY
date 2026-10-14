@@ -16133,6 +16133,7 @@ def auto_extract_iforex():
         username = str(data.get("username", "")).strip() or None
         password = str(data.get("password", "")).strip() or None
         account_id = str(data.get("account_id", "")).strip() or "12141021"
+        base_url = str(data.get("base_url", "")).strip() or "https://trader.iforex.com/webpl4"
         from iforex_auto_login import refresh_iforex_session
         res = refresh_iforex_session(
             account_id=account_id,
@@ -16140,7 +16141,8 @@ def auto_extract_iforex():
             username=username,
             password=password,
             timeout_sec=180,
-            headless=False
+            headless=False,
+            base_url=base_url
         )
         if res.get("status") == "ok":
             return jsonify({
@@ -16196,7 +16198,7 @@ def connect_iforex_account(account_id):
             # Session expired — automatically run headless auto-login using saved credentials!
             app.logger.info("iFOREX session expired for %s — running automatic headless login...", account_id)
             from iforex_auto_login import refresh_iforex_session
-            res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=90, headless=True)
+            res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=90, headless=True, base_url=acct.base_url)
             if res.get("status") == "ok":
                 acct.cookie = res["cookie"]
                 acct.session.headers["Cookie"] = res["cookie"]
@@ -16248,7 +16250,7 @@ def auto_login_iforex(account_id):
         return jsonify({"error": "Account not found"}), 404
     try:
         from iforex_auto_login import refresh_iforex_session
-        res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=180, headless=False)
+        res = refresh_iforex_session(account_id=account_id, config_dir=TRADE_CONFIG_DIR, timeout_sec=180, headless=False, base_url=acct.base_url)
         if res.get("status") == "ok":
             acct.cookie = res["cookie"]
             acct.session.headers["Cookie"] = res["cookie"]
@@ -20423,8 +20425,15 @@ body.popout-strategy .cycle-reminder-banner,
         <textarea id="ifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;" placeholder="Leave blank to auto-login using username/password, or paste manually: FXnetWeb_identity=..."></textarea>
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
-        <label>Base URL</label>
-        <input type="text" id="ifxBaseUrl" value="https://trader.iforex.com/webpl4">
+        <label>Site / Base URL</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <select id="ifxSite" onchange="onIfxSiteChange('ifxSite','ifxBaseUrl')" style="flex-shrink:0;padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;">
+            <option value="https://trader.iforex.com/webpl4">iforex.com</option>
+            <option value="https://trader.iforex.eu/webpl4">iforex.eu</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <input type="text" id="ifxBaseUrl" value="https://trader.iforex.com/webpl4" style="flex:1;min-width:0;" oninput="onIfxBaseUrlInput('ifxSite','ifxBaseUrl')">
+        </div>
       </div>
     </div>
     <div style="margin-top:8px;">
@@ -20536,8 +20545,15 @@ body.popout-strategy .cycle-reminder-banner,
         <textarea id="eifxCookie" style="width:100%;height:90px;font-family:monospace;font-size:0.72rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px;"></textarea>
       </div>
       <div class="form-group" style="grid-column: 1 / -1;">
-        <label>Base URL</label>
-        <input type="text" id="eifxBaseUrl">
+        <label>Site / Base URL</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <select id="eifxSite" onchange="onIfxSiteChange('eifxSite','eifxBaseUrl')" style="flex-shrink:0;padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;">
+            <option value="https://trader.iforex.com/webpl4">iforex.com</option>
+            <option value="https://trader.iforex.eu/webpl4">iforex.eu</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <input type="text" id="eifxBaseUrl" style="flex:1;min-width:0;" oninput="onIfxBaseUrlInput('eifxSite','eifxBaseUrl')">
+        </div>
       </div>
     </div>
     <div style="margin-top:8px;">
@@ -28454,11 +28470,36 @@ function closeAddIForexModal() {
   closeModalOverlay('addIForexModal');
 }
 
+// ── iFOREX site selector helpers ──────────────────────────────────────────────
+function onIfxSiteChange(selectId, inputId) {
+  const sel = document.getElementById(selectId);
+  const inp = document.getElementById(inputId);
+  if (!sel || !inp) return;
+  if (sel.value !== 'custom') inp.value = sel.value;
+  else inp.focus();
+}
+function onIfxBaseUrlInput(selectId, inputId) {
+  const sel = document.getElementById(selectId);
+  const inp = document.getElementById(inputId);
+  if (!sel || !inp) return;
+  const knownVals = ['https://trader.iforex.com/webpl4', 'https://trader.iforex.eu/webpl4'];
+  sel.value = knownVals.includes(inp.value.trim()) ? inp.value.trim() : 'custom';
+}
+function syncIfxSiteSelector(selectId, inputId, baseUrl) {
+  const sel = document.getElementById(selectId);
+  const inp = document.getElementById(inputId);
+  if (!inp) return;
+  inp.value = baseUrl || 'https://trader.iforex.com/webpl4';
+  if (sel) onIfxBaseUrlInput(selectId, inputId);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function autoExtractIForexAddModal() {
   const username = document.getElementById('ifxUsername') ? document.getElementById('ifxUsername').value.trim() : '';
   const password = document.getElementById('ifxPassword') ? document.getElementById('ifxPassword').value.trim() : '';
   const acctId = document.getElementById('ifxAcctId') ? document.getElementById('ifxAcctId').value.trim() : '';
   const acctNum = document.getElementById('ifxAcctNumber') ? document.getElementById('ifxAcctNumber').value.trim() : '';
+  const baseUrl = document.getElementById('ifxBaseUrl') ? document.getElementById('ifxBaseUrl').value.trim() : 'https://trader.iforex.com/webpl4';
 
   const btn = document.getElementById('btn-auto-extract-add-modal');
   const origText = btn ? btn.innerHTML : '';
@@ -28473,7 +28514,8 @@ async function autoExtractIForexAddModal() {
       body: JSON.stringify({
         username: username,
         password: password,
-        account_id: acctId || acctNum || '12141021'
+        account_id: acctId || acctNum || '12141021',
+        base_url: baseUrl
       })
     });
     const data = await res.json();
@@ -28499,6 +28541,7 @@ async function autoExtractIForexAddModal() {
     }
   }
 }
+
 
 async function addIForexAccount() {
   const id = document.getElementById('ifxAcctId').value.trim();
@@ -28575,7 +28618,7 @@ async function editIForexAccount(id) {
     if (document.getElementById('eifxCurrency')) document.getElementById('eifxCurrency').value = cfg.account_currency || '';
     document.getElementById('eifxSecurityToken').value = cfg.security_token || '';
     document.getElementById('eifxCookie').value = cfg.cookie || '';
-    document.getElementById('eifxBaseUrl').value = cfg.base_url || 'https://trader.iforex.com/webpl4';
+    syncIfxSiteSelector('eifxSite', 'eifxBaseUrl', cfg.base_url || 'https://trader.iforex.com/webpl4');
     if (document.getElementById('eifxSwapFree')) {
       document.getElementById('eifxSwapFree').checked = !!cfg.swapfree;
     }
