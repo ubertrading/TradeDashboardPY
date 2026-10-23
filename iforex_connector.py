@@ -447,16 +447,19 @@ class IForexAccount:
             return 0
 
         new_count = 0
+        patched_count = 0
         with self._lock:
-            existing_tickets = {
-                str(o.get("Ticket") or o.get("ticket") or "")
-                for o in self._open_orders
-                if o.get("Ticket") or o.get("ticket")
-            }
+            # Build a map of existing positions so we can patch missing open_epoch
+            existing_map = {}
+            for o in self._open_orders:
+                t = str(o.get("Ticket") or o.get("ticket") or "")
+                if t:
+                    existing_map[t] = o
+            existing_tickets = set(existing_map.keys())
             for d in deals_raw:
                 if not isinstance(d, dict):
                     continue
-                # ── Ticket ──────────────────────────────────────────────────
+                # # ── Ticket ──────────────────────────────────────────────────
                 ticket = str(
                     d.get("positionNumber") or d.get("orderID") or
                     d.get("itemId") or d.get("ItemId") or
@@ -465,6 +468,21 @@ class IForexAccount:
                 if not ticket or ticket == "0":
                     continue
                 if ticket in existing_tickets:
+                    # Patch open_epoch/open_time if missing on the stored position
+                    existing = existing_map[ticket]
+                    if not existing.get("open_epoch"):
+                        raw_t = str(
+                            d.get("exeTime") or d.get("openDateTime") or
+                            d.get("OpenDateTime") or d.get("openTime") or
+                            d.get("OpenTime") or ""
+                        )
+                        if raw_t:
+                            oe = _parse_iforex_epoch(raw_t)
+                            if oe is not None:
+                                existing["open_epoch"] = oe
+                                existing["open_time"] = raw_t
+                                existing["OpenTime"] = raw_t
+                                patched_count += 1
                     continue
 
                 # ── Direction ────────────────────────────────────────────────
@@ -534,10 +552,14 @@ class IForexAccount:
                 existing_tickets.add(ticket)
                 new_count += 1
 
-        if new_count > 0:
+        if new_count > 0 or patched_count > 0:
             self._save_open_orders()
+        if new_count > 0:
             logger.info("[%s] %s: merged %d pre-existing open position(s) into tracker",
                         self.account_id, source, new_count)
+        if patched_count > 0:
+            logger.info("[%s] %s: patched open_epoch on %d existing position(s)",
+                        self.account_id, source, patched_count)
         return new_count
 
     def _parse_open_positions_from_initial_data(self, data: dict) -> int:

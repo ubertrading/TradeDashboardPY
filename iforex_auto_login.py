@@ -515,7 +515,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25,
                                         if (ticket && !dealsMap.has(ticket)) {
                                             dealsMap.set(ticket, {
                                                 ticket: ticket,
-                                                exeTime: d.exeTime,
+                                                exeTime: d.exeTime || d.openDateTime || d.OpenDateTime || d.openTime || d.openDate,
                                                 instrumentID: d.instrumentID,
                                                 orderDir: d.orderDir,
                                                 dealAmount: d.dealAmount,
@@ -580,7 +580,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25,
                             if (ticket && !dealsMap.has(ticket)) {
                                 dealsMap.set(ticket, {
                                     ticket: ticket,
-                                    exeTime: d.exeTime,
+                                    exeTime: d.exeTime || d.openDateTime || d.OpenDateTime || d.openTime || d.openDate,
                                     instrumentID: d.instrumentID,
                                     orderDir: d.orderDir,
                                     dealAmount: d.dealAmount,
@@ -705,7 +705,7 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25,
                     amt = 1000.0
                 lots = notional_to_lots(sym, amt)
                 # parse open time
-                raw_time = str(d.get("exeTime") or "").strip()
+                raw_time = str(d.get("exeTime") or d.get("openDateTime") or d.get("OpenDateTime") or d.get("openTime") or d.get("openDate") or "").strip()
                 open_time_str = raw_time
                 open_epoch = None
                 if raw_time:
