@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 mt_direct_connector.py — MT4/MT5 Direct API Connector
 
@@ -332,22 +332,30 @@ def _load_clr():
     if _clr_loaded:
         return True
     try:
-        # pythonnet 3.x requires explicit runtime load before import clr
+        # pythonnet 3.x requires explicit runtime load before import clr.
+        # Track whether ANY runtime backend succeeded -- if not, we must abort
+        # before calling import clr, because importing the stub without an
+        # initialized runtime produces cryptic per-connect errors like
+        # "module 'clr' has no attribute '_add_pending_namespaces'".
+        _runtime_loaded = False
         try:
             from pythonnet import load as _pn_load
-            _pn_load("coreclr")  # or "netfx" for .NET Framework
+            _pn_load("coreclr")
             logger.info("pythonnet 3.x runtime loaded (coreclr)")
+            _runtime_loaded = True
         except ImportError:
-            pass  # pythonnet 2.x doesn't need this
+            # pythonnet 2.x -- no explicit load needed, import clr is enough
+            _runtime_loaded = True
         except RuntimeError as e:
             if "already" in str(e).lower():
-                pass  # Runtime already loaded, that's fine
+                _runtime_loaded = True  # Runtime already loaded, that's fine
             else:
-                # Try .NET Framework runtime instead
+                # coreclr failed -- try .NET Framework runtime instead
                 try:
                     from pythonnet import load as _pn_load2
                     _pn_load2("netfx")
                     logger.info("pythonnet 3.x runtime loaded (netfx)")
+                    _runtime_loaded = True
                 except Exception as e2:
                     logger.warning("pythonnet runtime load warning: %s / %s", e, e2)
         except Exception as e:
@@ -356,11 +364,33 @@ def _load_clr():
                 from pythonnet import load as _pn_load3
                 _pn_load3("netfx")
                 logger.info("pythonnet 3.x runtime loaded (netfx fallback)")
+                _runtime_loaded = True
             except Exception as e2:
                 logger.warning("pythonnet runtime load warning: %s / %s", e, e2)
 
+        if not _runtime_loaded:
+            # Runtime load failed for both coreclr and netfx.
+            # Proceeding to 'import clr' would return an uninitialized stub
+            # that crashes on every clr.AddReference() call with
+            # "module 'clr' has no attribute '_add_pending_namespaces'".
+            # Raise now so _load_clr() returns False cleanly and the caller
+            # can surface a single, actionable error instead.
+            raise RuntimeError(
+                "pythonnet .NET runtime could not be loaded (both coreclr and netfx failed). "
+                "Ensure the .NET 8 Runtime is installed: https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe"
+            )
+
         import clr  # pythonnet
         logger.info("pythonnet clr imported successfully")
+
+        # Verify the CLR is actually functional before proceeding.
+        # An uninitialized stub (runtime failed to load) will be missing
+        # AddReference and other internal attributes.
+        if not hasattr(clr, "AddReference"):
+            raise RuntimeError(
+                "pythonnet clr module is missing AddReference -- the .NET runtime "
+                "did not initialize correctly. Check that the .NET 8 Runtime is installed."
+            )
 
         # Add DLL directory to path
         import sys as _sys
@@ -1367,6 +1397,9 @@ class MT4DirectAccount:
         if fee_keywords is None:
             fee_keywords = []
         exclude_balance = kwargs.get("exclude_balance", True)
+        # comment_filters_kw: list of substrings; if non-empty, only trade deals whose
+        # comment contains at least one string are counted (fee deals bypass this check).
+        comment_filters_kw = [str(c) for c in kwargs.get("comment_filters", []) if str(c).strip()]
         try:
             import System
             from datetime import datetime as _dt, timezone as _tz
@@ -1460,6 +1493,9 @@ class MT4DirectAccount:
                     is_balance = otype in ('balance', '6', 'op_balance', 'credit', '7', 'op_credit')
 
                     if is_trade:
+                        # Apply comment filter if active (fee deals bypass this check)
+                        if comment_filters_kw and not any(cf in comment for cf in comment_filters_kw):
+                            continue  # skip deals not matching any comment filter
                         total_pnl += profit
                         total_swap += swap
                         total_fees += commission + taxes + fee
@@ -1567,6 +1603,8 @@ class MT4DirectAccount:
                 "deals": deals_list,
                 "_lot_diag": _lot_diag,  # routed to app.logger by trade_dashboard.py
             }
+            if comment_filters_kw:
+                logger.info("[%s] MT4 comment filter active: %s", self.account_id, comment_filters_kw)
             logger.info("[%s] MT4 deal history: %d raw orders, %d closed deals → pnl=%.2f swap=%.2f fees=%.2f pairs=%d",
                         self.account_id, len(raw_orders), deal_count,
                         result["pnl"], result["swap"], result["fees"], len(by_symbol_final))
@@ -3189,6 +3227,9 @@ class MT5DirectAccount:
         if fee_keywords is None:
             fee_keywords = []
         exclude_balance = kwargs.get("exclude_balance", True)
+        # comment_filters_kw: list of substrings; if non-empty, only trade deals whose
+        # comment contains at least one string are counted (fee deals bypass this check).
+        comment_filters_kw = [str(c) for c in kwargs.get("comment_filters", []) if str(c).strip()]
         try:
             import System
             from datetime import datetime as _dt, timezone as _tz
@@ -3316,6 +3357,9 @@ class MT5DirectAccount:
                     is_balance = ('balance' in deal_type) or ('credit' in deal_type) or deal_type in ('2', '3')
 
                     if is_trade:
+                        # Apply comment filter if active (fee deals bypass this check)
+                        if comment_filters_kw and not any(cf in comment for cf in comment_filters_kw):
+                            continue  # skip deals not matching any comment filter
                         total_pnl += profit
                         total_swap += swap
                         total_fees += commission + fee
@@ -3422,6 +3466,8 @@ class MT5DirectAccount:
                 "by_symbol": by_symbol_final,
                 "deals": deals_list,
             }
+            if comment_filters_kw:
+                logger.info("[%s] MT5 comment filter active: %s", self.account_id, comment_filters_kw)
             logger.info("[%s] MT5 deal history: %d raw, %d closed deals → pnl=%.2f swap=%.2f fees=%.2f pairs=%d",
                         self.account_id, len(raw_orders), deal_count,
                         result["pnl"], result["swap"], result["fees"], len(by_symbol_final))

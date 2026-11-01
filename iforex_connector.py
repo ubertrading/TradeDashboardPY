@@ -631,7 +631,15 @@ class IForexAccount:
         Runs on startup (in a background thread) and every ~5 minutes thereafter
         via _browser_position_sync_loop().  Uses the per-account profile dir so
         .eu and .com accounts stay isolated.
-        Returns number of new positions merged.
+
+        The broker's list is AUTHORITATIVE — we replace _open_orders entirely
+        with the broker's current set, preserving any locally-tracked positions
+        that are pending fills (not yet confirmed by the broker).  This prevents
+        stale positions (from previous runs or pre-merge persisted data) from
+        accumulating indefinitely when they can no longer be detected via the
+        closed-deals API (aged out of the pageSize window).
+
+        Returns number of new positions added (vs previous snapshot).
         """
         try:
             from iforex_auto_login import fetch_active_deals_and_summary, _profile_dir_for
@@ -647,18 +655,51 @@ class IForexAccount:
                 logger.warning("[%s] Browser position sync: session expired or login required", self.account_id)
                 return 0
             logger.info("[%s] Browser position sync: got %d open deal(s) from broker", self.account_id, len(deals))
+
             # Update summary (balance, equity, etc.) if available
             if summary:
                 with self._lock:
                     self._account_summary.update({k: v for k, v in summary.items() if v})
                     if summary.get("account_currency"):
                         self.config.setdefault("account_currency", summary["account_currency"])
-            # Merge new positions
-            merged = self._parse_deal_list(deals, "browser_sync")
-            if merged or deals:
-                # Even if merged==0 (all already known), update ea_account_info
-                self._update_ea_account_info()
-            return merged
+
+            # ── Authoritative replace ─────────────────────────────────────────
+            # The browser gives us the broker's exact current open position set.
+            # Replace _open_orders wholesale rather than merging, so stale entries
+            # (pre-merge persisted data, aged-out tickets, symbol-format mismatches
+            # like "USD/CHF" vs "USDCHF") cannot accumulate indefinitely.
+            #
+            # We preserve locally-tracked orders that are NOT in the broker list
+            # only if they were opened in the last 90 seconds (pending fill window)
+            # to avoid prematurely dropping a just-opened order the broker hasn't
+            # yet confirmed in the DOM.
+            with self._lock:
+                broker_tickets = {str(d.get("Ticket") or d.get("ticket") or "") for d in deals}
+                broker_tickets.discard("")
+                now_ts = time.time()
+                # Positions to keep from the old list: only very-recently opened
+                # local entries not yet confirmed by the broker (fill pending)
+                pending_local = [
+                    o for o in self._open_orders
+                    if str(o.get("Ticket") or o.get("ticket") or "") not in broker_tickets
+                    and (now_ts - float(o.get("open_epoch") or now_ts)) < 90
+                ]
+                prev_count = len(self._open_orders)
+                self._open_orders = list(deals) + pending_local
+                new_count = len(self._open_orders)
+                added = max(0, new_count - prev_count)
+                stale_pruned = prev_count - new_count + added  # negative means growth
+                if stale_pruned > 0:
+                    logger.info("[%s] Browser position sync: replaced %d positions with %d from broker "
+                                "(pruned %d stale, kept %d pending-local)",
+                                self.account_id, prev_count, new_count, stale_pruned, len(pending_local))
+                else:
+                    logger.info("[%s] Browser position sync: %d position(s) now tracked (%d from broker, %d pending-local)",
+                                self.account_id, new_count, len(deals), len(pending_local))
+                self._save_open_orders()
+
+            self._update_ea_account_info()
+            return added
         except Exception as e:
             logger.warning("[%s] Browser position sync error: %s", self.account_id, e)
             return 0

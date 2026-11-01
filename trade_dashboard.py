@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -56,6 +56,12 @@ _DOTNET_RUNTIME_URLS = {
     "x64":   "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x64.exe",
     "x86":   "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-x86.exe",
     "arm64": "https://aka.ms/dotnet/8.0/aspnetcore-runtime-win-arm64.exe",
+}
+# Base .NET runtime only (no ASP.NET Core) — smaller download, enough for pythonnet
+_DOTNET_BASE_RUNTIME_URLS = {
+    "x64":   "https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe",
+    "x86":   "https://aka.ms/dotnet/8.0/dotnet-runtime-win-x86.exe",
+    "arm64": "https://aka.ms/dotnet/8.0/dotnet-runtime-win-arm64.exe",
 }
 
 
@@ -122,11 +128,23 @@ def _detect_dotnet_runtimes():
     return runtimes
 
 
-def _dotnet_runtime_ok():
-    """Return True if a suitable .NET runtime (>= _DOTNET_MIN_MAJOR) is found.
+def _dotnet_base_runtime_ok():
+    """Return True if Microsoft.NETCore.App >= _DOTNET_MIN_MAJOR is installed.
 
-    We check for Microsoft.AspNetCore.App specifically because MtBridgeService.exe
-    is an SDK.Web app and needs AspNetCore — the base NETCore.App alone isn't enough.
+    This is all that pythonnet needs to load the CLR.  MtBridgeService.exe
+    additionally requires Microsoft.AspNetCore.App (checked by _dotnet_runtime_ok).
+    """
+    for name, major, _minor in _detect_dotnet_runtimes():
+        if name == "Microsoft.NETCore.App" and major >= _DOTNET_MIN_MAJOR:
+            return True
+    return False
+
+
+def _dotnet_runtime_ok():
+    """Return True if Microsoft.AspNetCore.App >= _DOTNET_MIN_MAJOR is installed.
+
+    MtBridgeService.exe is an SDK.Web app and needs AspNetCore specifically -
+    the base NETCore.App alone is not enough for it.
     """
     for name, major, _minor in _detect_dotnet_runtimes():
         if name == "Microsoft.AspNetCore.App" and major >= _DOTNET_MIN_MAJOR:
@@ -210,18 +228,25 @@ def _prompt_install_dotnet(timeout_seconds=30):
     return response.lower() not in ("n", "no")
 
 
-def _install_dotnet_runtime():
-    """Download and silently install the .NET 8 runtime. Returns True on success."""
+def _install_dotnet_runtime(base_only=False):
+    """Download and silently install the .NET 8 runtime. Returns True on success.
+
+    Args:
+        base_only: If True, install Microsoft.NETCore.App (smaller, enough for
+                   pythonnet).  If False (default), install Microsoft.AspNetCore.App
+                   (superset, required by MtBridgeService).
+    """
     import tempfile
     import platform
 
+    url_table = _DOTNET_BASE_RUNTIME_URLS if base_only else _DOTNET_RUNTIME_URLS
     machine = platform.machine().lower()
     if "arm" in machine:
-        url = _DOTNET_RUNTIME_URLS["arm64"]
+        url = url_table["arm64"]
     elif platform.architecture()[0] == "32bit":
-        url = _DOTNET_RUNTIME_URLS["x86"]
+        url = url_table["x86"]
     else:
-        url = _DOTNET_RUNTIME_URLS["x64"]
+        url = url_table["x64"]
 
     tmp_dir = tempfile.mkdtemp(prefix="dotnet_installer_")
     installer_path = os.path.join(tmp_dir, "dotnet_runtime_installer.exe")
@@ -302,6 +327,112 @@ def _check_dotnet_runtime():
 
 
 
+def _check_pythonnet_clr():
+    """Verify that pythonnet can actually load the .NET CLR, and reinstall it if not.
+
+    pythonnet may be *installed* yet still broken — the most common cause is
+    a stale or mismatched ``Python.Runtime.dll`` that cannot bind to the
+    installed .NET runtime.  This manifests as the cryptic per-connect error:
+
+        module 'clr' has no attribute '_add_pending_namespaces'
+
+    We detect the broken state by doing a real CLR probe in a subprocess so we
+    don't poison the main process's import state.  If the probe fails we
+    force-reinstall pythonnet and try once more.
+    """
+    # Only runs if pythonnet is importable at all.
+    if importlib.util.find_spec("pythonnet") is None:
+        return  # Not installed yet — _bootstrap_dependencies will install it
+
+    # ── Step 1: probe in a subprocess so we don't permanently corrupt the CLR ──
+    _PROBE = (
+        "import sys; "
+        "from pythonnet import load as _l; "
+        "_l('coreclr'); "
+        "import clr; "
+        "assert hasattr(clr, 'AddReference'), 'CLR stub not initialized'; "
+        "clr.AddReference('System'); "
+        "print('OK')"
+    )
+
+    def _run_probe():
+        try:
+            res = subprocess.run(
+                [sys.executable, "-c", _PROBE],
+                capture_output=True, text=True, timeout=20,
+            )
+            return res.returncode == 0 and res.stdout.strip() == "OK", res.stderr.strip()
+        except Exception as exc:
+            return False, str(exc)
+
+    ok, err = _run_probe()
+    if ok:
+        return  # pythonnet is healthy — normal path
+
+    _log_startup(
+        f"[DEP] pythonnet CLR probe failed: {err or '(no stderr)'}\n"
+        f"      This usually means Python.Runtime.dll is mismatched or corrupted.\n"
+        f"      Auto-reinstalling pythonnet..."
+    )
+
+    # ── Step 2: force-reinstall pythonnet ─────────────────────────────────────
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--force-reinstall", "pythonnet"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if res.returncode == 0:
+            _log_startup("[DEP] pythonnet reinstalled successfully.")
+        else:
+            _log_startup(
+                f"[DEP] pythonnet reinstall failed (code {res.returncode}): "
+                f"{(res.stderr or res.stdout or '').strip()}"
+            )
+            return
+    except Exception as exc:
+        _log_startup(f"[DEP] pythonnet reinstall error: {exc}")
+        return
+
+    # ── Step 3: re-probe after reinstall ──────────────────────────────────────
+    ok2, err2 = _run_probe()
+    if ok2:
+        _log_startup("[DEP] pythonnet CLR probe passed after reinstall. ✅")
+        return
+
+    # pythonnet reinstall didn't help -- the real cause is almost certainly
+    # a missing .NET base runtime.  Try to install it automatically.
+    _log_startup(
+        f"[DEP] pythonnet CLR probe still failing after reinstall: {err2 or '(no stderr)'}\n"
+        f"      Attempting to install .NET {_DOTNET_MIN_MAJOR} base runtime (required by pythonnet)..."
+    )
+    if not _dotnet_base_runtime_ok():
+        if os.environ.get("DOTNET_AUTO_INSTALL", "1").strip() != "0":
+            _log_startup(
+                f"[DEP] .NET {_DOTNET_MIN_MAJOR} base runtime not detected -- "
+                f"downloading dotnet-runtime-win-x64.exe ..."
+            )
+            _install_dotnet_runtime(base_only=True)
+            # Final probe after runtime install
+            ok3, err3 = _run_probe()
+            if ok3:
+                _log_startup("[DEP] pythonnet CLR probe passed after .NET runtime install. ✅")
+                return
+            _log_startup(
+                f"[DEP] pythonnet CLR still failing after .NET runtime install: {err3 or '(no stderr)'}"
+            )
+        else:
+            _log_startup(
+                f"[DEP] DOTNET_AUTO_INSTALL=0 -- skipping .NET runtime install. "
+                f"Download manually: https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe"
+            )
+    else:
+        _log_startup(
+            f"[DEP] .NET {_DOTNET_MIN_MAJOR} base runtime IS installed but CLR still fails.\n"
+            f"      This may be a pythonnet/Python bitness mismatch or a corrupt install.\n"
+            f"      Download .NET 8: https://aka.ms/dotnet/8.0/dotnet-runtime-win-x64.exe"
+        )
+
+
 # ─── Self-Bootstrapping Dependency Auto-Installer ───────────────────────────
 # Automatically checks and installs all required dependencies on startup
 # (especially on production or clean machines) before any third-party imports.
@@ -309,6 +440,8 @@ def _bootstrap_dependencies():
     """Ensure all required third-party packages are installed before app startup."""
     # Check for .NET runtime first — pythonnet will silently fail without it.
     _check_dotnet_runtime()
+    # Verify pythonnet can actually load the CLR (reinstalls if broken).
+    _check_pythonnet_clr()
 
     required_packages = {
         "flask": "Flask",
@@ -17105,19 +17238,41 @@ def api_reporting():
             # Fall back to group_label from GROUP column
             if not grp:
                 grp = manual_accounts.get(acc, {}).get("group_label", "")
+            # Resolve short login for comment-filter auto-generation
+            _acct_login = ""
+            if mt_direct_manager:
+                _mt_acct2 = mt_direct_manager.accounts.get(acc)
+                if _mt_acct2:
+                    _acct_login = str(_mt_acct2.config.get("login", "") or "")
+            if not _acct_login:
+                import re as _re_login
+                _m = _re_login.search(r'(\d+)$', acc)
+                _acct_login = _m.group(1) if _m else ""
             all_accounts[acc] = {
                 "balance": info.get("balance"),
                 "equity": info.get("equity"),
                 "group_label": grp,
                 "online": (now_ts - ea_heartbeats.get(acc, 0)) < 45 if acc in ea_heartbeats else False,
+                "login": _acct_login,
             }
         for acc, info in manual_accounts.items():
             if acc not in all_accounts:
+                # Resolve short login for comment-filter auto-generation
+                _macct_login = ""
+                if mt_direct_manager:
+                    _mt_acct3 = mt_direct_manager.accounts.get(acc)
+                    if _mt_acct3:
+                        _macct_login = str(_mt_acct3.config.get("login", "") or "")
+                if not _macct_login:
+                    import re as _re_login2
+                    _m2 = _re_login2.search(r'(\d+)$', acc)
+                    _macct_login = _m2.group(1) if _m2 else ""
                 all_accounts[acc] = {
                     "balance": info.get("balance"),
                     "equity": info.get("equity"),
                     "group_label": info.get("group_label", ""),
                     "online": False,
+                    "login": _macct_login,
                 }
 
         # Group accounts by label: NAME-HEDGEGROUP-SIDE (e.g. IRINA-6-A)
@@ -17467,6 +17622,15 @@ def pnl_request_create():
         to_date = data.get("to_date", "")
         fee_keywords_override = data.get("fee_keywords")  # optional override
         exclude_balance = data.get("exclude_balance", True)  # default: exclude deposits/withdrawals
+        # comment_filters: list of substrings that must appear in trade comment (OR logic);
+        #   empty list = no filtering. E.g. ["400232-808713", "400232-503306"]
+        comment_filters_raw = data.get("comment_filters", [])
+        if isinstance(comment_filters_raw, str):
+            comment_filters = [c.strip() for c in comment_filters_raw.split(",") if c.strip()]
+        elif isinstance(comment_filters_raw, list):
+            comment_filters = [str(c).strip() for c in comment_filters_raw if str(c).strip()]
+        else:
+            comment_filters = []
         if not name or not from_date or not to_date:
             return jsonify({"error": "name, from_date, and to_date required"}), 400
 
@@ -17649,13 +17813,14 @@ def pnl_request_create():
             "to_ts": to_ts,
             "fee_keywords": fee_kw,
             "exclude_balance": exclude_balance,
+            "comment_filters": comment_filters,
             "status": "pending",
             "results": {},
             "created_ts": int(time.time()),
             "current_states": current_states,
         }
-        app.logger.info("[PnL] Created request %s for scope=%s accounts=%s range=%s->%s fee_kw=%s",
-                        rid, scope_label, acct_list, from_date, to_date, fee_kw)
+        app.logger.info("[PnL] Created request %s for scope=%s accounts=%s range=%s->%s fee_kw=%s comment_filters=%s",
+                        rid, scope_label, acct_list, from_date, to_date, fee_kw, comment_filters)
 
         # ── Service server-side accounts (bypass EA polling) ──
         # Identify accounts that can report PnL directly via their connector:
@@ -17691,8 +17856,10 @@ def pnl_request_create():
             app.logger.info("[PnL] %d accounts will be serviced server-side: %s",
                             len(server_side_accts), labels)
 
-            def _resolve_server_side(request_id, accts, f_ts, t_ts, fkw):
+            def _resolve_server_side(request_id, accts, f_ts, t_ts, fkw, cmt_filters=None):
                 """Background thread: fetch deal history for server-side accounts."""
+                if cmt_filters is None:
+                    cmt_filters = []
                 for acc_id, acct_obj, source in accts:
                     try:
                         if not getattr(acct_obj, 'connected', False):
@@ -17709,7 +17876,8 @@ def pnl_request_create():
                                 req["completed_ts"] = int(time.time())
                             continue
                         hist = acct_obj.get_deal_history(f_ts, t_ts, fee_keywords=fkw,
-                                                         exclude_balance=pnl_requests.get(request_id, {}).get("exclude_balance", True))
+                                                         exclude_balance=pnl_requests.get(request_id, {}).get("exclude_balance", True),
+                                                         comment_filters=cmt_filters)
                         if hist is None:
                             app.logger.warning("[PnL] %s %s returned None for history — storing zero result", source, acc_id)
                             req = pnl_requests.get(request_id)
@@ -17789,7 +17957,7 @@ def pnl_request_create():
             # Run in a daemon thread so we don't block the HTTP response
             t = threading.Thread(
                 target=_resolve_server_side,
-                args=(rid, server_side_accts, from_ts, to_ts, fee_kw),
+                args=(rid, server_side_accts, from_ts, to_ts, fee_kw, comment_filters),
                 daemon=True, name=f"PnL-ServerSide-{rid[:8]}")
             t.start()
 
@@ -22901,6 +23069,100 @@ function _getSessionSideAge(session, sideNum, acc) {
   return null;
 }
 
+function openStrategyPnlModal(stratId) {
+  const strat = (strategies_cache || []).find(s => s.id === stratId);
+  if (!strat) return;
+
+  // Collect all sessions for this strategy
+  const stratSessions = (sessions_cache || []).filter(s => s.strategy_id === stratId);
+
+  // Determine if both accounts are MT4/MT5 (have entries in mt_direct_accounts_cache)
+  const acct1 = strat.account1;
+  const acct2 = strat.account2;
+  const isMT = !!(mt_direct_accounts_cache[acct1] || mt_direct_accounts_cache[acct2]);
+
+  // Collect per-side comment strings from all sessions
+  const commentSet = new Set();
+  if (isMT && stratSessions.length > 0) {
+    stratSessions.forEach(s => {
+      // Per-side comments (most specific)
+      if (s.sides) {
+        Object.values(s.sides).forEach(side => {
+          if (side.comment && side.comment.trim()) {
+            // A per-side comment like "2145010745-5003187" — used as-is
+            commentSet.add(side.comment.trim());
+          }
+        });
+      }
+      // Fallback: top-level session comment (may contain " / " separator or "-")
+      if (s.comment && s.comment.trim() && commentSet.size === 0) {
+        // Session comment may be "A / B" — split on " / " and add each part
+        s.comment.split(' / ').forEach(part => {
+          if (part.trim()) commentSet.add(part.trim());
+        });
+      }
+    });
+  }
+
+  // If no per-side comments found but we have MT accounts, derive from account logins
+  if (isMT && commentSet.size === 0) {
+    function _shortName(acc) {
+      const mtInfo = mt_direct_accounts_cache[acc];
+      if (mtInfo && mtInfo.login) return String(mtInfo.login);
+      const m = (acc || '').match(/(\d+)$/);
+      return m ? m[1] : acc;
+    }
+    const s1 = _shortName(acct1);
+    const s2 = _shortName(acct2);
+    if (s1 && s2) commentSet.add(s1 + '-' + s2);
+  }
+
+  // Build explicit account list
+  const accts = [];
+  if (acct1) accts.push(acct1);
+  if (acct2 && acct2 !== acct1) accts.push(acct2);
+
+  // Override _pnlCommentSuggestions before opening the modal
+  _pnlCommentSuggestions = isMT ? [...commentSet] : [];
+
+  // Open modal targeting these accounts, using strategy name as label
+  _pnlCurrentName = strat.name;
+  _pnlCurrentHedgeKey = '';
+  _pnlCurrentAccounts = accts.length > 0 ? accts : null;
+
+  // Update modal title and subtitle
+  document.getElementById('pnlModalTitle').textContent = '\u{1F4CA} PnL Report \u2014 ' + strat.name;
+  const subEl = document.getElementById('pnlModalSubtitle');
+  if (subEl) {
+    if (accts.length > 0) {
+      subEl.textContent = 'Targeting ' + accts.length + ' account' + (accts.length > 1 ? 's' : '') + ': ' + accts.join(', ');
+      subEl.style.display = '';
+    } else {
+      subEl.textContent = '';
+      subEl.style.display = 'none';
+    }
+  }
+
+  // Default dates: Sunday of current week to today
+  const now = new Date();
+  const sunday = new Date(now);
+  sunday.setDate(now.getDate() - now.getDay());
+  document.getElementById('pnlToDate').value = now.toISOString().split('T')[0];
+  document.getElementById('pnlFromDate').value = sunday.toISOString().split('T')[0];
+  const savedFeeKw = localStorage.getItem('tradeDash_pnlFeeKeywords');
+  document.getElementById('pnlFeeKeywords').value = savedFeeKw !== null ? savedFeeKw : 'fee,fees';
+
+  // Reset form state
+  document.getElementById('pnlForm').style.display = '';
+  document.getElementById('pnlStatus').style.display = 'none';
+  document.getElementById('pnlResults').style.display = 'none';
+
+  // Build comment filter UI
+  _buildPnlCommentFilterUI();
+
+  document.getElementById('pnlModal').style.display = 'flex';
+}
+
 function renderStrategies(strats, sessions) {
   strategies_cache = strats;
   const tbody = document.getElementById('strategiesBody');
@@ -23003,6 +23265,7 @@ function renderStrategies(strats, sessions) {
       <td>${statusBadge}</td>
       <td>
         ${startStopBtn}
+        <button class="btn btn-sm" style="background:var(--accent);color:#fff;border:none;padding:2px 8px;font-size:0.72rem;" onclick="openStrategyPnlModal('${st.id}')" title="PnL Report for this strategy">📊 PnL</button>
         <button class="btn btn-primary btn-sm" onclick="popOutStrategy('${st.id}')">Edit</button>
         <button class="btn btn-danger btn-sm" onclick="deleteStrategy('${st.id}')" title="Delete strategy">✕</button>
       </td>
@@ -28779,6 +29042,7 @@ let _pnlCurrentAccounts = null;
 let _pnlRequestId = '';
 let _pnlPollTimer = null;
 let _pnlLastData = null;  // cached last completed PnL response for pair breakdown popup
+let _pnlCommentSuggestions = [];  // auto-generated comment filter strings for current hedge group
 
 function openPnlModal(name, hedgeKey, explicitAccounts) {
   _pnlCurrentName = name;
@@ -28802,6 +29066,34 @@ function openPnlModal(name, hedgeKey, explicitAccounts) {
     _pnlCurrentAccounts = matched.length > 0 ? matched : null;
   } else {
     _pnlCurrentAccounts = null;
+  }
+
+  // Auto-generate comment filter strings from account pairs in this hedge group
+  _pnlCommentSuggestions = [];
+  if (hedgeKey && window._reportingHedgeGroups && window._reportingHedgeGroups[hedgeKey]) {
+    const hgAccts = (window._reportingHedgeGroups[hedgeKey].accounts || []);
+    function _getLogin(a) {
+      if (a.login) return a.login;
+      const m = (a.name || '').match(/(\d+)$/);
+      return m ? m[1] : (a.name || '');
+    }
+    const aSides = hgAccts.filter(a => (a.side || '').toUpperCase() === 'A');
+    const bSides = hgAccts.filter(a => (a.side || '').toUpperCase() === 'B');
+    if (aSides.length > 0 && bSides.length > 0) {
+      aSides.forEach(a => {
+        bSides.forEach(b => {
+          const s = _getLogin(a) + '-' + _getLogin(b);
+          if (s && !_pnlCommentSuggestions.includes(s)) _pnlCommentSuggestions.push(s);
+        });
+      });
+    } else {
+      for (let i = 0; i < hgAccts.length; i++) {
+        for (let j = i + 1; j < hgAccts.length; j++) {
+          const s = _getLogin(hgAccts[i]) + '-' + _getLogin(hgAccts[j]);
+          if (s && !_pnlCommentSuggestions.includes(s)) _pnlCommentSuggestions.push(s);
+        }
+      }
+    }
   }
 
   const label = hedgeKey ? ('🔗 ' + hedgeKey) : ('👤 ' + name);
@@ -28829,6 +29121,8 @@ function openPnlModal(name, hedgeKey, explicitAccounts) {
   document.getElementById('pnlForm').style.display = '';
   document.getElementById('pnlStatus').style.display = 'none';
   document.getElementById('pnlResults').style.display = 'none';
+  // Rebuild comment filter UI with auto-suggestions
+  _buildPnlCommentFilterUI();
   document.getElementById('pnlModal').style.display = 'flex';
 }
 
@@ -29221,6 +29515,19 @@ async function requestPnl() {
     if (_pnlCurrentHedgeKey) body.hedge_key = _pnlCurrentHedgeKey;
     if (Array.isArray(_pnlCurrentAccounts) && _pnlCurrentAccounts.length > 0) body.accounts = _pnlCurrentAccounts;
     if (feeKw) body.fee_keywords = feeKw;
+    // Collect active comment filters
+    const _cfEnabled = document.getElementById('pnlCommentFilterEnabled');
+    if (_cfEnabled && _cfEnabled.checked) {
+      const activeFilters = [];
+      document.querySelectorAll('.pnl-comment-cb:checked').forEach(cb => {
+        if (cb.value) activeFilters.push(cb.value);
+      });
+      const customEl = document.getElementById('pnlCommentCustom');
+      if (customEl && customEl.value.trim()) {
+        customEl.value.split(',').forEach(s => { if (s.trim()) activeFilters.push(s.trim()); });
+      }
+      if (activeFilters.length > 0) body.comment_filters = activeFilters;
+    }
     const resp = await fetch('/api/pnl/request', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await resp.json();
     if (!resp.ok) { alert(data.error || 'Failed'); return; }
@@ -29235,6 +29542,37 @@ async function requestPnl() {
   } catch(e) { alert('Error: ' + e.message); } finally {
     document.getElementById('pnlSubmitBtn').disabled = false;
   }
+}
+
+function _buildPnlCommentFilterUI() {
+  const container = document.getElementById('pnlCommentFilterSection');
+  if (!container) return;
+  const cbList = document.getElementById('pnlCommentCbList');
+  if (!cbList) return;
+  cbList.innerHTML = '';
+  const suggestions = _pnlCommentSuggestions || [];
+  if (suggestions.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = '';
+  suggestions.forEach(s => {
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.82rem;cursor:pointer;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pnl-comment-cb';
+    cb.value = s;
+    cb.checked = true;
+    cb.style.cssText = 'width:14px;height:14px;cursor:pointer;accent-color:var(--accent);';
+    lbl.appendChild(cb);
+    const sp = document.createElement('span');
+    sp.textContent = s;
+    sp.style.fontFamily = 'Consolas,monospace';
+    sp.style.color = 'var(--text)';
+    lbl.appendChild(sp);
+    cbList.appendChild(lbl);
+  });
 }
 
 async function pollPnlStatus() {
@@ -30162,6 +30500,19 @@ function copyApiTesterCurl(btn) {
           <input type="checkbox" id="pnlIncludeUnrealized" checked style="width:16px;height:16px;cursor:pointer;">
           Include Unrealized PNL
         </label>
+      </div>
+      <!-- Comment Filter Section -->
+      <div id="pnlCommentFilterSection" style="margin-bottom:12px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg2);display:none;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <input type="checkbox" id="pnlCommentFilterEnabled" checked style="width:16px;height:16px;cursor:pointer;">
+          <label for="pnlCommentFilterEnabled" style="font-size:0.85rem;font-weight:600;color:var(--text);cursor:pointer;">Filter by Comment</label>
+          <span style="font-size:0.72rem;color:var(--text2);margin-left:4px;">Only include deals whose comment contains one of the strings below</span>
+        </div>
+        <div id="pnlCommentCbList" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding-left:4px;"></div>
+        <div>
+          <label style="font-size:0.72rem;color:var(--text2);">CUSTOM FILTERS <span style="opacity:0.6">(comma-separated, added to checked filters above)</span></label>
+          <input type="text" id="pnlCommentCustom" placeholder="e.g. 400232-808713, myTag" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:Consolas,monospace;font-size:0.82rem;margin-top:3px;box-sizing:border-box;">
+        </div>
       </div>
       <button class="btn btn-primary" id="pnlSubmitBtn" onclick="requestPnl()" style="width:100%;">Generate Report</button>
     </div>
