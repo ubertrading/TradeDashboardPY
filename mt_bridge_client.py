@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 mt_bridge_client.py — Python bridge client for MtBridgeService
 
@@ -879,8 +879,13 @@ class MtBridgeAccount:
             path += f"?{qs}"
         return _get(path, timeout=10) or []
 
-    def get_deal_history(self, from_ts, to_ts, fee_keywords=None, exclude_balance=True, timeout=30):
-        """Get deal history PnL totals."""
+    def get_deal_history(self, from_ts, to_ts, fee_keywords=None, exclude_balance=True, timeout=30, **kwargs):
+        """Get deal history PnL totals.
+
+        Note: ``comment_filters`` and other kwargs are accepted for API
+        compatibility with MT Direct connectors but ignored here - the bridge
+        REST endpoint does not support comment-level filtering.
+        """
         eb = "true" if exclude_balance else "false"
         url = f"/api/accounts/{self.account_id}/history?from={int(from_ts)}&to={int(to_ts)}&exclude_balance={eb}"
         if fee_keywords:

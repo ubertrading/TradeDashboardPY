@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 trade_dashboard.py — Trading Execution Dashboard
 
@@ -3120,7 +3120,7 @@ def _load_reporting():
     global reporting_data
     try:
         if os.path.exists(REPORTING_FILE):
-            with open(REPORTING_FILE, "r", encoding="utf-8") as f:
+            with open(REPORTING_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 reporting_data = data
@@ -15172,16 +15172,19 @@ def api_status():
                                 except Exception:
                                     oe = _parse_broker_timestamp(oe_str)
                         sym = (pos.get("symbol") or pos.get("pair") or "").strip().upper()
-                        if oe:
-                            if oldest_epoch is None or oe < oldest_epoch:
-                                oldest_epoch = oe
-                            if sym:
-                                if sym not in sym_epochs:
-                                    sym_epochs[sym] = {"oldest_epoch": oe, "count": 1}
-                                else:
-                                    sym_epochs[sym]["count"] += 1
-                                    if oe < sym_epochs[sym]["oldest_epoch"]:
-                                        sym_epochs[sym]["oldest_epoch"] = oe
+                        if sym:
+                            if sym not in sym_epochs:
+                                sym_epochs[sym] = {"oldest_epoch": oe, "count": 1, "age_counts": {}}
+                            else:
+                                sym_epochs[sym]["count"] += 1
+                                if oe and (sym_epochs[sym]["oldest_epoch"] is None or oe < sym_epochs[sym]["oldest_epoch"]):
+                                    sym_epochs[sym]["oldest_epoch"] = oe
+                            if oe:
+                                if oldest_epoch is None or oe < oldest_epoch:
+                                    oldest_epoch = oe
+                                pos_age = _count_rollover_days(oe, day_schedule=cfg)
+                                pos_age_val = int(pos_age) if isinstance(pos_age, (int, float)) and float(pos_age).is_integer() else round(pos_age, 1)
+                                sym_epochs[sym]["age_counts"][pos_age_val] = sym_epochs[sym]["age_counts"].get(pos_age_val, 0) + 1
                 if oldest_epoch is None and open_tickets:
                     for sid, sess in list(_snap_sessions.items()):
                         if sess.get("status") not in ("active", "paused", "partial_close"):
@@ -15202,23 +15205,49 @@ def api_status():
                                 if oldest_epoch is None or fe < oldest_epoch:
                                     oldest_epoch = fe
                                 if sess_sym:
+                                    f_age = _count_rollover_days(fe, day_schedule=cfg)
+                                    f_age_val = int(f_age) if isinstance(f_age, (int, float)) and float(f_age).is_integer() else round(f_age, 1)
                                     if sess_sym not in sym_epochs:
-                                        sym_epochs[sess_sym] = {"oldest_epoch": fe, "count": 1}
+                                        sym_epochs[sess_sym] = {
+                                            "oldest_epoch": fe,
+                                            "count": 1,
+                                            "age_counts": {f_age_val: 1}
+                                        }
                                     else:
                                         sym_epochs[sess_sym]["count"] += 1
-                                        if fe < sym_epochs[sess_sym]["oldest_epoch"]:
+                                        if sym_epochs[sess_sym]["oldest_epoch"] is None or fe < sym_epochs[sess_sym]["oldest_epoch"]:
                                             sym_epochs[sess_sym]["oldest_epoch"] = fe
+                                        sym_epochs[sess_sym]["age_counts"][f_age_val] = sym_epochs[sess_sym]["age_counts"].get(f_age_val, 0) + 1
                 if oldest_epoch:
-                    entry["oldest_position_age"] = _count_rollover_days(oldest_epoch, day_schedule=cfg)
+                    raw_age = _count_rollover_days(oldest_epoch, day_schedule=cfg)
+                    entry["oldest_position_age"] = int(raw_age) if isinstance(raw_age, (int, float)) and float(raw_age).is_integer() else round(raw_age, 1)
                 elif entry.get("oldest_position_age") is None:
                     entry.pop("oldest_position_age", None)
 
                 if sym_epochs:
                     age_by_sym = {}
                     for s_name, s_data in sym_epochs.items():
+                        old_epoch = s_data.get("oldest_epoch")
+                        if old_epoch is not None:
+                            s_age_raw = _count_rollover_days(old_epoch, day_schedule=cfg)
+                            s_age = int(s_age_raw) if isinstance(s_age_raw, (int, float)) and float(s_age_raw).is_integer() else round(s_age_raw, 1)
+                        else:
+                            s_age = 0
+                        raw_counts = s_data.get("age_counts", {})
+                        uncounted = s_data.get("count", 0) - sum(raw_counts.values())
+                        if uncounted > 0:
+                            raw_counts[s_age] = raw_counts.get(s_age, 0) + uncounted
+                        age_counts_dict = {str(k): v for k, v in raw_counts.items()}
+                        ages_list = sorted(
+                            [{"age": k, "count": v} for k, v in raw_counts.items()],
+                            key=lambda x: x["age"],
+                            reverse=True
+                        )
                         age_by_sym[s_name] = {
-                            "age": _count_rollover_days(s_data["oldest_epoch"], day_schedule=cfg),
-                            "count": s_data["count"]
+                            "age": s_age,
+                            "count": s_data["count"],
+                            "age_counts": age_counts_dict,
+                            "ages": ages_list
                         }
                     entry["position_age_by_symbol"] = age_by_sym
                 elif entry.get("position_age_by_symbol") is None:
@@ -17610,6 +17639,216 @@ def get_api_routes():
 
 # ─── PnL Report API ─────────────────────────────────────────────────────────
 
+@app.route('/api/pnl/oldest_date', methods=['POST'])
+def pnl_oldest_date():
+    """Find the date of the oldest closed position/deal with the relevant comment.
+    Checks Account A first, then falls back to other accounts.
+    Searches saved statements on disk (stmts/*.json) and live MT connectors.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        acct_a = (data.get("account_a") or data.get("account") or "").strip()
+        all_accts = data.get("accounts") or []
+        comments = data.get("comments") or []
+        strategy_id = (data.get("strategy_id") or "").strip()
+        strat_name = (data.get("name") or "").strip()
+
+        if isinstance(comments, str):
+            comments = [c.strip() for c in comments.split(",") if c.strip()]
+        elif isinstance(comments, list):
+            comments = [str(c).strip() for c in comments if str(c).strip()]
+        else:
+            comments = []
+
+        # If comments not passed, infer from strategy if possible
+        if not comments and strategy_id and strategy_id in strategies:
+            st = strategies[strategy_id]
+            st_sessions = [s for s in sessions.values() if s.get("strategy_id") == strategy_id]
+            for s in st_sessions:
+                if s.get("sides"):
+                    for side in s["sides"].values():
+                        if side.get("comment") and side["comment"].strip():
+                            comments.append(side["comment"].strip())
+                if s.get("comment"):
+                    for part in s["comment"].split(" / "):
+                        if part.strip():
+                            comments.append(part.strip())
+            if not comments and st.get("account1") and st.get("account2"):
+                def _short(a):
+                    m = re.search(r"(\d+)$", str(a or ""))
+                    return m.group(1) if m else str(a or "")
+                comments.append(f"{_short(st.get('account1'))}-{_short(st.get('account2'))}")
+
+        # If acct_a not specified, resolve from strategy or accounts
+        if not acct_a:
+            if strategy_id and strategy_id in strategies:
+                acct_a = strategies[strategy_id].get("account1", "")
+            elif all_accts:
+                for acc in all_accts:
+                    if "-A-" in acc or acc.endswith("-A") or acc.endswith("_A"):
+                        acct_a = acc
+                        break
+                if not acct_a:
+                    acct_a = all_accts[0]
+
+        # Prioritize accounts: Account A first, then others
+        ordered_accts = []
+        if acct_a:
+            ordered_accts.append(acct_a)
+        for acc in all_accts:
+            if acc and acc not in ordered_accts:
+                ordered_accts.append(acc)
+
+        if not ordered_accts:
+            return jsonify({"found": False, "error": "No accounts provided"}), 400
+
+        def _extract_record_date(rec):
+            candidates = []
+            for k in ("open_time", "close_time", "time", "date"):
+                v = rec.get(k)
+                if v:
+                    candidates.append(str(v).strip())
+            for k in ("open_epoch", "close_epoch", "time_epoch", "open_ts", "close_ts", "ts"):
+                v = rec.get(k)
+                if v:
+                    try:
+                        candidates.append(datetime.utcfromtimestamp(float(v)).strftime("%Y-%m-%d %H:%M:%S"))
+                    except Exception:
+                        pass
+            parsed = []
+            for c in candidates:
+                clean = c.replace(".", "-").replace("/", "-")
+                m = re.search(r"(\d{4})-(\d{2})-(\d{2})", clean)
+                if m:
+                    parsed.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+            return min(parsed) if parsed else None
+
+        for acc in ordered_accts:
+            earliest_date = None
+            oldest_deal = None
+
+            # 1. Search in statement files on disk
+            safe_id = re.sub(r"[^\w\-]", "_", acc)
+            candidate_files = []
+            if os.path.isdir(_STMTS_DIR):
+                candidate_files.append(os.path.join(_STMTS_DIR, f"{safe_id}.json"))
+                m_login = re.search(r"(\d+)$", acc)
+                if m_login:
+                    login_str = m_login.group(1)
+                    candidate_files.append(os.path.join(_STMTS_DIR, f"{login_str}.json"))
+                    for fname in os.listdir(_STMTS_DIR):
+                        if login_str in fname and fname.endswith(".json") and not fname.startswith("summary"):
+                            candidate_files.append(os.path.join(_STMTS_DIR, fname))
+
+            # Deduplicate while preserving order
+            seen_cf = set()
+            uniq_cf = []
+            for cf in candidate_files:
+                if cf not in seen_cf:
+                    seen_cf.add(cf)
+                    uniq_cf.append(cf)
+
+            for cf in uniq_cf:
+                if os.path.isfile(cf):
+                    try:
+                        with open(cf, "r", encoding="utf-8") as f:
+                            stmt_data = json.load(f)
+                        recs = stmt_data.get("deals", []) + stmt_data.get("positions", [])
+                        for r in recs:
+                            if r.get("type") in ("balance", "credit", "op_balance", "op_credit") and not r.get("symbol"):
+                                continue
+                            r_comm = str(r.get("comment") or "")
+                            if comments and not any(c in r_comm for c in comments):
+                                continue
+                            d_date = _extract_record_date(r)
+                            if d_date:
+                                if earliest_date is None or d_date < earliest_date:
+                                    earliest_date = d_date
+                                    oldest_deal = r
+                    except Exception as ex:
+                        app.logger.warning("[PnL-Oldest] Error reading statement %s: %s", cf, ex)
+
+            # 2. If not found in statement, query live connector (MT Direct / Bridge)
+            if not earliest_date:
+                acct_obj = None
+                if mt_direct_manager and hasattr(mt_direct_manager, 'accounts'):
+                    acct_obj = mt_direct_manager.accounts.get(acc)
+                if not acct_obj and 'mt_bridge_clients' in globals() and mt_bridge_clients:
+                    acct_obj = mt_bridge_clients.get(acc)
+                if not acct_obj and 'mt_bridge_client' in globals() and mt_bridge_client:
+                    acct_obj = mt_bridge_client.accounts.get(acc) if hasattr(mt_bridge_client, 'accounts') else None
+
+                if acct_obj and hasattr(acct_obj, 'get_deal_history') and getattr(acct_obj, 'connected', False):
+                    try:
+                        hist = acct_obj.get_deal_history(0, int(time.time()), comment_filters=comments, exclude_balance=True)
+                        if hist and isinstance(hist, dict):
+                            deals = hist.get("deals", [])
+                            for d in deals:
+                                d_comm = str(d.get("comment") or "")
+                                if comments and not any(c in d_comm for c in comments):
+                                    continue
+                                d_date = _extract_record_date(d)
+                                if d_date:
+                                    if earliest_date is None or d_date < earliest_date:
+                                        earliest_date = d_date
+                                        oldest_deal = d
+                    except Exception as ex:
+                        app.logger.warning("[PnL-Oldest] Error querying connector deal history for %s: %s", acc, ex)
+
+            # 3. Fallback: check bridge HTTP endpoint directly if available
+            if not earliest_date:
+                try:
+                    import urllib.request
+                    _b_url = os.environ.get("MT_BRIDGE_URL", "http://localhost:5090")
+                    _h_url = f"{_b_url}/api/accounts/{acc}/history?from=0&to={int(time.time())}&exclude_balance=true"
+                    _h_req = urllib.request.Request(_h_url, headers={"User-Agent": "TradeDashboard"})
+                    with urllib.request.urlopen(_h_req, timeout=10) as _resp:
+                        if _resp.status == 200:
+                            deal_hist = json.loads(_resp.read().decode("utf-8"))
+                            deals = deal_hist.get("deals", [])
+                            for d in deals:
+                                d_comm = str(d.get("comment") or "")
+                                if comments and not any(c in d_comm for c in comments):
+                                    continue
+                                d_date = _extract_record_date(d)
+                                if d_date:
+                                    if earliest_date is None or d_date < earliest_date:
+                                        earliest_date = d_date
+                                        oldest_deal = d
+                except Exception:
+                    pass
+
+            if earliest_date:
+                app.logger.info("[PnL-Oldest] Found oldest closed deal date %s for account %s (comments=%s)",
+                                earliest_date, acc, comments)
+                return jsonify({
+                    "found": True,
+                    "date": earliest_date,
+                    "account": acc,
+                    "comments": comments,
+                    "ticket": oldest_deal.get("ticket") if oldest_deal else None
+                })
+
+        # No closed deals found on any candidate account
+        strat_created = None
+        if strategy_id and strategy_id in strategies:
+            c_at = strategies[strategy_id].get("created_at")
+            if c_at:
+                m = re.search(r"(\d{4})-(\d{2})-(\d{2})", c_at)
+                if m:
+                    strat_created = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+        return jsonify({
+            "found": False,
+            "strategy_created_at": strat_created,
+            "message": "No closed positions found with relevant comment"
+        })
+
+    except Exception as e:
+        app.logger.error("[PnL-Oldest] Error finding oldest date: %s", e)
+        return jsonify({"found": False, "error": str(e)}), 500
+
+
 @app.route('/api/pnl/request', methods=['POST'])
 def pnl_request_create():
     """Create a PnL request for all accounts under a name group (or hedge subgroup)."""
@@ -17776,20 +18015,74 @@ def pnl_request_create():
                 
                 if bal is not None and eq is not None:
                     try:
-                        open_pnl = float(eq) - float(bal)
-                        
-                        # Extract open swap
-                        open_swap = 0.0
-                        if acc in mt_accts:
-                            open_swap = mt_accts[acc].get("total_swap", 0.0)
-                        elif acc in fix_accts:
-                            open_swap = fix_accts[acc].get("total_swap", 0.0)
-                        elif acc in iforex_accts:
-                            open_swap = iforex_accts[acc].get("total_swap", 0.0)
-                        elif acc in ea_account_info:
-                            open_swap = ea_account_info[acc].get("total_swap", 0.0)
-                        elif acc in manual_accounts:
-                            open_swap = manual_accounts[acc].get("total_swap", 0.0)
+                        # --- Unrealized PnL / Swap calculation ---
+                        # When comment_filters are active we must sum only the open positions
+                        # whose comment matches — using equity-balance would include ALL positions.
+                        if comment_filters:
+                            # Resolve the account connector so we can read individual positions
+                            _pos_acct_obj = None
+                            if mt_direct_manager:
+                                _pos_acct_obj = mt_direct_manager.accounts.get(acc)
+                            if _pos_acct_obj is None and fix_manager:
+                                _pos_acct_obj = fix_manager.accounts.get(acc)
+                            if _pos_acct_obj is None and ('iforex_manager' in globals() and iforex_manager):
+                                _pos_acct_obj = iforex_manager.accounts.get(acc)
+
+                            open_pnl = 0.0
+                            open_swap = 0.0
+                            if _pos_acct_obj is not None and hasattr(_pos_acct_obj, '_get_open_orders'):
+                                raw_positions = _pos_acct_obj._get_open_orders()
+                                matched = 0
+                                for pos in raw_positions:
+                                    pos_comment = str(pos.get('Comment', pos.get('comment', '')))
+                                    if any(cf in pos_comment for cf in comment_filters):
+                                        pos_swap   = float(pos.get('Swap',   pos.get('swap',   0)) or 0)
+                                        pos_profit = float(pos.get('Profit', pos.get('profit', 0)) or 0)
+                                        # The bridge Profit field includes swap; subtract it so
+                                        # open_pnl = pure price PnL only (swap reported separately).
+                                        open_pnl  += pos_profit - pos_swap
+                                        open_swap += pos_swap
+                                        matched += 1
+                                app.logger.info(
+                                    "[PnL] %s comment-filtered unrealized: pnl=%.2f swap=%.2f "
+                                    "(filters=%s, %d/%d positions matched)",
+                                    acc, open_pnl, open_swap, comment_filters,
+                                    matched, len(raw_positions)
+                                )
+                            else:
+                                # Fallback: no connector with position-level access — use account totals
+                                open_pnl = float(eq) - float(bal)
+                                if acc in mt_accts:
+                                    open_swap = mt_accts[acc].get("total_swap", 0.0)
+                                elif acc in fix_accts:
+                                    open_swap = fix_accts[acc].get("total_swap", 0.0)
+                                elif acc in iforex_accts:
+                                    open_swap = iforex_accts[acc].get("total_swap", 0.0)
+                                elif acc in ea_account_info:
+                                    open_swap = ea_account_info[acc].get("total_swap", 0.0)
+                                elif acc in manual_accounts:
+                                    open_swap = manual_accounts[acc].get("total_swap", 0.0)
+                                app.logger.warning(
+                                    "[PnL] %s has comment_filters but no position-level connector — "
+                                    "falling back to full account unrealized (may over-report)", acc)
+                        else:
+                            # No comment filter - use the fast equity-balance shortcut.
+                            # equity - balance = price_pnl + swap (broker includes swap in equity).
+                            # Extract open swap first so we can back it out of open_pnl.
+                            open_swap = 0.0
+                            if acc in mt_accts:
+                                open_swap = mt_accts[acc].get("total_swap", 0.0)
+                            elif acc in fix_accts:
+                                open_swap = fix_accts[acc].get("total_swap", 0.0)
+                            elif acc in iforex_accts:
+                                open_swap = iforex_accts[acc].get("total_swap", 0.0)
+                            elif acc in ea_account_info:
+                                open_swap = ea_account_info[acc].get("total_swap", 0.0)
+                            elif acc in manual_accounts:
+                                open_swap = manual_accounts[acc].get("total_swap", 0.0)
+                            # open_pnl = pure price PnL (swap stripped out so it is
+                            # reported separately in unrealized_swap, not double-counted)
+                            open_pnl = float(eq) - float(bal) - float(open_swap or 0)
 
                         current_states[acc] = {
                             "balance": float(bal),
@@ -23129,6 +23422,8 @@ function openStrategyPnlModal(stratId) {
   _pnlCurrentName = strat.name;
   _pnlCurrentHedgeKey = '';
   _pnlCurrentAccounts = accts.length > 0 ? accts : null;
+  _pnlCurrentAccountA = acct1 || (accts.length > 0 ? accts[0] : '');
+  _pnlCurrentStratId = strat.id;
 
   // Update modal title and subtitle
   document.getElementById('pnlModalTitle').textContent = '\u{1F4CA} PnL Report \u2014 ' + strat.name;
@@ -23143,22 +23438,23 @@ function openStrategyPnlModal(stratId) {
     }
   }
 
-  // Default dates: Sunday of current week to today
-  const now = new Date();
-  const sunday = new Date(now);
-  sunday.setDate(now.getDate() - now.getDay());
-  document.getElementById('pnlToDate').value = now.toISOString().split('T')[0];
-  document.getElementById('pnlFromDate').value = sunday.toISOString().split('T')[0];
-  const savedFeeKw = localStorage.getItem('tradeDash_pnlFeeKeywords');
-  document.getElementById('pnlFeeKeywords').value = savedFeeKw !== null ? savedFeeKw : 'fee,fees';
-
   // Reset form state
   document.getElementById('pnlForm').style.display = '';
   document.getElementById('pnlStatus').style.display = 'none';
   document.getElementById('pnlResults').style.display = 'none';
+  const sumEl = document.getElementById('pnlAnnualizedSummary'); if (sumEl) sumEl.style.display = 'none';
 
   // Build comment filter UI
   _buildPnlCommentFilterUI();
+
+  // Default dates: use cached oldest date if available, otherwise Sunday of current week
+  const now = new Date();
+  const sunday = new Date(now);
+  sunday.setDate(now.getDate() - now.getDay());
+  document.getElementById('pnlToDate').value = now.toISOString().split('T')[0];
+  _applyPnlFromDate(sunday.toISOString().split('T')[0]);
+  const savedFeeKw = localStorage.getItem('tradeDash_pnlFeeKeywords');
+  document.getElementById('pnlFeeKeywords').value = savedFeeKw !== null ? savedFeeKw : 'fee,fees';
 
   document.getElementById('pnlModal').style.display = 'flex';
 }
@@ -26323,7 +26619,16 @@ function renderAccounts(heartbeats, manualAccounts, fixAccounts, mtDirectAccount
     if (symKeys.length > 0) {
       title += '\n\nInstruments breakdown:';
       symKeys.forEach(sym => {
-        title += `\n• ${sym}: ${symBreakdown[sym].age}d (${symBreakdown[sym].count} pos)`;
+        const item = symBreakdown[sym];
+        let detailStr = `${item.age}d (${item.count} pos)`;
+        let aList = item.ages;
+        if (!aList && item.age_counts) {
+          aList = Object.entries(item.age_counts).map(([a, c]) => ({ age: Number(a), count: c })).sort((a, b) => b.age - a.age);
+        }
+        if (aList && aList.length > 1) {
+          detailStr += ` [${aList.map(x => `${x.age}d:${x.count}`).join(', ')}]`;
+        }
+        title += `\n• ${sym}: ${detailStr}`;
       });
     }
 
@@ -27084,12 +27389,30 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
         // Aggregate symbol breakdown for group (only cycle-enabled members)
         const mSymAges = info.position_age_by_symbol || {};
         Object.entries(mSymAges).forEach(([sym, sData]) => {
+          let sCounts = sData.age_counts;
+          if (!sCounts && sData.ages) {
+            sCounts = {};
+            sData.ages.forEach(x => { sCounts[x.age] = x.count; });
+          }
+          if (!sCounts && sData.age != null) {
+            sCounts = { [sData.age]: sData.count || 0 };
+          }
           if (!groupAgeBySymbol[sym]) {
-            groupAgeBySymbol[sym] = { age: sData.age, count: sData.count || 0 };
+            groupAgeBySymbol[sym] = { 
+              age: sData.age, 
+              count: sData.count || 0,
+              age_counts: sCounts ? { ...sCounts } : {}
+            };
           } else {
             groupAgeBySymbol[sym].count += (sData.count || 0);
             if (sData.age > groupAgeBySymbol[sym].age) {
               groupAgeBySymbol[sym].age = sData.age;
+            }
+            if (sCounts) {
+              if (!groupAgeBySymbol[sym].age_counts) groupAgeBySymbol[sym].age_counts = {};
+              for (const [a, c] of Object.entries(sCounts)) {
+                groupAgeBySymbol[sym].age_counts[a] = (groupAgeBySymbol[sym].age_counts[a] || 0) + Number(c);
+              }
             }
           }
         });
@@ -27193,7 +27516,17 @@ function _renderGroupedAccounts(tbody, heartbeats, manualAccounts, fixAccounts, 
     if (groupSymKeys.length > 0) {
       groupAgeTip += '\n\nInstruments breakdown:';
       groupSymKeys.forEach(sym => {
-        groupAgeTip += `\n• ${sym}: ${groupAgeBySymbol[sym].age}d (${groupAgeBySymbol[sym].count} pos)`;
+        const item = groupAgeBySymbol[sym];
+        let detailStr = `${item.age}d (${item.count} pos)`;
+        if (item.age_counts) {
+          const sortedAges = Object.entries(item.age_counts)
+            .map(([a, c]) => ({ age: Number(a), count: c }))
+            .sort((a, b) => b.age - a.age);
+          if (sortedAges.length > 1) {
+            detailStr += ` [${sortedAges.map(x => `${x.age}d:${x.count}`).join(', ')}]`;
+          }
+        }
+        groupAgeTip += `\n• ${sym}: ${detailStr}`;
       });
     }
     const groupAgeCell = (maxAge !== null && groupSymKeys.length > 0)
@@ -27492,11 +27825,23 @@ function showAccountAgeBreakdown(accountId) {
     }
   }
   const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
-  const entries = Object.entries(bySym).map(([sym, data]) => ({
-    symbol: sym,
-    age: data.age,
-    count: data.count || 1
-  })).sort((a, b) => b.age - a.age);
+  const entries = Object.entries(bySym).map(([sym, data]) => {
+    let agesList = data.ages;
+    if (!agesList && data.age_counts) {
+      agesList = Object.entries(data.age_counts)
+        .map(([a, c]) => ({ age: Number(a), count: Number(c) }))
+        .sort((a, b) => b.age - a.age);
+    }
+    if (!agesList || !agesList.length) {
+      agesList = [{ age: data.age != null ? data.age : 0, count: data.count || 1 }];
+    }
+    return {
+      symbol: sym,
+      age: data.age,
+      count: data.count || 1,
+      ages: agesList
+    };
+  }).sort((a, b) => b.age - a.age);
 
   if (!entries.length) {
     alert('No position age breakdown available for ' + accountId);
@@ -27533,22 +27878,46 @@ function showGroupAgeBreakdown(groupName, commaSeparatedIds) {
     if (!isCycleEnabled) return;
     const bySym = (acctInfo && acctInfo.position_age_by_symbol) || {};
     Object.entries(bySym).forEach(([sym, data]) => {
+      let symCounts = data.age_counts;
+      if (!symCounts && data.ages) {
+        symCounts = {};
+        data.ages.forEach(x => { symCounts[x.age] = x.count; });
+      }
+      if (!symCounts) {
+        symCounts = (data.age != null) ? { [data.age]: (data.count || 1) } : {};
+      }
       if (!groupSymMap[sym]) {
-        groupSymMap[sym] = { age: data.age, count: data.count || 1 };
+        groupSymMap[sym] = { 
+          age: data.age, 
+          count: data.count || 1,
+          age_counts: {}
+        };
+        for (const [aKey, aCount] of Object.entries(symCounts)) {
+          groupSymMap[sym].age_counts[aKey] = Number(aCount);
+        }
       } else {
         groupSymMap[sym].count += (data.count || 1);
         if (data.age > groupSymMap[sym].age) {
           groupSymMap[sym].age = data.age;
         }
+        for (const [aKey, aCount] of Object.entries(symCounts)) {
+          groupSymMap[sym].age_counts[aKey] = (groupSymMap[sym].age_counts[aKey] || 0) + Number(aCount);
+        }
       }
     });
   });
 
-  const entries = Object.entries(groupSymMap).map(([sym, data]) => ({
-    symbol: sym,
-    age: data.age,
-    count: data.count
-  })).sort((a, b) => b.age - a.age);
+  const entries = Object.entries(groupSymMap).map(([sym, data]) => {
+    const agesList = Object.entries(data.age_counts || {})
+      .map(([a, c]) => ({ age: Number(a), count: c }))
+      .sort((a, b) => b.age - a.age);
+    return {
+      symbol: sym,
+      age: data.age,
+      count: data.count,
+      ages: agesList.length ? agesList : [{ age: data.age != null ? data.age : 0, count: data.count }]
+    };
+  }).sort((a, b) => b.age - a.age);
 
   if (!entries.length) {
     alert('No position age breakdown available for group ' + groupName);
@@ -27558,37 +27927,97 @@ function showGroupAgeBreakdown(groupName, commaSeparatedIds) {
 }
 
 function _renderAgeBreakdownModal(title, data) {
-  let html = `<div class="modal-overlay active" id="ageBreakdownModal" onclick="if(event.target===this)this.remove()">
-    <div class="modal" style="min-width:340px;max-width:500px;">
-      <h3 style="margin:0 0 12px;font-size:1rem;">${title}</h3>
-      <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
-        <thead><tr style="border-bottom:1px solid var(--border);text-align:right;">
-          <th style="text-align:left;padding:4px 8px;">Instrument</th>
-          <th style="padding:4px 8px;">Open Positions</th>
-          <th style="padding:4px 8px;color:var(--orange)">Oldest Age</th>
-        </tr></thead><tbody>`;
   let totalPos = 0;
   let maxAge = 0;
+  let rowsHtml = '';
+
   data.forEach(r => {
     totalPos += (r.count || 0);
     if (r.age > maxAge) maxAge = r.age;
-    const ageColor = r.age >= 7 ? 'var(--red)' : (r.age >= 3 ? 'var(--orange)' : 'var(--text)');
-    html += `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:4px 8px;font-weight:600;">${r.symbol}</td>
-      <td style="padding:4px 8px;text-align:right;">${r.count}</td>
-      <td style="padding:4px 8px;text-align:right;color:${ageColor};font-weight:600;">${r.age}d</td>
+    const oldestColor = r.age >= 7 ? 'var(--red)' : (r.age >= 3 ? 'var(--orange)' : 'var(--text)');
+
+    let agesList = r.ages;
+    if (!agesList && r.age_counts) {
+      agesList = Object.entries(r.age_counts)
+        .map(([a, c]) => ({ age: Number(a), count: Number(c) }))
+        .sort((a, b) => b.age - a.age);
+    }
+    if (!agesList || !agesList.length) {
+      agesList = [{ age: r.age != null ? r.age : 0, count: r.count || 1 }];
+    }
+
+    // Instrument header row
+    rowsHtml += `<tr style="background:rgba(255,255,255,0.06);border-top:1px solid var(--border);font-weight:700;">
+      <td style="padding:6px 10px;">
+        <span style="color:var(--accent);font-size:0.88rem;">${r.symbol}</span>
+        <span style="font-weight:normal;color:var(--text2);font-size:0.75rem;margin-left:6px;">
+          (oldest: <span style="color:${oldestColor};font-weight:600;">${r.age}d</span>)
+        </span>
+      </td>
+      <td style="padding:6px 10px;text-align:right;font-size:0.88rem;">${r.count}</td>
+      <td style="padding:6px 10px;text-align:right;color:var(--text2);font-size:0.75rem;">100%</td>
     </tr>`;
+
+    // Sub-rows for each age
+    agesList.forEach(aItem => {
+      const aVal = aItem.age;
+      const aCnt = aItem.count;
+      const pct = r.count > 0 ? ((aCnt / r.count) * 100).toFixed(1) : '0.0';
+      const aColor = aVal >= 7 ? 'var(--red)' : (aVal >= 3 ? 'var(--orange)' : 'var(--text)');
+      const barColor = aVal >= 7 ? 'var(--red)' : (aVal >= 3 ? 'var(--orange)' : 'var(--accent)');
+
+      rowsHtml += `<tr style="border-bottom:1px solid rgba(255,255,255,0.03);">
+        <td style="padding:4px 10px 4px 24px;color:${aColor};font-weight:600;">
+          <span style="color:var(--text2);margin-right:6px;font-weight:normal;">↳</span>${aVal}d
+        </td>
+        <td style="padding:4px 10px;text-align:right;font-variant-numeric:tabular-nums;">${aCnt}</td>
+        <td style="padding:4px 10px;text-align:right;">
+          <div style="display:inline-flex;align-items:center;gap:6px;width:100%;justify-content:flex-end;">
+            <div style="flex:1;background:rgba(255,255,255,0.08);height:5px;border-radius:3px;overflow:hidden;">
+              <div style="background:${barColor};height:100%;width:${pct}%;"></div>
+            </div>
+            <span style="font-size:0.72rem;color:var(--text2);min-width:34px;text-align:right;font-variant-numeric:tabular-nums;">${pct}%</span>
+          </div>
+        </td>
+      </tr>`;
+    });
   });
-  html += `<tr style="border-top:2px solid var(--accent);font-weight:700;">
-    <td style="padding:4px 8px;">TOTAL / MAX</td>
-    <td style="padding:4px 8px;text-align:right;">${totalPos}</td>
-    <td style="padding:4px 8px;text-align:right;color:var(--orange);">${maxAge}d</td>
-  </tr></tbody></table>
-  <div style="text-align:right;margin-top:12px;">
-    <button class="btn" onclick="document.getElementById('ageBreakdownModal').remove()">Close</button>
-  </div>
+
+  const maxAgeColor = maxAge >= 7 ? 'var(--red)' : (maxAge >= 3 ? 'var(--orange)' : 'var(--text)');
+
+  let html = `<div class="modal-overlay active" id="ageBreakdownModal" onclick="if(event.target===this)this.remove()">
+    <div class="modal" style="min-width:380px;max-width:520px;width:92vw;max-height:85vh;display:flex;flex-direction:column;padding:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border);">
+        <h3 style="margin:0;font-size:0.98rem;font-weight:700;">${title}</h3>
+        <button class="btn" onclick="document.getElementById('ageBreakdownModal').remove()" style="padding:2px 8px;font-size:0.85rem;background:transparent;border:none;color:var(--text2);cursor:pointer;" title="Close">✕</button>
+      </div>
+      <div style="overflow-y:auto;flex:1;padding-right:2px;max-height:calc(85vh - 110px);">
+        <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);text-align:right;color:var(--text2);font-size:0.74rem;text-transform:uppercase;">
+              <th style="text-align:left;padding:6px 10px;">Instrument / Age</th>
+              <th style="padding:6px 10px;text-align:right;">Positions</th>
+              <th style="padding:6px 10px;text-align:right;width:110px;">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+          <tfoot>
+            <tr style="border-top:2px solid var(--accent);font-weight:700;">
+              <td style="padding:8px 10px;">TOTAL / MAX</td>
+              <td style="padding:8px 10px;text-align:right;font-size:0.88rem;">${totalPos}</td>
+              <td style="padding:8px 10px;text-align:right;color:${maxAgeColor};font-size:0.82rem;">${maxAge}d max</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:12px;padding-top:8px;border-top:1px solid var(--border);">
+        <button class="btn" onclick="document.getElementById('ageBreakdownModal').remove()">Close</button>
+      </div>
     </div>
   </div>`;
+
   const existing = document.getElementById('ageBreakdownModal');
   if (existing) existing.remove();
   document.body.insertAdjacentHTML('beforeend', html);
@@ -29039,10 +29468,13 @@ async function deleteIForexAccount(id) {
 let _pnlCurrentName = '';
 let _pnlCurrentHedgeKey = '';
 let _pnlCurrentAccounts = null;
+let _pnlCurrentStratId = '';
+let _pnlCurrentAccountA = '';
 let _pnlRequestId = '';
 let _pnlPollTimer = null;
 let _pnlLastData = null;  // cached last completed PnL response for pair breakdown popup
 let _pnlCommentSuggestions = [];  // auto-generated comment filter strings for current hedge group
+let _pnlDays = 1;
 
 function openPnlModal(name, hedgeKey, explicitAccounts) {
   _pnlCurrentName = name;
@@ -29110,19 +29542,34 @@ function openPnlModal(name, hedgeKey, explicitAccounts) {
     }
   }
 
-  // Default dates: Sunday of current week to today
+  _pnlCurrentStratId = '';
+  // Identify Account A
+  let acctA = '';
+  if (hedgeKey && window._reportingHedgeGroups && window._reportingHedgeGroups[hedgeKey]) {
+    const hgAccts = (window._reportingHedgeGroups[hedgeKey].accounts || []);
+    const aSides = hgAccts.filter(a => (a.side || '').toUpperCase() === 'A');
+    if (aSides.length > 0 && aSides[0].name) acctA = aSides[0].name;
+  }
+  if (!acctA && _pnlCurrentAccounts && _pnlCurrentAccounts.length > 0) {
+    acctA = _pnlCurrentAccounts.find(a => /-A(-|$)/i.test(a)) || _pnlCurrentAccounts[0];
+  }
+  _pnlCurrentAccountA = acctA;
+
+  document.getElementById('pnlForm').style.display = '';
+  document.getElementById('pnlStatus').style.display = 'none';
+  document.getElementById('pnlResults').style.display = 'none';
+  const sumEl = document.getElementById('pnlAnnualizedSummary'); if (sumEl) sumEl.style.display = 'none';
+  // Rebuild comment filter UI with auto-suggestions
+  _buildPnlCommentFilterUI();
+
+  // Default dates: use cached oldest date if available, otherwise Sunday of current week
   const now = new Date();
   const sunday = new Date(now);
   sunday.setDate(now.getDate() - now.getDay()); // getDay() returns 0=Sun..6=Sat
   document.getElementById('pnlToDate').value = now.toISOString().split('T')[0];
-  document.getElementById('pnlFromDate').value = sunday.toISOString().split('T')[0];
+  _applyPnlFromDate(sunday.toISOString().split('T')[0]);
   const savedFeeKw = localStorage.getItem('tradeDash_pnlFeeKeywords');
   document.getElementById('pnlFeeKeywords').value = savedFeeKw !== null ? savedFeeKw : 'fee,fees';
-  document.getElementById('pnlForm').style.display = '';
-  document.getElementById('pnlStatus').style.display = 'none';
-  document.getElementById('pnlResults').style.display = 'none';
-  // Rebuild comment filter UI with auto-suggestions
-  _buildPnlCommentFilterUI();
   document.getElementById('pnlModal').style.display = 'flex';
 }
 
@@ -29183,6 +29630,21 @@ function exportPnlHtmlReport() {
   const aSym  = a   => eSym(aCur(a));
   const activeCursExp = [...new Set(accounts.filter(a => !isSkipped(a)).map(aCur))];
   const isMixedExp    = activeCursExp.length > 1;
+
+  let days = 1;
+  let daysStr = '';
+  if (fromDate && toDate) {
+    const d1 = new Date(fromDate + 'T00:00:00');
+    const d2 = new Date(toDate + 'T00:00:00');
+    const diff = Math.round((d2 - d1) / (1000 * 60 * 60 * 24));
+    days = Math.max(1, diff);
+    daysStr = ' &bull; <strong>' + days + ' day' + (days === 1 ? '' : 's') + '</strong>';
+  }
+  const annPnlExp = v => v * (365 / days);
+  const annTipExp = (v, sym) => {
+    const a = annPnlExp(v || 0);
+    return 'Annualized PnL: ' + (a < 0 ? '-' : '') + sym + fmt(Math.abs(a)) + ' (' + days + ' day' + (days === 1 ? '' : 's') + ')';
+  };
 
   function getExpRate(from, to) {
     if (from === to) return 1.0;
@@ -29271,7 +29733,7 @@ function exportPnlHtmlReport() {
       tableBody += '<td style="color:#8b8fa3;text-align:center;">\u2014</td>';
     } else {
       const v = acctNetExp[a] || 0;
-      tableBody += `<td style="${clrStyle(v)}font-size:1.05rem;">${aSym(a)}${fmt(v)}</td>`;
+      tableBody += `<td style="${clrStyle(v)}font-size:1.05rem;" title="${annTipExp(v, aSym(a))}">${aSym(a)}${fmt(v)}</td>`;
     }
   });
 
@@ -29298,7 +29760,7 @@ function exportPnlHtmlReport() {
           const raw  = acctNetExp[a] || 0;
           const conv = raw * getExpRate(from, targetCur);
           const approx = from !== targetCur ? '\u2248\u00a0' : '';
-          tableBody += `<td style="${clrStyle(conv)}font-size:1.0rem;">${approx}${tsym}${fmt(conv)}</td>`;
+          tableBody += `<td style="${clrStyle(conv)}font-size:1.0rem;" title="${annTipExp(conv, tsym)}">${approx}${tsym}${fmt(conv)}</td>`;
         }
       });
       // Total
@@ -29306,7 +29768,7 @@ function exportPnlHtmlReport() {
       accounts.forEach(a => {
         if (!isSkipped(a)) sum += (acctNetExp[a]||0) * getExpRate(aCur(a), targetCur);
       });
-      tableBody += `<td style="font-weight:700;${clrStyle(sum)}font-size:1.05rem;">\u2248\u00a0${tsym}${fmt(sum)}</td></tr>`;
+      tableBody += `<td style="font-weight:700;${clrStyle(sum)}font-size:1.05rem;" title="${annTipExp(sum, tsym)}">\u2248\u00a0${tsym}${fmt(sum)}</td></tr>`;
     });
   } else {
     let nt = totals.net_pnl || 0;
@@ -29315,7 +29777,7 @@ function exportPnlHtmlReport() {
         if (!isSkipped(a))
           nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
       });
-    tableBody += `<td style="font-weight:700;${clrStyle(nt)}font-size:1.05rem;">${eSym(activeCursExp[0]||'USD')}${fmt(nt)}</td></tr>`;
+    tableBody += `<td style="font-weight:700;${clrStyle(nt)}font-size:1.05rem;" title="${annTipExp(nt, eSym(activeCursExp[0]||'USD'))}">${eSym(activeCursExp[0]||'USD')}${fmt(nt)}</td></tr>`;
   }
 
   // Symbol Breakdown table
@@ -29464,7 +29926,7 @@ function exportPnlHtmlReport() {
       <div>
         <h1>📊 PnL Report — ${name}</h1>
         <div style="margin-top: 8px; color: #8b8fa3;">
-          Period: <strong>${fromDate}</strong> &rarr; <strong>${toDate}</strong>
+          Period: <strong>${fromDate}</strong> &rarr; <strong>${toDate}</strong>${daysStr}
         </div>
       </div>
       <div class="meta-info">
@@ -29507,6 +29969,12 @@ async function requestPnl() {
   const toDate = document.getElementById('pnlToDate').value;
   const feeKw = document.getElementById('pnlFeeKeywords').value.trim();
   localStorage.setItem('tradeDash_pnlFeeKeywords', document.getElementById('pnlFeeKeywords').value);
+  if (fromDate && /^\d{4}-\d{2}-\d{2}$/.test(fromDate)) {
+    const cacheKey = _getPnlOldestCacheKey();
+    localStorage.setItem('tradeDash_pnlOldest_' + cacheKey, fromDate);
+    if (_pnlCurrentStratId) localStorage.setItem('tradeDash_pnlOldest_strat_' + _pnlCurrentStratId, fromDate);
+    if (_pnlCurrentName) localStorage.setItem('tradeDash_pnlOldest_name_' + _pnlCurrentName.replace(/\s+/g, '_'), fromDate);
+  }
   if (!fromDate || !toDate) { alert('Please select both dates'); return; }
   document.getElementById('pnlSubmitBtn').disabled = true;
   try {
@@ -29537,6 +30005,7 @@ async function requestPnl() {
     document.getElementById('pnlResults').style.display = 'none';
     document.getElementById('pnlSpinner').textContent = '⏳ Waiting for accounts to report...';
     document.getElementById('pnlProgress').textContent = '0 / ' + data.accounts.length + ' accounts reported';
+    const sumEl = document.getElementById('pnlAnnualizedSummary'); if (sumEl) sumEl.style.display = 'none';
     // Start polling
     _pnlPollTimer = setInterval(() => pollPnlStatus(), 2000);
   } catch(e) { alert('Error: ' + e.message); } finally {
@@ -29575,6 +30044,102 @@ function _buildPnlCommentFilterUI() {
   });
 }
 
+function _getPnlOldestCacheKey() {
+  if (_pnlCurrentStratId) return 'strat_' + _pnlCurrentStratId;
+  if (_pnlCurrentHedgeKey) return 'subgroup_' + _pnlCurrentHedgeKey;
+  if (_pnlCurrentName) return 'name_' + _pnlCurrentName.replace(/\s+/g, '_');
+  if (_pnlCurrentAccountA) return 'acct_' + _pnlCurrentAccountA;
+  return 'default';
+}
+
+function _applyPnlFromDate(fallbackDate) {
+  const cacheKey = _getPnlOldestCacheKey();
+  let cached = localStorage.getItem('tradeDash_pnlOldest_' + cacheKey);
+  if (!cached && _pnlCurrentName) {
+    cached = localStorage.getItem('tradeDash_pnlOldest_name_' + _pnlCurrentName.replace(/\s+/g, '_'));
+  }
+  if (!cached && _pnlCurrentAccountA) {
+    cached = localStorage.getItem('tradeDash_pnlOldest_acct_' + _pnlCurrentAccountA);
+  }
+  if (cached && /^\d{4}-\d{2}-\d{2}$/.test(cached)) {
+    document.getElementById('pnlFromDate').value = cached;
+  } else {
+    document.getElementById('pnlFromDate').value = fallbackDate;
+    // Auto-lookup oldest closed deal date if not cached yet
+    pnlLookupOldestDate(false);
+  }
+}
+
+async function pnlLookupOldestDate(isManual) {
+  const btn = document.getElementById('pnlSetOldestBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ ...';
+  }
+  try {
+    const comments = [];
+    document.querySelectorAll('.pnl-comment-cb:checked').forEach(cb => {
+      if (cb.value && !comments.includes(cb.value)) comments.push(cb.value);
+    });
+    if (comments.length === 0 && _pnlCommentSuggestions && _pnlCommentSuggestions.length > 0) {
+      _pnlCommentSuggestions.forEach(s => { if (!comments.includes(s)) comments.push(s); });
+    }
+    const customEl = document.getElementById('pnlCommentCustom');
+    if (customEl && customEl.value.trim()) {
+      customEl.value.split(',').forEach(s => {
+        const tr = s.trim();
+        if (tr && !comments.includes(tr)) comments.push(tr);
+      });
+    }
+
+    const payload = {
+      account_a: _pnlCurrentAccountA || '',
+      accounts: _pnlCurrentAccounts || [],
+      comments: comments,
+      strategy_id: _pnlCurrentStratId || '',
+      name: _pnlCurrentName || ''
+    };
+
+    const resp = await fetch('/api/pnl/oldest_date', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+
+    if (resp.ok && data.found && data.date) {
+      document.getElementById('pnlFromDate').value = data.date;
+      const cacheKey = _getPnlOldestCacheKey();
+      localStorage.setItem('tradeDash_pnlOldest_' + cacheKey, data.date);
+      if (_pnlCurrentStratId) {
+        localStorage.setItem('tradeDash_pnlOldest_strat_' + _pnlCurrentStratId, data.date);
+      }
+      if (_pnlCurrentName) {
+        localStorage.setItem('tradeDash_pnlOldest_name_' + _pnlCurrentName.replace(/\s+/g, '_'), data.date);
+      }
+      if (_pnlCurrentAccountA) {
+        localStorage.setItem('tradeDash_pnlOldest_acct_' + _pnlCurrentAccountA, data.date);
+      }
+      if (btn) {
+        btn.textContent = '✓ Set!';
+        setTimeout(() => { if (btn) btn.textContent = 'SetOldest'; }, 1500);
+      }
+    } else {
+      if (isManual) {
+        const msg = (data && data.message) ? data.message : 'No closed positions found with relevant comment.';
+        alert(msg);
+      }
+      if (btn) btn.textContent = 'SetOldest';
+    }
+  } catch (err) {
+    console.error('Error looking up oldest date:', err);
+    if (isManual) alert('Failed to look up oldest date: ' + err.message);
+    if (btn) btn.textContent = 'SetOldest';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function pollPnlStatus() {
   if (!_pnlRequestId) return;
   try {
@@ -29604,11 +30169,23 @@ function renderPnlResults(data) {
   const fromDate = data.from_date || '';
   const toDate   = data.to_date   || '';
   const name     = data.name || _pnlCurrentName || '';
+
+  let days = 1;
+  let daysStr = '';
+  if (fromDate && toDate) {
+    const d1 = new Date(fromDate + 'T00:00:00');
+    const d2 = new Date(toDate + 'T00:00:00');
+    const diff = Math.round((d2 - d1) / (1000 * 60 * 60 * 24));
+    days = Math.max(1, diff);
+    daysStr = ' &bull; <strong>' + days + ' day' + (days === 1 ? '' : 's') + '</strong>';
+  }
+  _pnlDays = days;
+
   document.getElementById('pnlModalTitle').innerHTML =
     '\u{1F4CA} PnL Report \u2014 ' + name +
     (fromDate && toDate
       ? ' <span style="font-size:0.85rem;color:var(--text2);margin-left:12px;font-weight:400;">' +
-        '(Period: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong>)</span>'
+        '(Period: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong>' + daysStr + ')</span>'
       : '');
 
   const results       = data.results       || {};
@@ -29620,6 +30197,12 @@ function renderPnlResults(data) {
   const clr = v => v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--text)';
   const isSkipped = a => results[a] &&
       (results[a].source === 'skipped_offline' || results[a].source === 'server_error');
+
+  const annPnl = v => v * (365 / days);
+  const annTip = (v, sym) => {
+    const a = annPnl(v || 0);
+    return 'Annualized PnL: ' + (a < 0 ? '-' : '') + (sym || '') + fmt(Math.abs(a)) + ' (' + days + ' day' + (days === 1 ? '' : 's') + ')';
+  };
 
   // ── Currency helpers ───────────────────────────────────────────────────────
   const SYM_MAP = {
@@ -29706,7 +30289,8 @@ function renderPnlResults(data) {
           v = results[a] ? results[a][m.key] || 0 : 0;
         }
         totalVal += v;
-        tbody += '<td style="color:' + clr(v) + ';">' + acctSym(a) + fmt(v) + '</td>';
+        const tip = (m.key === 'pnl' || m.key === 'unrealized') ? (' title="' + annTip(v, acctSym(a)) + '"') : '';
+        tbody += '<td style="color:' + clr(v) + ';"' + tip + '>' + acctSym(a) + fmt(v) + '</td>';
       }
     });
     // Total column: only meaningful when same currency
@@ -29717,7 +30301,8 @@ function renderPnlResults(data) {
       const tKey = m.key === 'pnl' ? 'gross_pnl' : m.key;
       let tv = (m.key === 'unrealized' || m.key === 'unrealized_swap')
                ? totalVal : (totals[tKey] || totalVal);
-      tbody += '<td style="font-weight:700;color:' + clr(tv) + ';">' +
+      const tip = (m.key === 'pnl' || m.key === 'unrealized') ? (' title="' + annTip(tv, curSym(activeCurs[0] || 'USD')) + '"') : '';
+      tbody += '<td style="font-weight:700;color:' + clr(tv) + ';"' + tip + '>' +
                curSym(activeCurs[0] || 'USD') + fmt(tv) + '</td></tr>';
     }
   });
@@ -29738,7 +30323,7 @@ function renderPnlResults(data) {
       tbody += '<td style="color:var(--text2);text-align:center;">\u2014</td>';
     } else {
       const v = acctNet[a] || 0;
-      tbody += '<td style="color:' + clr(v) + ';font-size:1.05rem;">' + acctSym(a) + fmt(v) + '</td>';
+      tbody += '<td style="color:' + clr(v) + ';font-size:1.05rem;" title="' + annTip(v, acctSym(a)) + '">' + acctSym(a) + fmt(v) + '</td>';
     }
   });
 
@@ -29805,7 +30390,7 @@ function renderPnlResults(data) {
           tbody +=
             '<td class="pnl-norm-cell"' +
             ' data-raw="' + rawV + '" data-from="' + fromCur + '" data-to="' + targetCur + '"' +
-            ' style="font-size:1.0rem;">' +
+            ' style="font-size:1.0rem;" title="' + annTip(rawV, acctSym(a)) + '">' +
             '<span class="pnl-norm-val" style="color:' + clr(rawV) + ';">' +
             (rawV < 0 ? '-' : '') + tsym + (Math.abs(rawV)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) + '</span></td>';
         }
@@ -29829,12 +30414,40 @@ function renderPnlResults(data) {
     const mainSym = curSym(activeCurs[0] || 'USD');
     tbody +=
       '<td style="color:' + clr(nt) + ';font-size:1.1rem;cursor:pointer;border-bottom:2px dotted currentColor;"' +
-      ' onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair">' +
+      ' onclick="openPairBreakdown()" title="Click to see PnL breakdown by pair&#10;' + annTip(nt, mainSym) + '">' +
       mainSym + fmt(nt) + ' \uD83D\uDCC8</td></tr>';
   }
 
   document.getElementById('pnlResultsBody').innerHTML = tbody;
   document.getElementById('pnlResults').style.display = '';
+
+  // Update Projected Annualized PnL summary under "Report complete"
+  const summaryValEl = document.getElementById('pnlProjAnnVal');
+  const periodEl = document.getElementById('pnlProjAnnPeriod');
+  if (periodEl) {
+    if (fromDate && toDate) {
+      periodEl.innerHTML = 'Period reported: <strong>' + fromDate + '</strong> &rarr; <strong>' + toDate + '</strong> (<strong>' + days + ' day' + (days === 1 ? '' : 's') + '</strong>)';
+    } else {
+      periodEl.innerHTML = '';
+    }
+  }
+
+  if (!isMixed && summaryValEl) {
+    let nt = totals.net_pnl || 0;
+    if (includeUnrealized) {
+      accounts.forEach(a => {
+        if (!isSkipped(a))
+          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+      });
+    }
+    const mainSym = curSym(activeCurs[0] || 'USD');
+    const annTotal = nt * (365 / days);
+    const annClr = annTotal > 0 ? 'var(--green)' : annTotal < 0 ? 'var(--red)' : 'var(--text)';
+    const sign = annTotal < 0 ? '-' : '';
+    summaryValEl.innerHTML = '<span style="color:' + annClr + ';">' + sign + mainSym + fmt(Math.abs(annTotal)) + '</span>';
+  }
+  const summaryCont = document.getElementById('pnlAnnualizedSummary');
+  if (summaryCont) summaryCont.style.display = 'flex';
 
   if (isMixed) _recalcPnlNormRows();
 }
@@ -29876,10 +30489,14 @@ function _recalcPnlNormRows() {
     const sym  = SYM_MAP[to] || (to + '\u00a0');
     const approx = from !== to ? '\u2248\u00a0' : '';
     const span = td.querySelector('.pnl-norm-val');
+    const d = _pnlDays || 1;
+    const annConv = conv * (365 / d);
+    td.title = 'Annualized PnL: ' + fmtCur(annConv, sym) + ' (' + d + ' day' + (d === 1 ? '' : 's') + ')';
     if (span) { span.style.color = clrV(conv); span.textContent = approx + fmtCur(conv, sym); }
   });
 
   // Update total cells
+  let firstAnnSummarySet = false;
   document.querySelectorAll('.pnl-norm-total').forEach(td => {
     const tgt = td.dataset.target;
     let sum = 0;
@@ -29890,12 +30507,24 @@ function _recalcPnlNormRows() {
       sum += (parseFloat(c.dataset.raw) || 0) * r;
     });
     const sym = SYM_MAP[tgt] || (tgt + '\u00a0');
+    const d = _pnlDays || 1;
+    const annSum = sum * (365 / d);
     if (!allRatesKnown) {
       td.innerHTML = '<span style="color:var(--orange);font-size:0.85rem;">enter rate above</span>';
     } else {
       td.innerHTML = '<span style="color:' + clrV(sum) + ';font-size:1.1rem;">\u2248\u00a0' +
                      fmtCur(sum, sym) + '</span> \uD83D\uDCC8';
       td.style.color = clrV(sum);
+      td.title = 'Click to see PnL breakdown by pair\nAnnualized PnL: ' + fmtCur(annSum, sym) + ' (' + d + ' day' + (d === 1 ? '' : 's') + ')';
+    }
+    const summaryValEl = document.getElementById('pnlProjAnnVal');
+    if (summaryValEl && (!firstAnnSummarySet || tgt === 'USD')) {
+      if (allRatesKnown) {
+        summaryValEl.innerHTML = '<span style="color:' + clrV(annSum) + ';">\u2248\u00a0' + fmtCur(annSum, sym) + '</span>';
+        if (tgt === 'USD') firstAnnSummarySet = true;
+      } else {
+        summaryValEl.innerHTML = '<span style="color:var(--orange);">enter rate above</span>';
+      }
     }
   });
 }
@@ -30484,7 +31113,13 @@ function copyApiTesterCurl(btn) {
     <div id="pnlModalSubtitle" style="font-size:0.75rem;color:var(--text2);margin-top:-10px;margin-bottom:12px;display:none;"></div>
     <div id="pnlForm">
       <div style="display:flex;gap:12px;margin-bottom:12px;">
-        <div style="flex:1"><label style="font-size:0.75rem;color:var(--text2);">FROM DATE</label><input type="date" id="pnlFromDate" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);"></div>
+        <div style="flex:1">
+          <label style="font-size:0.75rem;color:var(--text2);">FROM DATE</label>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="date" id="pnlFromDate" onchange="if(this.value){const k=_getPnlOldestCacheKey();localStorage.setItem('tradeDash_pnlOldest_'+k,this.value);if(_pnlCurrentStratId)localStorage.setItem('tradeDash_pnlOldest_strat_'+_pnlCurrentStratId,this.value);if(_pnlCurrentName)localStorage.setItem('tradeDash_pnlOldest_name_'+_pnlCurrentName.replace(/\s+/g,'_'),this.value);}" style="flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);">
+            <button type="button" id="pnlSetOldestBtn" class="btn btn-sm" style="white-space:nowrap;padding:8px 12px;font-size:0.78rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;flex-shrink:0;" onclick="pnlLookupOldestDate(true)" title="Look for oldest closed position with relevant comment and set date">SetOldest</button>
+          </div>
+        </div>
         <div style="flex:1"><label style="font-size:0.75rem;color:var(--text2);">TO DATE</label><input type="date" id="pnlToDate" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);"></div>
       </div>
       <div style="margin-bottom:12px;">
@@ -30519,6 +31154,10 @@ function copyApiTesterCurl(btn) {
     <div id="pnlStatus" style="display:none;text-align:center;padding:20px;">
       <div id="pnlSpinner" style="font-size:1.2rem;">⏳ Waiting for accounts to report...</div>
       <div id="pnlProgress" style="color:var(--text2);margin-top:8px;"></div>
+      <div id="pnlAnnualizedSummary" style="color:var(--text2);margin-top:6px;display:none;flex-wrap:wrap;justify-content:center;gap:12px;align-items:center;">
+        <div>Projected Annualized PnL: <strong id="pnlProjAnnVal"></strong></div>
+        <div id="pnlProjAnnPeriod"></div>
+      </div>
     </div>
     <div id="pnlResults" style="display:none;margin-top:16px;">
       <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">

@@ -1494,12 +1494,14 @@ class IForexAccount:
                     oldest_epoch = oe
                 s_name = (o.get("Symbol") or o.get("symbol") or "EURUSD").strip().upper().replace("/", "").replace(" ", "")
                 if s_name:
+                    pos_age = max(0, int((now_ts_calc - oe) / 86400))
                     if s_name not in sym_epochs:
-                        sym_epochs[s_name] = {"oldest_epoch": oe, "count": 1}
+                        sym_epochs[s_name] = {"oldest_epoch": oe, "count": 1, "age_counts": {pos_age: 1}}
                     else:
                         sym_epochs[s_name]["count"] += 1
                         if oe < sym_epochs[s_name]["oldest_epoch"]:
                             sym_epochs[s_name]["oldest_epoch"] = oe
+                        sym_epochs[s_name]["age_counts"][pos_age] = sym_epochs[s_name]["age_counts"].get(pos_age, 0) + 1
 
             pos_details.append({
                 "ticket": t_str,
@@ -1523,9 +1525,22 @@ class IForexAccount:
         if sym_epochs:
             age_by_sym = {}
             for s_name, s_data in sym_epochs.items():
+                old_ep = s_data.get("oldest_epoch")
+                s_age = max(0, int((now_ts_calc - old_ep) / 86400)) if old_ep is not None else 0
+                raw_counts = s_data.get("age_counts", {})
+                if not raw_counts and s_data.get("count", 0) > 0:
+                    raw_counts = {s_age: s_data["count"]}
+                age_counts_dict = {str(k): v for k, v in raw_counts.items()}
+                ages_list = sorted(
+                    [{"age": k, "count": v} for k, v in raw_counts.items()],
+                    key=lambda x: x["age"],
+                    reverse=True
+                )
                 age_by_sym[s_name] = {
-                    "age": max(0, int((now_ts_calc - s_data["oldest_epoch"]) / 86400)),
-                    "count": s_data["count"]
+                    "age": s_age,
+                    "count": s_data["count"],
+                    "age_counts": age_counts_dict,
+                    "ages": ages_list
                 }
             info["position_age_by_symbol"] = age_by_sym
         else:

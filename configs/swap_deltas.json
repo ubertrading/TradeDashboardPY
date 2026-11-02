@@ -13,16 +13,13 @@
       "USDCHF": 203.52
     }
   },
-  "delta": {
-    "DEMO-MT5-52769010": -623.23,
-    "DEMO-MT4-1218954455": 130.45
-  },
+  "delta": {},
   "delta_by_instrument": {
-    "DEMO-MT5-52769010": {
-      "USDCHF": -623.23
-    },
     "DEMO-MT4-1218954455": {
-      "USDCHF": 130.45
+      "USDCHF": -203.52
+    },
+    "DEMO-MT5-52769010": {
+      "USDCHF": 342.55
     }
   },
   "storage_fees": {},
