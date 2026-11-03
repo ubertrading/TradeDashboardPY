@@ -523,7 +523,10 @@ def _should_issue_command(session, account):
             progress["index"] = idx
             session["cycle_progress"] = progress
 
-        no_more_to_cycle = cycle_days > 0 and not found_old_enough
+        if phase != "open":
+            if session.get("pending_mode"):
+                return False
+            no_more_to_cycle = cycle_days > 0 and not found_old_enough
         if idx >= total_to_cycle or no_more_to_cycle:
             print(f"[CYCLE-DBG] acct={account}: All positions cycled/skipped (idx={idx} >= total={total_to_cycle}, no_more={no_more_to_cycle})")
             if session.get("action", "").startswith("cycle_"):
@@ -822,14 +825,14 @@ def _run_hedge_monitor_all():
                 continue
             # Cycle mode: allow hedge monitor ONLY when fully settled post-reopen
             # (i.e. phase=="close", no close/reopen in-flight, and not waiting for reopen fill)
-            if sess_action.startswith("cycle_"):
+            if sess_action.startswith("cycle_") or session.get("pending_mode") or session.get("cycle_progress", {}).get("phase") == "open":
                 cycle_prog = session.get("cycle_progress", {})
                 phase = cycle_prog.get("phase", "close")
                 flight_active = any(
                     in_flight_commands.get((sid, a), 0) > 0 and (now_ts - in_flight_commands.get((sid, a), 0)) < 10
                     for a in sides
                 )
-                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set"):
+                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set") or session.get("pending_mode"):
                     continue
 
             # STARTUP COOLDOWN: Skip hedge monitor for the first 30s after session start

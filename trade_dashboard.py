@@ -7604,11 +7604,15 @@ def _get_executed_open_price(account, ticket, symbol, fallback=None):
 def _cycle_get_account(session, account):
     """Check if account is the cycling account for this session. Returns True if yes."""
     action = session.get("action", "")
-    if not action.startswith("cycle_"):
-        return False
     cyc_acc = session.get("cycle_account", "")
     if cyc_acc:
-        return account == cyc_acc
+        if account == cyc_acc:
+            if (action.startswith("cycle_") or session.get("pending_mode")
+                    or session.get("cycle_progress", {}).get("phase") in ("open", "close")):
+                return True
+        return False
+    if not (action.startswith("cycle_") or session.get("pending_mode")):
+        return False
     
     # Derive from sides using side_number
     sides = session.get("sides", {})
@@ -7880,6 +7884,7 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
     # ---- All batch fills received — advance phase ----
     in_flight_commands.pop((session_id, account), None)
     progress.pop("open_batch_fills", None)
+    progress.pop("open_dispatched", None)
     progress.pop("closed_tickets", None)
     progress.pop("closed_ticket", None)
     progress.pop("open_retries", None)  # Reset retry counter on success
@@ -7942,6 +7947,12 @@ def _cycle_handle_fill(session, account, data, cmd_sent_ts, session_id):
                f"cycled {progress['cycled']} total")
     print(f"[CYCLE] Batch complete on {account}: last_ticket={ticket} (batch={batch_size}), "
           f"cycled={progress['cycled']}")
+
+    # Check if a deferred mode switch is pending — apply immediately now that reopen filled!
+    if session.get("pending_mode"):
+        _check_and_apply_pending_mode(session, session_id)
+        _save_sessions()
+        return True
 
     # Check if all positions have been cycled → auto-switch to monitor
 
@@ -9308,6 +9319,8 @@ def _run_hedge_monitor_all():
         for sid, session in list(sessions.items()):
             if session.get("status") == "pausing":
                 _check_and_apply_pending_pause(session, sid)
+            if session.get("pending_mode"):
+                _check_and_apply_pending_mode(session, sid)
 
             # ── BROKER SOURCE-OF-TRUTH: REVIVE COMPLETED/PAUSED SESSIONS WITH OPEN POSITIONS ──
             # If a session was marked 'completed' or 'paused' (e.g. because of a false-close cascade
@@ -9397,14 +9410,14 @@ def _run_hedge_monitor_all():
                 continue
             # Cycle mode: allow hedge monitor ONLY when fully settled post-reopen
             # (i.e. phase=="close", no close/reopen in-flight, and not waiting for reopen fill)
-            if sess_action.startswith("cycle_"):
+            if sess_action.startswith("cycle_") or session.get("pending_mode") or session.get("cycle_progress", {}).get("phase") == "open":
                 cycle_prog = session.get("cycle_progress", {})
                 phase = cycle_prog.get("phase", "close")
                 flight_active = any(
                     in_flight_commands.get((sid, a), 0) > 0 and (now_ts - in_flight_commands.get((sid, a), 0)) < 10
                     for a in sides
                 )
-                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set"):
+                if phase == "open" or flight_active or cycle_prog.get("open_dispatched") or cycle_prog.get("close_dispatched") or cycle_prog.get("close_tp_set") or session.get("pending_mode"):
                     continue
             # Post-cycle cooldown: skip hedge monitor for 30s after cycle completes.
             # The cycle close/reopen replaces tickets, and the broker's position list
@@ -9483,6 +9496,8 @@ def _run_hedge_monitor_all():
                         pass  # Suppress — close_deal pair still settling
                     elif cycle_comp_ts and (now_ts - cycle_comp_ts) < 180:
                         pass  # Suppress — cycle completed recently, allow position sync to settle
+                    elif session.get("cycle_progress", {}).get("phase") == "open" or session.get("pending_mode"):
+                        pass  # Suppress — cycle reopen is still in progress or deferred mode switch pending
                     elif session.get("cycle_limit_open_fills"):
                         pass  # Suppress — a cycle_limit pending limit open is in-flight;
                               # the new position is expected and must NOT be rolled back
@@ -10099,8 +10114,10 @@ def _run_hedge_monitor_all():
                                         _prog.pop("close_tp_set_ts", None)
                                         _prog.pop("close_tp_confirmed", None)
                                         session["cycle_progress"] = _prog
-                                        # Restore action if it was erroneously set to monitor
-                                        if session.get("action") == "monitor":
+                                        # Apply pending_mode if user requested a mode switch, or restore action if erroneously monitor
+                                        if session.get("pending_mode"):
+                                            _check_and_apply_pending_mode(session, sid)
+                                        elif session.get("action") == "monitor":
                                             _cycle_acct = session.get("cycle_account", "")
                                             _sides = session.get("sides", {})
                                             _restored_action = None
@@ -10745,6 +10762,59 @@ def _is_completing_hedge(session, account=None):
         return any(_get_net_open(session, o_a) > my_net for o_a in sides if o_a != account)
 
 
+def _is_cycle_mid_flight(session, session_id=None):
+    """
+    Check if a session is currently in the middle of cycling a position
+    (e.g. cycle close in flight, phase == 'open' awaiting reopen, or reopen in flight).
+    Returns True if mid-cycle (unsafe to abruptly change mode), False if idle between cycles.
+    """
+    if not session:
+        return False
+    if not session_id:
+        session_id = session.get("id", "")
+        if not session_id:
+            for _sk, _sv in sessions.items():
+                if _sv is session:
+                    session_id = _sk
+                    break
+
+    action = session.get("action", "")
+    progress = session.get("cycle_progress", {})
+    cycle_account = session.get("cycle_account", "")
+
+    is_cycle_action = action.startswith(("cycle_", "cycle_lm_", "cycle_limit_"))
+    is_open_phase = progress.get("phase") == "open"
+    has_pending_mode = bool(session.get("pending_mode"))
+
+    if not is_cycle_action and not is_open_phase and not has_pending_mode:
+        return False
+
+    now_ts = time.time()
+    exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
+
+    # 1. Any active in_flight_commands for the cycling account or session
+    if session_id:
+        check_accts = [cycle_account] if cycle_account else list(session.get("sides", {}).keys())
+        for a in check_accts:
+            flight_ts = in_flight_commands.get((session_id, a), 0)
+            if flight_ts > 0 and (now_ts - flight_ts) < exec_timeout:
+                return True
+
+    # 2. Cycle in open phase (closed position, waiting to reopen replacement)
+    if is_open_phase:
+        return True
+
+    # 3. Open order already dispatched or pending batch fills
+    if is_open_phase and (progress.get("open_dispatched") or progress.get("open_batch_fills")):
+        return True
+
+    # 4. Limit cycle open fills pending
+    if session.get("cycle_limit_open_fills"):
+        return True
+
+    return False
+
+
 def _is_session_mid_flight(session, session_id=None):
     """
     Check if a session has any in-flight orders or uncompleted hedge/cycle legs.
@@ -10771,12 +10841,9 @@ def _is_session_mid_flight(session, session_id=None):
             if flight_ts > 0 and (now_ts - flight_ts) < exec_timeout:
                 return True
 
-    # 2. Cycle in open phase (closed position, waiting to reopen replacement)
-    action = session.get("action", "")
-    if action.startswith(("cycle_", "cycle_lm_", "cycle_limit_")):
-        progress = session.get("cycle_progress", {})
-        if progress.get("phase") == "open":
-            return True
+    # 2. Cycle in progress (in-flight close, open phase awaiting reopen, or reopen in-flight)
+    if _is_cycle_mid_flight(session, session_id):
+        return True
 
     # 3. Open mode: completing hedge leg pending
     if action in ("open", "open_limit"):
@@ -10825,6 +10892,242 @@ def _check_and_apply_pending_pause(session, session_id=None):
         reason = f"safety timeout ({int(time.time() - pause_ts)}s)" if timed_out else "in-flight orders settled"
         _log_event(session_id, None, "session_paused", f"Status -> paused ({reason})")
         print(f"[PAUSE] Session {session_id[:8] if session_id else 'UNKNOWN'} transitioned from 'pausing' to 'paused' ({reason})")
+        return True
+    return False
+
+
+def _apply_session_mode(s, session_id, mode, old_mode=None, data=None):
+    """
+    Apply a mode change to a session, executing all required state resets and initializations.
+    """
+    if old_mode is None:
+        old_mode = s.get("action", "monitor")
+    if data is None:
+        data = {}
+    if "close_count" not in data and "pending_close_count" in s:
+        data["close_count"] = s.pop("pending_close_count")
+
+    s["action"] = mode
+    s.pop("pending_mode", None)
+    s.pop("pending_mode_ts", None)
+    s.pop("pending_close_count", None)
+
+    # Clear TakeProfits set on open positions if switching away from a limit mode
+    if _is_limit_mode(old_mode) and old_mode != mode:
+        # Immediately clear cycle progress & limit state synchronously so CYCLE stops instantly
+        s["cycle_progress"] = {}
+        s["cycle_limit_open_fills"] = []
+        s["close_limit_fills"] = []
+        s["open_limit_fills"] = []
+        _clear_limit_tps_for_session(session_id, s)
+
+    # When switching away from a cycle mode to monitor, record completion timestamp
+    # so hedge monitor is suppressed briefly while broker positions sync
+    if old_mode.startswith(("cycle_", "cycle_lm_", "cycle_limit_")) and mode == "monitor":
+        s["cycle_complete_ts"] = time.time()
+
+    if mode == "close":
+        if "close_count" in data:
+            val = data["close_count"]
+            s["close_count"] = int(val) if (val is not None and val != "") else None
+        elif s.get("close_count") is not None:
+            pass
+        else:
+            s["close_count"] = None
+        s["close_start_closed"] = {acc: s.get("closed", {}).get(acc, 0) for acc in s.get("sides", {})}
+    elif mode.startswith("cycle_lm_"):
+        # CYCLE-LIMIT-MARKET init — shares cycle_limit_* session fields for the close phase
+        target_side_num = 1 if mode == "cycle_lm_acc1" else 2
+        cycle_account = ""
+        for acc_key, side_info in s.get("sides", {}).items():
+            if side_info.get("side_number") == target_side_num:
+                cycle_account = acc_key
+                break
+        if cycle_account:
+            s["cycle_account"] = cycle_account
+            s.setdefault("cycle_limit_days", "")       # must be filled by user
+            s.setdefault("cycle_limit_distance", 10)    # pts from quote for TP placement
+            s.setdefault("cycle_limit_trail_step", 1)   # pts min drift before re-trailing TP
+            s.setdefault("cycle_limit_batch_size", 1)   # number of positions to cycle concurrently
+            s["cycle_limit_open_fills"] = []            # not used for market opens, but clear anyway
+            closed_tickets_set = set(
+                str(f.get("ticket")) for f in s.get("close_fills", [])
+                if f.get("account") == cycle_account
+            )
+            active_fills = [
+                f for f in s.get("fills", [])
+                if f.get("account") == cycle_account
+                and str(f.get("ticket")) not in closed_tickets_set
+            ]
+            cycle_total = len(active_fills)
+            existing_prog = s.get("cycle_progress", {})
+            is_completed = (existing_prog.get("cycled", 0) >= existing_prog.get("cycle_total", 1)
+                            and existing_prog.get("cycle_total", 0) > 0)
+            has_progress = (not is_completed) and (existing_prog.get("cycled", 0) > 0
+                            or existing_prog.get("index", 0) > 0
+                            or existing_prog.get("phase") == "close"
+                            or existing_prog.get("close_tp_set"))
+            if has_progress:
+                existing_prog["cycle_total"] = cycle_total
+                if existing_prog.get("cycled", 0) > existing_prog.get("index", 0):
+                    existing_prog["cycled"] = existing_prog.get("index", 0)
+                if existing_prog.get("cycled", 0) == 0 and existing_prog.get("index", 0) >= cycle_total:
+                    existing_prog["index"] = 0
+                existing_prog.pop("close_tp_set", None)
+                existing_prog.pop("close_tp_set_ts", None)
+                existing_prog.pop("close_tp_confirmed", None)
+                if existing_prog.get("cycled", 0) == 0:
+                    existing_prog.pop("new_cycle_tickets", None)
+                s["cycle_progress"] = existing_prog
+                print(f"[CYCLE-LM] set_mode: resuming progress cycled={existing_prog.get('cycled',0)} phase={existing_prog.get('phase','?')}")
+            else:
+                s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
+            _log_event(session_id, cycle_account, "cycle_lm_started",
+                       f"CYCLE-LIMIT-MARKET started for {cycle_total} positions on {cycle_account}")
+    elif mode.startswith("cycle_") and not mode.startswith("cycle_limit_"):
+        # Initialize cycle tracking — clear cycle_days so cycling
+        # waits for the user to enter a value before starting
+        s["cycle_days"] = ""
+        accs = list(s.get("sides", {}).keys())
+        target_side_num = 1 if mode == "cycle_acc1" else 2
+        cycle_account = ""
+        for acc_key, side_info in s.get("sides", {}).items():
+            if side_info.get("side_number") == target_side_num:
+                cycle_account = acc_key
+                break
+        if cycle_account:
+            s["cycle_account"] = cycle_account
+            # Count fills excluding already-closed tickets (from manual close_deal)
+            closed_tickets_set = set(
+                str(f.get("ticket")) for f in s.get("close_fills", [])
+                if f.get("account") == cycle_account
+            )
+            active_fills = [
+                f for f in s.get("fills", [])
+                if f.get("account") == cycle_account
+                and str(f.get("ticket")) not in closed_tickets_set
+            ]
+            cycle_total = len(active_fills)
+            # Trim excess ACTIVE fills for BOTH accounts to match the cycling account's active count
+            if cycle_total > 0:
+                other_account = [a for a in accs if a != cycle_account]
+                for trim_acct in [cycle_account] + other_account:
+                    trim_target = cycle_total
+                    trim_closed_set = set(
+                        str(f.get("ticket")) for f in s.get("close_fills", [])
+                        if f.get("account") == trim_acct
+                    )
+                    ea_info = ea_account_info.get(trim_acct, {})
+                    ea_open_raw = ea_info.get("open_tickets")
+                    ea_open_set = set(_normalize_ticket(t) for t in ea_open_raw) if ea_open_raw is not None else None
+
+                    acct_active_indices = [
+                        i for i, f in enumerate(s.get("fills", []))
+                        if f.get("account") == trim_acct
+                        and str(f.get("ticket")) not in trim_closed_set
+                    ]
+                    if len(acct_active_indices) > trim_target:
+                        to_remove = []
+                        for remove_idx in reversed(acct_active_indices[trim_target:]):
+                            fill_rec = s["fills"][remove_idx]
+                            fill_tk = _normalize_ticket(fill_rec.get("ticket"))
+                            if ea_open_set is not None and fill_tk in ea_open_set:
+                                print(f"[CYCLE-TRIM-GUARD] NOT trimming ticket={fill_tk} on {trim_acct} — confirmed OPEN on broker")
+                                continue
+                            to_remove.append(remove_idx)
+                        for r_idx in to_remove:
+                            s["fills"].pop(r_idx)
+                        if to_remove:
+                            print(f"[CYCLE] Trimmed {len(to_remove)} excess active fills for {trim_acct}")
+            s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
+            _log_event(session_id, cycle_account, "cycle_started",
+                       f"Cycling {cycle_total} positions on {cycle_account}")
+    elif mode.startswith("cycle_limit_"):
+        # CYCLE-LIMIT init — set defaults; user must enter cycle_limit_days before it fires
+        target_side_num = 1 if mode == "cycle_limit_acc1" else 2
+        cycle_account = ""
+        for acc_key, side_info in s.get("sides", {}).items():
+            if side_info.get("side_number") == target_side_num:
+                cycle_account = acc_key
+                break
+        if cycle_account:
+            s["cycle_account"] = cycle_account
+            s.setdefault("cycle_limit_days", "")          # must be filled by user
+            s.setdefault("cycle_limit_distance", 10)       # pts from quote
+            s.setdefault("cycle_limit_trail_step", 1)      # pts min drift before trailing
+            s.setdefault("cycle_limit_batch_size", 1)      # number of positions to cycle concurrently
+            s["cycle_limit_open_fills"] = []               # clear any stale pending opens
+            closed_tickets_set = set(
+                str(f.get("ticket")) for f in s.get("close_fills", [])
+                if f.get("account") == cycle_account
+            )
+            active_fills = [
+                f for f in s.get("fills", [])
+                if f.get("account") == cycle_account
+                and str(f.get("ticket")) not in closed_tickets_set
+            ]
+            cycle_total = len(active_fills)
+            existing_prog = s.get("cycle_progress", {})
+            is_completed = (existing_prog.get("cycled", 0) >= existing_prog.get("cycle_total", 1)
+                            and existing_prog.get("cycle_total", 0) > 0)
+            has_progress = (not is_completed) and (existing_prog.get("cycled", 0) > 0
+                            or existing_prog.get("index", 0) > 0
+                            or existing_prog.get("phase") == "close"
+                            or existing_prog.get("close_tp_set"))
+            if has_progress:
+                existing_prog["cycle_total"] = cycle_total
+                if existing_prog.get("cycled", 0) > existing_prog.get("index", 0):
+                    existing_prog["cycled"] = existing_prog.get("index", 0)
+                if existing_prog.get("cycled", 0) == 0 and existing_prog.get("index", 0) >= cycle_total:
+                    existing_prog["index"] = 0
+                existing_prog.pop("close_tp_set", None)
+                existing_prog.pop("close_tp_set_ts", None)
+                existing_prog.pop("close_tp_confirmed", None)
+                if existing_prog.get("cycled", 0) == 0:
+                    existing_prog.pop("new_cycle_tickets", None)
+                s["cycle_progress"] = existing_prog
+                print(f"[CYCLE-LIMIT] set_mode: resuming existing progress cycled={existing_prog.get('cycled',0)} phase={existing_prog.get('phase','?')} idx={existing_prog.get('index',0)}")
+            else:
+                s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
+            _log_event(session_id, cycle_account, "cycle_limit_started",
+                       f"CYCLE-LIMIT started for {cycle_total} positions on {cycle_account}")
+
+    # Activate session so commands can be issued
+    if s.get("status") in ("draft", "paused"):
+        s["status"] = "active"
+    s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _save_sessions()
+    _log_event(session_id, None, "mode_changed",
+               f"Mode changed: {old_mode} -> {mode}")
+
+
+def _check_and_apply_pending_mode(session, session_id=None):
+    """
+    If session has a pending_mode (deferred mode change waiting for cycle reopen),
+    check if the cycle is now idle/complete (or safety timeout reached) and apply it.
+    Returns True if pending mode was applied, False otherwise.
+    """
+    if not session or not session.get("pending_mode"):
+        return False
+
+    if not session_id:
+        session_id = session.get("id", "")
+        if not session_id:
+            for _sk, _sv in sessions.items():
+                if _sv is session:
+                    session_id = _sk
+                    break
+
+    pending_mode = session.get("pending_mode")
+    pending_ts = session.get("pending_mode_ts", 0)
+    exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
+    timed_out = pending_ts > 0 and (time.time() - pending_ts) > (exec_timeout + 30)
+
+    if not _is_cycle_mid_flight(session, session_id) or timed_out:
+        old_mode = session.get("action", "")
+        reason = f"safety timeout ({int(time.time() - pending_ts)}s)" if timed_out else "last position cycle completed"
+        print(f"[CYCLE] Session {session_id[:8] if session_id else 'UNKNOWN'}: applying deferred mode switch {old_mode} -> {pending_mode} ({reason})")
+        _apply_session_mode(session, session_id, pending_mode, old_mode=old_mode)
         return True
     return False
 
@@ -11804,6 +12107,11 @@ def _should_issue_command(session, account):
 
         # --- Completion check ---
         if phase != "open":
+            if session.get("pending_mode"):
+                print(f"[CYCLE-LM] Session {session.get('id', '')[:8]}: pending_mode={session.get('pending_mode')} active and phase={phase} — transitioning now")
+                _check_and_apply_pending_mode(session, session.get("id"))
+                return False
+
             no_more_to_cycle = cycle_limit_days > 0 and not found_old_enough
             target_cycles = progress.get("cycle_total", len(acct_fills))
             if progress.get("cycled", 0) >= target_cycles or idx >= len(acct_fills) or no_more_to_cycle:
@@ -12070,6 +12378,11 @@ def _should_issue_command(session, account):
         # Guard: make sure fill index is in range (but NOT during open phase —
         # the close shrinks acct_fills and we still need the reopen to fire)
         if phase != "open":
+            if session.get("pending_mode"):
+                print(f"[CYCLE] Session {session.get('id', '')[:8]}: pending_mode={session.get('pending_mode')} active and phase={phase} — transitioning now")
+                _check_and_apply_pending_mode(session, session.get("id"))
+                return False
+
             # When cycle_days > 0 and no old-enough position was found,
             # all remaining positions are too new — treat as completion and switch to MONITOR
             no_more_to_cycle = cycle_days > 0 and not found_old_enough
@@ -12336,6 +12649,11 @@ def _should_issue_command(session, account):
 
         # --- Completion check (close phase only) ---
         if phase != "open":
+            if session.get("pending_mode"):
+                print(f"[CYCLE-LIMIT] Session {session.get('id', '')[:8]}: pending_mode={session.get('pending_mode')} active and phase={phase} — transitioning now")
+                _check_and_apply_pending_mode(session, session.get("id"))
+                return False
+
             no_more_to_cycle = cycle_limit_days > 0 and not found_old_enough
             cycled_count = progress.get("cycled", 0)
             target_cycles = progress.get("cycle_total", len(acct_fills))
@@ -13335,205 +13653,34 @@ def set_session_mode(session_id):
                     "accounts": blocked_accounts
                 }), 400
 
-        s["action"] = mode
+        # If user selects current mode: cancel any pending deferred mode change
+        if mode == old_mode:
+            if s.get("pending_mode"):
+                s.pop("pending_mode", None)
+                s.pop("pending_mode_ts", None)
+                s.pop("pending_close_count", None)
+                s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                _save_sessions()
+                _log_event(session_id, None, "mode_change_cancelled",
+                           f"Deferred mode change cancelled, continuing in {old_mode}")
+            return jsonify(s)
 
-        # Clear TakeProfits set on open positions if switching away from a limit mode
-        if _is_limit_mode(old_mode) and old_mode != mode:
-            # Immediately clear cycle progress & limit state synchronously so CYCLE stops instantly
-            s["cycle_progress"] = {}
-            s["cycle_limit_open_fills"] = []
-            s["close_limit_fills"] = []
-            s["open_limit_fills"] = []
-            _clear_limit_tps_for_session(session_id, s)
-
-        if mode == "close":
+        # If switching away from a cycle mode while in mid-cycle, DEFER the switch
+        # until the currently-cycling position has finished reopening!
+        if old_mode.startswith(("cycle_", "cycle_lm_", "cycle_limit_")) and _is_cycle_mid_flight(s, session_id):
+            s["pending_mode"] = mode
+            s["pending_mode_ts"] = time.time()
             if "close_count" in data:
-                val = data["close_count"]
-                s["close_count"] = int(val) if (val is not None and val != "") else None
-            elif s.get("close_count") is not None:
-                pass
-            else:
-                s["close_count"] = None
-            s["close_start_closed"] = {acc: s.get("closed", {}).get(acc, 0) for acc in s.get("sides", {})}
-        elif mode.startswith("cycle_lm_"):
-            # CYCLE-LIMIT-MARKET init — shares cycle_limit_* session fields for the close phase
-            target_side_num = 1 if mode == "cycle_lm_acc1" else 2
-            cycle_account = ""
-            for acc_key, side_info in s.get("sides", {}).items():
-                if side_info.get("side_number") == target_side_num:
-                    cycle_account = acc_key
-                    break
-            if cycle_account:
-                s["cycle_account"] = cycle_account
-                s.setdefault("cycle_limit_days", "")       # must be filled by user
-                s.setdefault("cycle_limit_distance", 10)    # pts from quote for TP placement
-                s.setdefault("cycle_limit_trail_step", 1)   # pts min drift before re-trailing TP
-                s.setdefault("cycle_limit_batch_size", 1)   # number of positions to cycle concurrently
-                s["cycle_limit_open_fills"] = []            # not used for market opens, but clear anyway
-                closed_tickets_set = set(
-                    str(f.get("ticket")) for f in s.get("close_fills", [])
-                    if f.get("account") == cycle_account
-                )
-                active_fills = [
-                    f for f in s.get("fills", [])
-                    if f.get("account") == cycle_account
-                    and str(f.get("ticket")) not in closed_tickets_set
-                ]
-                cycle_total = len(active_fills)
-                existing_prog = s.get("cycle_progress", {})
-                is_completed = (existing_prog.get("cycled", 0) >= existing_prog.get("cycle_total", 1)
-                                and existing_prog.get("cycle_total", 0) > 0)
-                has_progress = (not is_completed) and (existing_prog.get("cycled", 0) > 0
-                                or existing_prog.get("index", 0) > 0
-                                or existing_prog.get("phase") == "close"
-                                or existing_prog.get("close_tp_set"))
-                if has_progress:
-                    existing_prog["cycle_total"] = cycle_total
-                    if existing_prog.get("cycled", 0) > existing_prog.get("index", 0):
-                        existing_prog["cycled"] = existing_prog.get("index", 0)
-                    if existing_prog.get("cycled", 0) == 0 and existing_prog.get("index", 0) >= cycle_total:
-                        existing_prog["index"] = 0
-                    existing_prog.pop("close_tp_set", None)
-                    existing_prog.pop("close_tp_set_ts", None)
-                    existing_prog.pop("close_tp_confirmed", None)
-                    if existing_prog.get("cycled", 0) == 0:
-                        existing_prog.pop("new_cycle_tickets", None)
-                    s["cycle_progress"] = existing_prog
-                    print(f"[CYCLE-LM] set_mode: resuming progress cycled={existing_prog.get('cycled',0)} phase={existing_prog.get('phase','?')}")
-                else:
-                    s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
-                _log_event(session_id, cycle_account, "cycle_lm_started",
-                           f"CYCLE-LIMIT-MARKET started for {cycle_total} positions on {cycle_account}")
-        elif mode.startswith("cycle_") and not mode.startswith("cycle_limit_"):
-            # Initialize cycle tracking — clear cycle_days so cycling
-            # waits for the user to enter a value before starting
-            s["cycle_days"] = ""
-            accs = list(s.get("sides", {}).keys())
-            target_side_num = 1 if mode == "cycle_acc1" else 2
-            cycle_account = ""
-            for acc_key, side_info in s.get("sides", {}).items():
-                if side_info.get("side_number") == target_side_num:
-                    cycle_account = acc_key
-                    break
-            if cycle_account:
-                s["cycle_account"] = cycle_account
-                # Count fills excluding already-closed tickets (from manual close_deal)
-                closed_tickets_set = set(
-                    str(f.get("ticket")) for f in s.get("close_fills", [])
-                    if f.get("account") == cycle_account
-                )
-                active_fills = [
-                    f for f in s.get("fills", [])
-                    if f.get("account") == cycle_account
-                    and str(f.get("ticket")) not in closed_tickets_set
-                ]
-                cycle_total = len(active_fills)
-                # Trim excess ACTIVE fills for BOTH accounts to match the cycling account's active count
-                # (fills list may have stale entries from before rebalancing)
-                # CRITICAL: only count active fills (not in close_fills) — after close→reopen,
-                # the fills list has both old closed fills and new active fills.
-                if cycle_total > 0:
-                    other_account = [a for a in accs if a != cycle_account]
-                    for trim_acct in [cycle_account] + other_account:
-                        trim_target = cycle_total  # Both sides should match the cycling account's active count
-                        # Build closed set for THIS account (not just cycle_account)
-                        trim_closed_set = set(
-                            str(f.get("ticket")) for f in s.get("close_fills", [])
-                            if f.get("account") == trim_acct
-                        )
-                        # Check broker open tickets to avoid trimming real broker positions
-                        ea_info = ea_account_info.get(trim_acct, {})
-                        ea_open_raw = ea_info.get("open_tickets")
-                        ea_open_set = set(_normalize_ticket(t) for t in ea_open_raw) if ea_open_raw is not None else None
+                s["pending_close_count"] = data["close_count"]
+            s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_sessions()
+            _log_event(session_id, None, "mode_change_deferred",
+                       f"Mode change {old_mode} -> {mode} deferred until current position cycle completes (reopen pending)")
+            print(f"[CYCLE] Session {session_id[:8]}: mid-cycle detected, mode switch to '{mode}' deferred until position is reopened")
+            return jsonify(s)
 
-                        # Only count active fill indices (not in close_fills)
-                        acct_active_indices = [
-                            i for i, f in enumerate(s.get("fills", []))
-                            if f.get("account") == trim_acct
-                            and str(f.get("ticket")) not in trim_closed_set
-                        ]
-                        if len(acct_active_indices) > trim_target:
-                            # Only trim if the position is NOT confirmed open on the broker!
-                            # If broker confirms the ticket is open, trimming it creates a false imbalance.
-                            to_remove = []
-                            for remove_idx in reversed(acct_active_indices[trim_target:]):
-                                fill_rec = s["fills"][remove_idx]
-                                fill_tk = _normalize_ticket(fill_rec.get("ticket"))
-                                if ea_open_set is not None and fill_tk in ea_open_set:
-                                    print(f"[CYCLE-TRIM-GUARD] NOT trimming ticket={fill_tk} on {trim_acct} — confirmed OPEN on broker")
-                                    continue
-                                to_remove.append(remove_idx)
-                            for r_idx in to_remove:
-                                s["fills"].pop(r_idx)
-                            if to_remove:
-                                print(f"[CYCLE] Trimmed {len(to_remove)} excess active fills for {trim_acct}")
-                s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
-                _log_event(session_id, cycle_account, "cycle_started",
-                           f"Cycling {cycle_total} positions on {cycle_account}")
-        elif mode.startswith("cycle_limit_"):
-            # CYCLE-LIMIT init — set defaults; user must enter cycle_limit_days before it fires
-            target_side_num = 1 if mode == "cycle_limit_acc1" else 2
-            cycle_account = ""
-            for acc_key, side_info in s.get("sides", {}).items():
-                if side_info.get("side_number") == target_side_num:
-                    cycle_account = acc_key
-                    break
-            if cycle_account:
-                s["cycle_account"] = cycle_account
-                s.setdefault("cycle_limit_days", "")          # must be filled by user
-                s.setdefault("cycle_limit_distance", 10)       # pts from quote
-                s.setdefault("cycle_limit_trail_step", 1)      # pts min drift before trailing
-                s.setdefault("cycle_limit_batch_size", 1)      # number of positions to cycle concurrently
-                s["cycle_limit_open_fills"] = []               # clear any stale pending opens
-                closed_tickets_set = set(
-                    str(f.get("ticket")) for f in s.get("close_fills", [])
-                    if f.get("account") == cycle_account
-                )
-                active_fills = [
-                    f for f in s.get("fills", [])
-                    if f.get("account") == cycle_account
-                    and str(f.get("ticket")) not in closed_tickets_set
-                ]
-                cycle_total = len(active_fills)
-                existing_prog = s.get("cycle_progress", {})
-                is_completed = (existing_prog.get("cycled", 0) >= existing_prog.get("cycle_total", 1)
-                                and existing_prog.get("cycle_total", 0) > 0)
-                has_progress = (not is_completed) and (existing_prog.get("cycled", 0) > 0
-                                or existing_prog.get("index", 0) > 0
-                                or existing_prog.get("phase") == "close"
-                                or existing_prog.get("close_tp_set"))
-                if has_progress:
-                    # Resume — keep phase/index/cycled, just refresh cycle_total
-                    existing_prog["cycle_total"] = cycle_total
-                    # CRITICAL: If cycled has been over-counted (e.g. double-incremented by auto-heal
-                    # + handle_fill), clamp it to idx. Otherwise cycled>=cycle_total fires immediately.
-                    if existing_prog.get("cycled", 0) > existing_prog.get("index", 0):
-                        existing_prog["cycled"] = existing_prog.get("index", 0)
-                    if existing_prog.get("cycled", 0) == 0 and existing_prog.get("index", 0) >= cycle_total:
-                        existing_prog["index"] = 0
-                    # CRITICAL: Always clear TP confirmation state on manual resume.
-                    # This forces the dashboard to re-apply the TP. If the TP is already there,
-                    # the connector treats 'No changes' as success. If it's missing (e.g. wiped),
-                    # it correctly replaces it, preventing a permanent deadlock.
-                    existing_prog.pop("close_tp_set", None)
-                    existing_prog.pop("close_tp_set_ts", None)
-                    existing_prog.pop("close_tp_confirmed", None)
-                    if existing_prog.get("cycled", 0) == 0:
-                        existing_prog.pop("new_cycle_tickets", None)
-                    
-                    s["cycle_progress"] = existing_prog
-                    print(f"[CYCLE-LIMIT] set_mode: resuming existing progress cycled={existing_prog.get('cycled',0)} phase={existing_prog.get('phase','?')} idx={existing_prog.get('index',0)}")
-                else:
-                    s["cycle_progress"] = {"phase": "close", "index": 0, "cycled": 0, "cycle_total": cycle_total}
-                _log_event(session_id, cycle_account, "cycle_limit_started",
-                           f"CYCLE-LIMIT started for {cycle_total} positions on {cycle_account}")
-        # Activate session so commands can be issued
-        if s["status"] in ("draft", "paused"):
-            s["status"] = "active"
-        s["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _save_sessions()
-        _log_event(session_id, None, "mode_changed",
-                   f"Mode changed: {old_mode} -> {mode}")
+        # Immediate clean mode change
+        _apply_session_mode(s, session_id, mode, old_mode=old_mode, data=data)
     return jsonify(s)
 
 @app.route('/api/sessions/<session_id>/filters', methods=['GET', 'PUT'])
@@ -24510,6 +24657,9 @@ function renderActions(session) {
   html += `<option value="cycle_lm_acc1"${mode==='cycle_lm_acc1'?' selected':''}>CYCLE-LM ${acc1Label}</option>`;
   html += `<option value="cycle_lm_acc2"${mode==='cycle_lm_acc2'?' selected':''}>CYCLE-LM ${acc2Label}</option>`;
   html += `</select> `;
+  if (session.pending_mode) {
+    html += `<span class="badge" style="background:rgba(251,191,36,0.2);color:#fbbf24;font-size:0.68rem;padding:2px 5px;border-radius:4px;margin-left:2px;font-weight:600;display:inline-block;" title="Completing current position cycle before switching to ${session.pending_mode.toUpperCase()}">⏳ stopping &rarr; ${session.pending_mode.toUpperCase()}</span> `;
+  }
   if (mode === 'close') {
     const closeCount = (session.close_count !== null && session.close_count !== undefined) ? session.close_count : '';
     html += `<input type="number" min="1" step="1" placeholder="Limit" style="font-size:0.68rem;width:55px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-align:center" value="${closeCount}" onchange="saveSessionField('${session.id}', 'close_count', this.value)" title="Max positions to close in this session (blank = no limit)"> `;
@@ -24616,7 +24766,10 @@ async function unblockSession(id) {
 function confirmSetMode(id, selectEl, prevMode) {
   const newMode = selectEl.value;
   const labels = {monitor:'MONITOR', open:'OPEN', close:'CLOSE', cycle_acc1:'CYCLE ACC1', cycle_acc2:'CYCLE ACC2', cycle_limit_acc1:'CYCLE-LIMIT ACC1', cycle_limit_acc2:'CYCLE-LIMIT ACC2', cycle_lm_acc1:'CYCLE-LM ACC1', cycle_lm_acc2:'CYCLE-LM ACC2'};
-  showConfirmModal('Switch mode to ' + (labels[newMode] || newMode.toUpperCase()) + '?', () => {
+  const sess = (typeof stratSessions !== 'undefined') ? stratSessions.find(s => s.id === id) : null;
+  const isMidCycle = sess && sess.action && sess.action.startsWith('cycle') && sess.cycle_progress && sess.cycle_progress.phase === 'open';
+  const extraNote = isMidCycle ? '\n\nNote: A position is currently mid-cycle. The dashboard will finish reopening the replacement position before switching to ' + (labels[newMode] || newMode.toUpperCase()) + '.' : '';
+  showConfirmModal('Switch mode to ' + (labels[newMode] || newMode.toUpperCase()) + '?' + extraNote, () => {
     setSessionMode(id, newMode);
   }, 'Confirm');
   // If modal is dismissed, revert dropdown
