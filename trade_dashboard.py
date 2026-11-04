@@ -10831,6 +10831,7 @@ def _is_session_mid_flight(session, session_id=None):
                     break
 
     sides = session.get("sides", {})
+    action = session.get("action", "")
     now_ts = time.time()
     exec_timeout = dashboard_settings.get("exec_timeout_sec", 60)
 
@@ -14385,6 +14386,7 @@ def poll_command():
                 "from_ts": preq["from_ts"],
                 "to_ts": preq["to_ts"],
                 "fee_keywords": preq.get("fee_keywords", []),
+                "comment_filters": preq.get("comment_filters", []),
             }
             break
 
@@ -18170,6 +18172,10 @@ def pnl_request_create():
                             _pos_acct_obj = None
                             if mt_direct_manager:
                                 _pos_acct_obj = mt_direct_manager.accounts.get(acc)
+                            if _pos_acct_obj is None and 'mt_bridge_clients' in globals() and mt_bridge_clients:
+                                _pos_acct_obj = mt_bridge_clients.get(acc)
+                            if _pos_acct_obj is None and 'mt_bridge_client' in globals() and mt_bridge_client and hasattr(mt_bridge_client, 'accounts'):
+                                _pos_acct_obj = mt_bridge_client.accounts.get(acc)
                             if _pos_acct_obj is None and fix_manager:
                                 _pos_acct_obj = fix_manager.accounts.get(acc)
                             if _pos_acct_obj is None and ('iforex_manager' in globals() and iforex_manager):
@@ -18185,9 +18191,8 @@ def pnl_request_create():
                                     if any(cf in pos_comment for cf in comment_filters):
                                         pos_swap   = float(pos.get('Swap',   pos.get('swap',   0)) or 0)
                                         pos_profit = float(pos.get('Profit', pos.get('profit', 0)) or 0)
-                                        # The bridge Profit field includes swap; subtract it so
-                                        # open_pnl = pure price PnL only (swap reported separately).
-                                        open_pnl  += pos_profit - pos_swap
+                                        # Profit from connectors is pure price PnL (swap reported separately in unrealized_swap).
+                                        open_pnl  += pos_profit
                                         open_swap += pos_swap
                                         matched += 1
                                 app.logger.info(
@@ -18273,6 +18278,22 @@ def pnl_request_create():
                 mt_acct = mt_direct_manager.accounts.get(acc)
                 if mt_acct and mt_acct.connected:
                     server_side_accts.append((acc, mt_acct, "mt_direct"))
+
+        if 'mt_bridge_clients' in globals() and mt_bridge_clients:
+            for acc in acct_list:
+                if any(s[0] == acc for s in server_side_accts):
+                    continue
+                mb_acct = mt_bridge_clients.get(acc)
+                if mb_acct and hasattr(mb_acct, 'get_deal_history') and getattr(mb_acct, 'connected', False):
+                    server_side_accts.append((acc, mb_acct, "mt_bridge"))
+
+        if 'mt_bridge_client' in globals() and mt_bridge_client and hasattr(mt_bridge_client, 'accounts'):
+            for acc in acct_list:
+                if any(s[0] == acc for s in server_side_accts):
+                    continue
+                mb_acct = mt_bridge_client.accounts.get(acc)
+                if mb_acct and hasattr(mb_acct, 'get_deal_history') and getattr(mb_acct, 'connected', False):
+                    server_side_accts.append((acc, mb_acct, "mt_bridge"))
 
         if fix_manager:
             for acc in acct_list:
@@ -29844,9 +29865,7 @@ function exportPnlHtmlReport() {
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          const up = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
-          const us = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
-          v = up - us;
+          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
         } else if (m.key === 'unrealized_swap') {
           v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
@@ -29875,8 +29894,9 @@ function exportPnlHtmlReport() {
   accounts.forEach(a => {
     if (isSkipped(a)) return;
     let v = results[a] ? results[a].net || 0 : 0;
-    if (includeUnrealized)
-      v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+    if (includeUnrealized && data.current_states && data.current_states[a]) {
+      v += (data.current_states[a].unrealized_pnl || 0) + (data.current_states[a].unrealized_swap || 0);
+    }
     acctNetExp[a] = v;
   });
 
@@ -29927,8 +29947,8 @@ function exportPnlHtmlReport() {
     let nt = totals.net_pnl || 0;
     if (includeUnrealized)
       accounts.forEach(a => {
-        if (!isSkipped(a))
-          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+        if (!isSkipped(a) && data.current_states && data.current_states[a])
+          nt += (data.current_states[a].unrealized_pnl || 0) + (data.current_states[a].unrealized_swap || 0);
       });
     tableBody += `<td style="font-weight:700;${clrStyle(nt)}font-size:1.05rem;" title="${annTipExp(nt, eSym(activeCursExp[0]||'USD'))}">${eSym(activeCursExp[0]||'USD')}${fmt(nt)}</td></tr>`;
   }
@@ -30433,9 +30453,7 @@ function renderPnlResults(data) {
       } else {
         let v = 0;
         if (m.key === 'unrealized') {
-          const up = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
-          const us = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
-          v = up - us;
+          v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl  || 0 : 0;
         } else if (m.key === 'unrealized_swap') {
           v = (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_swap || 0 : 0;
         } else {
@@ -30465,8 +30483,9 @@ function renderPnlResults(data) {
   accounts.forEach(a => {
     if (isSkipped(a)) return;
     let v = results[a] ? results[a].net || 0 : 0;
-    if (includeUnrealized)
-      v += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+    if (includeUnrealized && data.current_states && data.current_states[a]) {
+      v += (data.current_states[a].unrealized_pnl || 0) + (data.current_states[a].unrealized_swap || 0);
+    }
     acctNet[a] = v;
   });
 
@@ -30561,8 +30580,8 @@ function renderPnlResults(data) {
     let nt = totals.net_pnl || 0;
     if (includeUnrealized)
       accounts.forEach(a => {
-        if (!isSkipped(a))
-          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+        if (!isSkipped(a) && data.current_states && data.current_states[a])
+          nt += (data.current_states[a].unrealized_pnl || 0) + (data.current_states[a].unrealized_swap || 0);
       });
     const mainSym = curSym(activeCurs[0] || 'USD');
     tbody +=
@@ -30589,8 +30608,8 @@ function renderPnlResults(data) {
     let nt = totals.net_pnl || 0;
     if (includeUnrealized) {
       accounts.forEach(a => {
-        if (!isSkipped(a))
-          nt += (data.current_states && data.current_states[a]) ? data.current_states[a].unrealized_pnl || 0 : 0;
+        if (!isSkipped(a) && data.current_states && data.current_states[a])
+          nt += (data.current_states[a].unrealized_pnl || 0) + (data.current_states[a].unrealized_swap || 0);
       });
     }
     const mainSym = curSym(activeCurs[0] || 'USD');

@@ -882,9 +882,7 @@ class MtBridgeAccount:
     def get_deal_history(self, from_ts, to_ts, fee_keywords=None, exclude_balance=True, timeout=30, **kwargs):
         """Get deal history PnL totals.
 
-        Note: ``comment_filters`` and other kwargs are accepted for API
-        compatibility with MT Direct connectors but ignored here - the bridge
-        REST endpoint does not support comment-level filtering.
+        Filters deals by ``comment_filters`` if provided.
         """
         eb = "true" if exclude_balance else "false"
         url = f"/api/accounts/{self.account_id}/history?from={int(from_ts)}&to={int(to_ts)}&exclude_balance={eb}"
@@ -900,6 +898,53 @@ class MtBridgeAccount:
                 logger.error(f"Bridge returned error: {result['error']}")
             return None
         if result:
+            comment_filters_raw = kwargs.get("comment_filters", [])
+            if isinstance(comment_filters_raw, str):
+                comment_filters = [c.strip() for c in comment_filters_raw.split(",") if c.strip()]
+            elif isinstance(comment_filters_raw, (list, tuple)):
+                comment_filters = [str(c).strip() for c in comment_filters_raw if str(c).strip()]
+            else:
+                comment_filters = []
+
+            # MT5 reports closed positions in "positions" (where comments are preserved)
+            # and individual execution fills in "deals" (where exit deals have empty comments).
+            # MT4 reports closed orders in "deals".
+            use_positions = bool(result.get("positions"))
+            records = result.get("positions") if use_positions else result.get("deals", [])
+            if comment_filters and records:
+                filtered_records = []
+                pnl = 0.0
+                swap = 0.0
+                fees = 0.0
+                by_sym = {}
+                for r in records:
+                    comm = str(r.get("comment") or "")
+                    if any(cf in comm for cf in comment_filters):
+                        filtered_records.append(r)
+                        dp = float(r.get("profit", 0) or 0)
+                        ds = float(r.get("swap", 0) or 0)
+                        df = float(r.get("commission", 0) or 0) + float(r.get("fee", 0) or 0)
+                        pnl += dp
+                        swap += ds
+                        fees += df
+                        sym = str(r.get("symbol") or "UNKNOWN")
+                        if sym not in by_sym:
+                            by_sym[sym] = {"pnl": 0.0, "swap": 0.0, "fees": 0.0, "count": 0, "lots": 0.0}
+                        by_sym[sym]["pnl"] += dp
+                        by_sym[sym]["swap"] += ds
+                        by_sym[sym]["fees"] += df
+                        by_sym[sym]["count"] += 1
+                        by_sym[sym]["lots"] += float(r.get("lots", 0) or 0)
+                if use_positions:
+                    result["positions"] = filtered_records
+                else:
+                    result["deals"] = filtered_records
+                result["pnl"] = round(pnl, 2)
+                result["swap"] = round(swap, 2)
+                result["fees"] = round(fees, 2)
+                result["deal_count"] = len(filtered_records)
+                result["by_symbol"] = by_sym
+                logger.info(f"[{self.account_id}] Applied comment_filters={comment_filters} on {'positions' if use_positions else 'deals'}: {len(filtered_records)}/{len(records)} matched, pnl={result['pnl']}, swap={result['swap']}, fees={result['fees']}")
             # Post-process by_symbol: bridge returns deal 'count' per symbol.
             # Use net PnL (pnl + swap + fees) so per-pair figures match the parent report's Net PnL.
             # hedge_lots = count / 2  (1 buy deal + 1 sell deal = 1 hedge lot)
