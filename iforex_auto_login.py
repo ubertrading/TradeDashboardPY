@@ -500,6 +500,17 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25,
                 (async () => {
                     const dealsMap = new Map();
 
+                    // Wait up to 5 seconds for deal rows to render if not immediately present
+                    let checkRows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
+                    if (checkRows.length === 0) {
+                        const startTime = Date.now();
+                        while (Date.now() - startTime < 5000) {
+                            await new Promise(r => setTimeout(r, 250));
+                            checkRows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
+                            if (checkRows.length > 0) break;
+                        }
+                    }
+
                     // Helper to harvest deals from currently mounted DOM rows
                     const harvestDomRows = () => {
                         const rows = Array.from(document.querySelectorAll('[data-automation^="deal-details-"]'));
@@ -684,6 +695,15 @@ def fetch_active_deals_and_summary(timeout_sec: int = 25,
             bal = parsed_summary.get("balance")
             if bal is None or bal <= 0.0:
                 logger.warning("fetch_active_deals_and_summary: unrendered account summary (balance=%s) — rejecting read", bal)
+                return None, {}
+
+            used_margin = parsed_summary.get("margin", 0.0) or 0.0
+            if not raw_deals and used_margin > 0.0:
+                logger.warning(
+                    "fetch_active_deals_and_summary: used_margin is %.2f > 0 but 0 open deals found in DOM — "
+                    "DOM not fully rendered, rejecting read to prevent false liquidation",
+                    used_margin
+                )
                 return None, {}
 
             # Map to standard format

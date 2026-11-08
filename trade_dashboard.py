@@ -9367,6 +9367,48 @@ def _run_hedge_monitor_all():
                             print(f"[SESSION-REVIVE] sid={sid[:8]}: broker reports {len(open_on_broker)} ticket(s) {open_on_broker} "
                                   f"still open on {acc}. Adjusted closed count to {session['closed'][acc]}.")
 
+                # ── PANIC CIRCUIT BREAKER AUTO-RESUME ──
+                # If session was temporarily paused by the Panic Circuit Breaker (e.g. bridge sync/reconnect
+                # reporting 0 positions or transient mass drop), verify if expected open positions are back
+                # at the broker across all session sides. If confirmed, auto-resume from paused to active!
+                if not _revived and session.get("status") == "paused" and session.get("panic_stop_reason"):
+                    _cb_sides_ok = True
+                    _cb_checked = 0
+                    for _a in sides:
+                        _a_info = ea_account_info.get(_a, {})
+                        _a_raw = _a_info.get("open_tickets")
+                        _a_filled = set(_normalize_ticket(f.get("ticket")) for f in session.get("fills", []) if f.get("account") == _a)
+                        _a_closed = set(_normalize_ticket(cf.get("ticket")) for cf in session.get("close_fills", []) if cf.get("account") == _a)
+                        _a_exp = _a_filled - _a_closed
+                        if not _a_exp:
+                            continue
+                        _cb_checked += 1
+                        if _a_raw is None:
+                            _cb_sides_ok = False
+                            break
+                        _a_open_set = set(_normalize_ticket(t) for t in _a_raw)
+                        _a_verified = _a_exp.intersection(_a_open_set)
+                        # All expected positions must be verified open on broker
+                        if len(_a_verified) < len(_a_exp):
+                            _cb_sides_ok = False
+                            break
+                    if _cb_sides_ok and _cb_checked > 0:
+                        _revived = True
+                        _prev_reason = session.get("panic_stop_reason", "")
+                        print(f"[SESSION-REVIVE] sid={sid[:8]}: all expected positions verified open on broker across all sides! "
+                              f"Auto-resuming session from paused to active (clearing pause: {_prev_reason}).")
+                        _log_event(sid, None, "session_auto_resumed",
+                                   f"Auto-resumed from temporary pause: {_prev_reason}")
+                        try:
+                            _resume_msg = (
+                                f"🟢 <b>HEDGE SESSION AUTO-RESUMED</b>: sid={sid[:8]}\n"
+                                f"All expected position(s) verified open on broker.\n"
+                                f"Temporary pause cleared ({_prev_reason}). Resuming active monitor."
+                            )
+                            _send_telegram(_resume_msg)
+                        except Exception:
+                            pass
+
                 if _revived:
                     session["status"] = "active"
                     session["action"] = "monitor"
@@ -9384,8 +9426,8 @@ def _run_hedge_monitor_all():
             _hm_strat_id = session.get("strategy_id")
             if _hm_strat_id:
                 _hm_strat = strategies.get(_hm_strat_id)
-                if _hm_strat and (not _hm_strat.get("running", False) or not _hm_strat.get("enabled", True)):
-                    continue  # Strategy stopped or disabled — don't run hedge monitor
+                if not _hm_strat or not _hm_strat.get("running", False) or not _hm_strat.get("enabled", True):
+                    continue  # Strategy deleted, stopped or disabled — don't run hedge monitor
 
             # Note: imported sessions are NOT skipped — they need hedge monitoring too.
             # _normalize_ticket handles any ticket format differences.
@@ -10513,8 +10555,8 @@ def _run_hedge_monitor_all():
                                 f"Detected {len(missing_real)} missing position(s) out of {len(expected_open)} expected.\n"
                                 f"Broker currently shows {len(ea_open_tickets)} position(s).\n"
                                 f"Reason: {reason}.\n"
-                                f"PAUSING session sid={sid[:8]} to prevent unauthorized rollback liquidation.\n"
-                                f"Manual inspection required."
+                                f"TEMPORARILY PAUSING session sid={sid[:8]} to prevent unauthorized rollback liquidation.\n"
+                                f"Session will auto-resume once positions are verified on broker."
                             )
                             app.logger.error(
                                 "[HEDGE-MON] PANIC CIRCUIT BREAKER for %s sid=%s: %d/%d missing tickets (%s). "

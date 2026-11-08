@@ -239,6 +239,7 @@ class IForexAccount:
         self._poll_thread = None
         self._pos_sync_thread = None
         self._lock = threading.RLock()
+        self._empty_deal_reads = 0
 
         # Position persistence file
         self.positions_file = os.path.join(
@@ -654,6 +655,29 @@ class IForexAccount:
             if deals is None:
                 logger.warning("[%s] Browser position sync: session expired or login required", self.account_id)
                 return 0
+
+            # ── PARTIAL-READ DROP GUARD ──
+            # If the broker previously had positions (> 0), but this sync returned 0 deals:
+            # this often happens when the DOM rows haven't finished rendering in the browser
+            # or during a transient session hiccup. Do NOT immediately wipe all open positions!
+            # Require at least 2 consecutive confirmed zero-reads before accepting that all positions were closed.
+            prev_count = len(self._open_orders)
+            if len(deals) == 0 and prev_count > 0:
+                self._empty_deal_reads = getattr(self, "_empty_deal_reads", 0) + 1
+                if self._empty_deal_reads < 2:
+                    logger.warning(
+                        "[%s] Browser position sync: DROP GUARD triggered — prev=%d positions, now=0 positions (poll %d/2). "
+                        "Skipping position wipe on transient zero-read to prevent false cascade.",
+                        self.account_id, prev_count, self._empty_deal_reads
+                    )
+                    return 0
+                logger.info(
+                    "[%s] Browser position sync: 0 positions confirmed over %d polls — proceeding with update",
+                    self.account_id, self._empty_deal_reads
+                )
+            else:
+                self._empty_deal_reads = 0
+
             logger.info("[%s] Browser position sync: got %d open deal(s) from broker", self.account_id, len(deals))
 
             # Update summary (balance, equity, etc.) if available

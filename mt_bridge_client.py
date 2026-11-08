@@ -1370,6 +1370,14 @@ class MtBridgeManager:
                     continue
                 sides = session.get("sides", {})
 
+                # Skip sessions whose parent strategy was deleted or is disabled/stopped
+                strat_id = session.get("strategy_id")
+                if strat_id:
+                    strats = self.dd.get("strategies", {})
+                    strat = strats.get(strat_id)
+                    if not strat or not strat.get("running", False) or not strat.get("enabled", True):
+                        continue
+
                 action = session.get("action", "open")
 
                 # ── Pre-subscribe all session symbols for connected accounts ───
